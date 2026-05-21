@@ -326,7 +326,10 @@ func TestResolver_SessionFallbackBoundedByCap(t *testing.T) {
 
 	// Register 1500 session attributions. The bound is 1024, so some
 	// entries will be evicted — but the map size must never exceed 1024.
-	lr := r.(*lockResolver)
+	lr, ok := r.(*lockResolver)
+	if !ok {
+		t.Fatalf("NewResolver returned %T, want *lockResolver", r)
+	}
 	for i := 0; i < 1500; i++ {
 		e := &Event{SessionID: uuid.New(), AgentName: "claude", ActionType: ActionFileRead}
 		_ = e.SetPayload(FileReadPayload{Path: filepath.Join(f.worktrees["foo"], "x")})

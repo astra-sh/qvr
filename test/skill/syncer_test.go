@@ -199,10 +199,10 @@ func TestPull_Divergence(t *testing.T) {
 	// Local commits in the original worktree WITHOUT pulling first → diverge.
 	localFile := filepath.Join(entry.Worktree, entry.Path, "SKILL.md")
 	_ = os.WriteFile(localFile, []byte("local-only"), 0o644)
-	if _, err := s.Push(context.Background(), entry, skill.PushOptions{Message: "local"}); err == nil {
-		// Push may fail due to non-FF; that's fine — either outcome still leaves
-		// the worktree with a local commit that diverges from origin.
-	}
+	// Push may fail due to non-FF; that's fine — either outcome still leaves
+	// the worktree with a local commit that diverges from origin, which is
+	// what the subsequent Pull is meant to detect.
+	_, _ = s.Push(context.Background(), entry, skill.PushOptions{Message: "local"})
 
 	_, err := s.Pull(context.Background(), entry)
 	if !errors.Is(err, skill.ErrDivergence) {

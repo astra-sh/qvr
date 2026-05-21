@@ -398,18 +398,18 @@ func countCommits(repo *gogit.Repository, from, base plumbing.Hash) (int, error)
 	count := 0
 	err = commits.ForEach(func(c *object.Commit) error {
 		if _, ok := baseReach[c.Hash]; ok {
-			return storerStop
+			return errStop
 		}
 		count++
 		return nil
 	})
-	if err != nil && !errors.Is(err, storerStop) {
+	if err != nil && !errors.Is(err, errStop) {
 		return 0, err
 	}
 	return count, nil
 }
 
-var storerStop = errors.New("stop") //nolint:errname // sentinel for ForEach early-exit
+var errStop = errors.New("stop")
 
 // isAncestorCommit returns true if `ancestor` is an ancestor of `head`.
 func isAncestorCommit(repo *gogit.Repository, ancestor, head plumbing.Hash) (bool, error) {
@@ -424,11 +424,11 @@ func isAncestorCommit(repo *gogit.Repository, ancestor, head plumbing.Hash) (boo
 	err = iter.ForEach(func(c *object.Commit) error {
 		if c.Hash == ancestor {
 			found = true
-			return storerStop
+			return errStop
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, storerStop) {
+	if err != nil && !errors.Is(err, errStop) {
 		return false, err
 	}
 	return found, nil

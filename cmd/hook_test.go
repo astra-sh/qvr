@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -319,8 +318,3 @@ func TestStoreSessionAdapter_NilSelfAuditRejected(t *testing.T) {
 	}
 }
 
-// runHookCmd helpers need a way to reset flag state between calls. The
-// single shared rootCmd accumulates flag state and subcommand output
-// redirection across tests; ensure tests run sequentially via this
-// guard.
-var hookTestMu = func() *fmt.Stringer { return nil }

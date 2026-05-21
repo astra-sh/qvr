@@ -86,7 +86,7 @@ func validateSkillName(name string) error {
 		return fmt.Errorf("name must be 1-64 characters")
 	}
 	for _, c := range name {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-') {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
 			return fmt.Errorf("name must contain only lowercase alphanumeric characters and hyphens")
 		}
 	}

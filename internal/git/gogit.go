@@ -268,9 +268,7 @@ func parseLsRemote(r io.Reader) (*RemoteRefInfo, error) {
 		}
 		hash, ref := parts[0], parts[1]
 		// Peeled tag: prefer the commit hash over the tag-object hash.
-		if strings.HasSuffix(ref, "^{}") {
-			ref = strings.TrimSuffix(ref, "^{}")
-		}
+		ref = strings.TrimSuffix(ref, "^{}")
 		result.Refs[ref] = hash
 	}
 	if err := scanner.Err(); err != nil {
