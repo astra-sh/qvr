@@ -3,6 +3,7 @@ package skill
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/raks097/quiver/internal/canonical"
 	"github.com/raks097/quiver/internal/model"
@@ -62,14 +63,25 @@ func VerifySingleEntry(entry *model.LockEntry) VerifyEntryResult {
 		res.Message = fmt.Sprintf("worktree not found: %v", err)
 		return res
 	}
-	id, err := canonical.HashSubtree(entry.Worktree, entry.Path)
+	// SubtreeHash must come from the *on-disk* worktree, not the git tree
+	// at HEAD — otherwise tampering with the checked-out files after install
+	// is invisible (the git tree object never changes when working-copy
+	// bytes do). The disk hasher mirrors HashSubtree's algorithm so an
+	// untampered checkout produces the same digest the installer recorded.
+	diskHash, err := canonical.HashSubtreeFromDisk(filepath.Join(entry.Worktree, entry.Path))
 	if err != nil {
 		res.Status = VerifyStatusFailed
 		res.Message = err.Error()
 		return res
 	}
-	res.SubtreeHash = id.SubtreeHash
+	res.SubtreeHash = diskHash
 
+	// TreeSHA / CommitSHA still come from the git tree at HEAD — they
+	// describe the upstream commit pointer, which is orthogonal to whether
+	// the working copy has been mutated. Soft-fail (warning, not failure)
+	// when the git side can't be read: a missing .git directory in the
+	// worktree shouldn't mask a working-copy tamper detected above.
+	gitID, gitErr := canonical.HashSubtree(entry.Worktree, entry.Path)
 	if entry.Verification == nil || entry.Verification.SubtreeHash == "" {
 		res.Status = VerifyStatusUnverified
 		res.Message = "no recorded subtree hash (legacy entry — run `qvr lock upgrade`)"
@@ -78,14 +90,16 @@ func VerifySingleEntry(entry *model.LockEntry) VerifyEntryResult {
 
 	rec := entry.Verification
 	var drift []VerifyDriftItem
-	if rec.SubtreeHash != id.SubtreeHash {
-		drift = append(drift, VerifyDriftItem{Field: "subtreeHash", Expected: rec.SubtreeHash, Actual: id.SubtreeHash})
+	if rec.SubtreeHash != diskHash {
+		drift = append(drift, VerifyDriftItem{Field: "subtreeHash", Expected: rec.SubtreeHash, Actual: diskHash})
 	}
-	if rec.TreeSHA != "" && rec.TreeSHA != id.TreeSHA {
-		drift = append(drift, VerifyDriftItem{Field: "treeSHA", Expected: rec.TreeSHA, Actual: id.TreeSHA})
-	}
-	if rec.CommitSHA != "" && rec.CommitSHA != id.CommitSHA {
-		drift = append(drift, VerifyDriftItem{Field: "commitSHA", Expected: rec.CommitSHA, Actual: id.CommitSHA})
+	if gitErr == nil {
+		if rec.TreeSHA != "" && rec.TreeSHA != gitID.TreeSHA {
+			drift = append(drift, VerifyDriftItem{Field: "treeSHA", Expected: rec.TreeSHA, Actual: gitID.TreeSHA})
+		}
+		if rec.CommitSHA != "" && rec.CommitSHA != gitID.CommitSHA {
+			drift = append(drift, VerifyDriftItem{Field: "commitSHA", Expected: rec.CommitSHA, Actual: gitID.CommitSHA})
+		}
 	}
 	if len(drift) == 0 {
 		res.Status = VerifyStatusOK

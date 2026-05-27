@@ -145,6 +145,73 @@ func TestVerifySingleEntry_missingWorktree(t *testing.T) {
 	}
 }
 
+// Regression for #18: a worktree whose checked-out bytes are modified
+// post-install must report drift, even though the underlying git tree
+// at HEAD is unchanged. Pre-fix the verifier compared the recorded hash
+// against a re-derivation from the same static git tree — so any disk
+// edit (or even rm) would silently report "ok".
+func TestVerifySingleEntry_driftOnDiskTamperWithStaticGitTree(t *testing.T) {
+	repo := makeVerifierTestRepo(t, "---\nname: foo\n---\nbody\n")
+	entry := &model.LockEntry{
+		Name:     "foo",
+		Worktree: repo,
+		Path:     "skills/foo",
+		Source:   "registry",
+	}
+	entry.Verification = skill.PopulateVerification(entry, model.ProvenanceRef{})
+	if entry.Verification == nil || entry.Verification.SubtreeHash == "" {
+		t.Fatalf("PopulateVerification did not record a hash: %+v", entry.Verification)
+	}
+
+	// Mutate on disk without committing — git tree at HEAD is unchanged.
+	skillFile := filepath.Join(repo, "skills/foo/SKILL.md")
+	f, err := os.OpenFile(skillFile, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open append: %v", err)
+	}
+	if _, err := f.WriteString("\nINJECT_FROM_ATTACKER\n"); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	_ = f.Close()
+
+	got := skill.VerifySingleEntry(entry)
+	if got.Status != skill.VerifyStatusDrift {
+		t.Errorf("Status = %q, want %q (drift list = %+v)", got.Status, skill.VerifyStatusDrift, got.Drift)
+	}
+	foundSubtreeDrift := false
+	for _, d := range got.Drift {
+		if d.Field == "subtreeHash" {
+			foundSubtreeDrift = true
+		}
+	}
+	if !foundSubtreeDrift {
+		t.Errorf("expected subtreeHash drift after on-disk append, got %+v", got.Drift)
+	}
+}
+
+// Regression for #18: deleting the sole file in a skill's subtree must
+// produce a non-"ok" status. Pre-fix this silently passed because the
+// verifier hashed the git tree, not the disk.
+func TestVerifySingleEntry_failedWhenAllContentDeleted(t *testing.T) {
+	repo := makeVerifierTestRepo(t, "x\n")
+	entry := &model.LockEntry{
+		Name:     "foo",
+		Worktree: repo,
+		Path:     "skills/foo",
+		Source:   "registry",
+	}
+	entry.Verification = skill.PopulateVerification(entry, model.ProvenanceRef{})
+
+	if err := os.Remove(filepath.Join(repo, "skills/foo/SKILL.md")); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+
+	got := skill.VerifySingleEntry(entry)
+	if got.Status == skill.VerifyStatusOK {
+		t.Errorf("Status reported ok after sole file deletion — drift invisible")
+	}
+}
+
 func TestVerifySingleEntry_linkSkipped(t *testing.T) {
 	entry := &model.LockEntry{
 		Name:       "foo",
