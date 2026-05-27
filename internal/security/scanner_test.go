@@ -160,7 +160,7 @@ func TestNewRegistersBuiltinChecks(t *testing.T) {
 		[]string{
 			"prompt_injection", "secrets", "unicode", "permissions",
 			"patterns", "mcp_tool_poisoning", "mcp_least_privilege",
-			"signatures", "dependencies",
+			"signatures", "dependencies", "coverage",
 		},
 		checks)
 }
