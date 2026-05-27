@@ -195,6 +195,31 @@ func runLockVerify(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// failureCategories renders only the non-zero failing counts so the error
+// message names what actually broke. "drift=0, missing=1" reads cleanly;
+// the old "drift detected" lied when the real cause was a missing worktree
+// or a hash-computation failure.
+func failureCategories(s VerifySummary) string {
+	pairs := []struct {
+		label string
+		count int
+	}{
+		{"drift", s.Drift},
+		{"missing", s.Missing},
+		{"failed", s.Failed},
+	}
+	parts := make([]string, 0, len(pairs))
+	for _, p := range pairs {
+		if p.count > 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", p.label, p.count))
+		}
+	}
+	if len(parts) == 0 {
+		return "no failing entries"
+	}
+	return strings.Join(parts, ", ")
+}
+
 func renderVerifyText(out *VerifyOutput) {
 	for _, r := range out.Entries {
 		switch r.Status {
@@ -220,31 +245,6 @@ func renderVerifyText(out *VerifyOutput) {
 		out.Summary.OK, out.Summary.Drift, out.Summary.Unverified,
 		out.Summary.Missing, out.Summary.Link, out.Summary.Failed,
 	))
-}
-
-// failureCategories renders only the non-zero failing counts so the error
-// message names what actually broke. "drift=0, missing=1" reads cleanly;
-// the old "drift detected" lied when the real cause was a missing worktree
-// or a hash-computation failure.
-func failureCategories(s VerifySummary) string {
-	pairs := []struct {
-		label string
-		count int
-	}{
-		{"drift", s.Drift},
-		{"missing", s.Missing},
-		{"failed", s.Failed},
-	}
-	parts := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		if p.count > 0 {
-			parts = append(parts, fmt.Sprintf("%s=%d", p.label, p.count))
-		}
-	}
-	if len(parts) == 0 {
-		return "no failing entries"
-	}
-	return strings.Join(parts, ", ")
 }
 
 // shortHashLabel renders a hash for terminal output without losing the
