@@ -405,6 +405,7 @@ func (m *Manager) ListSkills(names []string) ([]RegistrySkills, error) {
 type SkillLocation struct {
 	Entry         SkillIndexEntry
 	RegistryName  string
+	RegistryURL   string // canonical clone URL — recorded as supply-chain provenance
 	RepoPath      string
 	DefaultBranch string
 }
@@ -416,7 +417,7 @@ func (m *Manager) FindSkill(skillName string) (*SkillLocation, error) {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
-	for regName := range cfg.Registries {
+	for regName, regCfg := range cfg.Registries {
 		repoPath := RegistryPath(regName)
 		entries, _, err := m.Index(regName, repoPath)
 		if err != nil {
@@ -431,6 +432,7 @@ func (m *Manager) FindSkill(skillName string) (*SkillLocation, error) {
 				return &SkillLocation{
 					Entry:         entry,
 					RegistryName:  regName,
+					RegistryURL:   regCfg.URL,
 					RepoPath:      repoPath,
 					DefaultBranch: defaultBranch,
 				}, nil

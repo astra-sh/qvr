@@ -37,6 +37,11 @@ type InstallRequest struct {
 	ProjectRoot string
 	LockPath    string // optional — DefaultLockPath is used when empty
 	Force       bool   // allow overwriting an existing lock entry of the same name
+	// Frozen pins installs to the lockfile's recorded state. The skill must
+	// already have an entry; its Branch is reused and the computed subtree
+	// hash must match the recorded VerificationRecord.SubtreeHash. Drift or
+	// missing entries are hard errors.
+	Frozen bool
 }
 
 // InstallResult holds the outcome for a single skill install.
@@ -102,6 +107,29 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	}
 	if version == "" {
 		version = resolveDefaultRef(loc)
+	}
+
+	// --frozen pins to the lockfile: the entry must exist and its recorded
+	// Branch/SubtreeHash become the install target. Captured here so the
+	// drift check at the end can re-read the same recorded values.
+	var frozenRef *model.LockEntry
+	if req.Frozen {
+		lp := req.LockPath
+		if lp == "" {
+			lp = model.DefaultLockPath(req.ProjectRoot, quiverHome(), req.Global)
+		}
+		existingLock, lerr := model.ReadLockFile(lp)
+		if lerr != nil {
+			return nil, fmt.Errorf("--frozen requires a readable lock file: %w", lerr)
+		}
+		existing, gerr := existingLock.Get(name)
+		if gerr != nil {
+			return nil, fmt.Errorf("--frozen: skill %q not present in lock file", name)
+		}
+		if existing.Branch != "" {
+			version = existing.Branch
+		}
+		frozenRef = existing
 	}
 
 	// Conflict check: silently swapping the lock entry to a different ref
@@ -199,7 +227,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	if existing, err := lock.Get(name); err == nil {
 		targets = mergeTargets(existing.Targets, req.Targets)
 	}
-	lock.Put(&model.LockEntry{
+	entry := &model.LockEntry{
 		Name:     name,
 		Registry: loc.RegistryName,
 		Path:     loc.Entry.Path,
@@ -208,7 +236,31 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		Worktree: finalPath,
 		Targets:  targets,
 		Global:   req.Global,
+	}
+	entry.Verification = PopulateVerification(entry, model.ProvenanceRef{
+		RegistryName: loc.RegistryName,
+		RegistryURL:  loc.RegistryURL,
+		Ref:          version,
+		Subpath:      loc.Entry.Path,
 	})
+
+	// --frozen drift check: the just-installed worktree must hash to the
+	// same SubtreeHash recorded in the prior lockfile entry. Mismatch
+	// usually means the registry was force-pushed or the recorded entry
+	// itself was tampered with — refuse the install rather than silently
+	// rewriting history.
+	if req.Frozen && frozenRef != nil && frozenRef.Verification != nil && frozenRef.Verification.SubtreeHash != "" {
+		got := ""
+		if entry.Verification != nil {
+			got = entry.Verification.SubtreeHash
+		}
+		if got != frozenRef.Verification.SubtreeHash {
+			return nil, fmt.Errorf("--frozen: subtree hash drift for %s (expected %s, got %s)",
+				name, frozenRef.Verification.SubtreeHash, got)
+		}
+	}
+
+	lock.Put(entry)
 	if err := lock.Write(); err != nil {
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
@@ -249,6 +301,7 @@ func (in *Installer) RestoreAll(req InstallRequest) ([]*InstallResult, error) {
 			Global:      entry.Global,
 			ProjectRoot: req.ProjectRoot,
 			LockPath:    lockPath,
+			Frozen:      req.Frozen,
 		})
 		if err != nil {
 			return out, fmt.Errorf("restore %s: %w", entry.Name, err)
@@ -467,7 +520,7 @@ func (in *Installer) InstallFromSubdir(ctx context.Context, req SubdirInstallReq
 	if existing, err := lock.Get(name); err == nil {
 		targets = mergeTargets(existing.Targets, req.Targets)
 	}
-	lock.Put(&model.LockEntry{
+	entry := &model.LockEntry{
 		Name:     name,
 		Registry: slug,
 		RepoURL:  cleanURL,
@@ -481,7 +534,14 @@ func (in *Installer) InstallFromSubdir(ctx context.Context, req SubdirInstallReq
 		// so `qvr doctor` doesn't expect a matching config.Registries entry
 		// and `qvr outdated` reaches for RepoURL instead.
 		Source: "subdir",
+	}
+	entry.Verification = PopulateVerification(entry, model.ProvenanceRef{
+		RegistryName: slug,
+		RegistryURL:  cleanURL,
+		Ref:          req.Ref,
+		Subpath:      subpath,
 	})
+	lock.Put(entry)
 	if err := lock.Write(); err != nil {
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
@@ -730,6 +790,10 @@ func ApplySwitch(entry *model.LockEntry, projectRoot string) error {
 			return fmt.Errorf("refresh symlink %s: %w", target, err)
 		}
 	}
+	// Ref change altered the worktree contents; the recorded subtree hash
+	// and git refs no longer match reality. Refresh them so the lockfile
+	// reflects the new state.
+	RefreshVerification(entry)
 	return nil
 }
 

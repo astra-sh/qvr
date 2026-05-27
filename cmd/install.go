@@ -16,6 +16,7 @@ var (
 	installTargets []string
 	installGlobal  bool
 	installForce   bool
+	installFrozen  bool
 )
 
 var installCmd = &cobra.Command{
@@ -33,6 +34,8 @@ func init() {
 		"install into the user-global agent directory")
 	installCmd.Flags().BoolVar(&installForce, "force", false,
 		"allow replacing an existing lock entry at a different ref (otherwise refused)")
+	installCmd.Flags().BoolVar(&installFrozen, "frozen", false,
+		"only install skills already in the lock file; refuse any drift from the recorded subtree hash")
 	rootCmd.AddCommand(installCmd)
 }
 
@@ -63,6 +66,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		results, err := installer.RestoreAll(skill.InstallRequest{
 			ProjectRoot: projectRoot,
 			Global:      installGlobal,
+			Frozen:      installFrozen,
 		})
 		if err != nil {
 			return fmt.Errorf("restore: %w", err)
@@ -89,6 +93,7 @@ func runInstall(cmd *cobra.Command, args []string) error {
 			Global:      installGlobal,
 			ProjectRoot: projectRoot,
 			Force:       installForce,
+			Frozen:      installFrozen,
 		})
 		if err != nil {
 			// Emit any successful installs before propagating the failure so

@@ -196,7 +196,7 @@ func TestResolver_NestedSkillsMostSpecificWins(t *testing.T) {
 		"inner": {Name: "inner", Worktree: innerDir},
 	}}
 	buf, _ := json.Marshal(lf)
-	lockPath := filepath.Join(root, "qvr.lock.json")
+	lockPath := filepath.Join(root, model.LockFileName)
 	_ = os.WriteFile(lockPath, buf, 0o644)
 
 	r, _ := NewResolver(lockPath)
@@ -230,7 +230,7 @@ func TestResolver_FollowsSymlinkedPath(t *testing.T) {
 		"foo": {Name: "foo", Worktree: real},
 	}}
 	buf, _ := json.Marshal(lf)
-	lockPath := filepath.Join(root, "qvr.lock.json")
+	lockPath := filepath.Join(root, model.LockFileName)
 	_ = os.WriteFile(lockPath, buf, 0o644)
 
 	r, _ := NewResolver(lockPath)

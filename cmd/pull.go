@@ -77,6 +77,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 			break
 		}
 		entry.Commit = hash
+		skill.RefreshVerification(entry)
 		lock.Put(entry)
 		printer.Success(fmt.Sprintf("%s: updated to %s", name, shortHash(hash)))
 		results = append(results, map[string]string{"name": name, "status": "updated", "commit": hash})

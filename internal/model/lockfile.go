@@ -11,10 +11,15 @@ import (
 )
 
 // LockFileVersion is the current lock file schema version.
-const LockFileVersion = 2
+//
+// v3 adds VerificationRecord per entry — the supply-chain provenance block
+// (subtree hash, scan/eval/signature/attestation refs, trust status) that
+// later pipeline phases write into. v2 files load transparently; the bump
+// happens on the next Write().
+const LockFileVersion = 3
 
 // LockFileName is the default lock file name.
-const LockFileName = "qvr.lock.json"
+const LockFileName = "qvr.lock"
 
 var (
 	ErrLockNotFound     = errors.New("lock file not found")
@@ -50,6 +55,11 @@ type LockEntry struct {
 	// `qvr disable` flips this to true and tears down symlinks; `qvr enable`
 	// reverses both.
 	Disabled bool `json:"disabled,omitempty"`
+	// Verification carries the supply-chain provenance block. nil for
+	// entries written by pre-v3 binaries (and for fresh v3 installs that
+	// haven't yet been hashed). Populated post-install by the installer
+	// and refreshed by `qvr lock verify` / `qvr lock upgrade`.
+	Verification *VerificationRecord `json:"verification,omitempty"`
 }
 
 // LockFile is the on-disk record of installed skills.
