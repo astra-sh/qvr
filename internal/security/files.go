@@ -26,19 +26,37 @@ const binaryProbeBytes = 512
 // [maxScanBytes]; check those flags before searching Content. The Path
 // uses forward slashes regardless of host OS so findings render
 // identically on Windows and Unix.
+//
+// Symlinks carry IsSymlink=true and never have Content populated — see
+// the comment in [WalkSkill]. SymlinkTarget is the literal link
+// target as stored on disk (without resolution). SymlinkBroken is set
+// when the target cannot be Stat'd (dangling link or symlink cycle);
+// callers use it to surface those anomalies separately from regular
+// executable-bit findings (issue #40).
 type FileEntry struct {
-	Path      string      `json:"path"`
-	Mode      fs.FileMode `json:"mode"`
-	Size      int64       `json:"size"`
-	Content   string      `json:"-"`
-	IsBinary  bool        `json:"is_binary"`
-	Truncated bool        `json:"truncated,omitempty"`
+	Path          string      `json:"path"`
+	Mode          fs.FileMode `json:"mode"`
+	Size          int64       `json:"size"`
+	Content       string      `json:"-"`
+	IsBinary      bool        `json:"is_binary"`
+	Truncated     bool        `json:"truncated,omitempty"`
+	IsSymlink     bool        `json:"is_symlink,omitempty"`
+	SymlinkTarget string      `json:"symlink_target,omitempty"`
+	SymlinkBroken bool        `json:"symlink_broken,omitempty"`
 }
 
 // Executable reports whether any executable bit is set on the file.
 // The scanner never runs anything; this exists so the permissions
 // check can flag executables for human review.
+//
+// Symlinks always return false: on macOS/Linux, lstat reports the
+// link's own mode (canonically 0o755 / 0o777), which says nothing
+// about whether the target is executable. Reporting a symlink as
+// executable on that basis is a documented false positive (#40).
 func (f FileEntry) Executable() bool {
+	if f.IsSymlink {
+		return false
+	}
 	return f.Mode&0o111 != 0
 }
 
@@ -107,6 +125,17 @@ func WalkSkill(dir string) ([]FileEntry, error) {
 		// Don't read symlinks; their content is the target path which
 		// we'd misattribute as skill content.
 		if fi.Mode()&os.ModeSymlink != 0 {
+			entry.IsSymlink = true
+			if target, err := os.Readlink(path); err == nil {
+				entry.SymlinkTarget = target
+			}
+			if _, err := os.Stat(path); err != nil {
+				// Stat follows symlinks, so an error here means the
+				// target is missing or there's a cycle. Both belong on
+				// the report (issue #40) — the permissions check
+				// surfaces them as info findings.
+				entry.SymlinkBroken = true
+			}
 			entries = append(entries, entry)
 			return nil
 		}
