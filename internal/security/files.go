@@ -1,19 +1,71 @@
 package security
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"unicode/utf8"
+
+	"github.com/raks097/quiver/pkg/secretpatterns"
 )
 
-// maxScanBytes is the per-file content cap. Files larger than this are
-// recorded as FileEntry{Truncated: true} with empty Content so the
-// permissions check can still flag oversize binaries without OOMing
-// the scanner on a stray model checkpoint someone shipped in a skill.
-const maxScanBytes = 1 << 20 // 1 MiB
+// DefaultMaxScanBytes is the per-file content cap used by [WalkSkill]
+// when no caller override is in effect.
+//
+// Issue #44: the original 1 MiB ceiling silently broke the scanner's
+// "every file is read as a string" premise — a single oversized blob
+// inside a skill turned every detector blind. We raise the default to
+// 10 MiB (large enough for vendored bundles, fixture corpora, and
+// transcripts) and stream-scan files above the cap for credential
+// prefixes so the most leak-prone shape still surfaces even when the
+// full content was skipped.
+const DefaultMaxScanBytes int64 = 10 << 20 // 10 MiB
+
+// maxScanBytes is the live cap. Callers override it with
+// [SetMaxScanBytes] (covers the `--max-file-bytes` CLI flag and the
+// `QVR_MAX_FILE_BYTES` env). A value of 0 disables the cap entirely
+// — the scanner reads every file regardless of size.
+var maxScanBytes int64 = DefaultMaxScanBytes
+
+// SetMaxScanBytes overrides the per-file cap. Pass 0 to disable.
+// Negative values are clamped to 0. Returns the previous cap so test
+// callers can restore it cleanly.
+func SetMaxScanBytes(n int64) int64 {
+	if n < 0 {
+		n = 0
+	}
+	prev := maxScanBytes
+	maxScanBytes = n
+	return prev
+}
+
+// CurrentMaxScanBytes returns the cap currently in effect. Exported
+// so the coverage check can include the exact byte count in its
+// finding message regardless of overrides.
+func CurrentMaxScanBytes() int64 { return maxScanBytes }
+
+// init reads the QVR_MAX_FILE_BYTES env at process start so users can
+// raise/disable the cap without a CLI flag. The flag still wins —
+// cmd/scan.go calls SetMaxScanBytes after parsing args.
+func init() {
+	if env := os.Getenv("QVR_MAX_FILE_BYTES"); env != "" {
+		if n, err := strconv.ParseInt(env, 10, 64); err == nil {
+			SetMaxScanBytes(n)
+		}
+	}
+}
+
+// streamScanHardLimit is the absolute byte ceiling on the streaming
+// credential-prefix scan we perform on oversize files. Anything above
+// this we stop reading entirely to avoid eating an attacker's 100 GiB
+// blob. Reviewer still sees the coverage warning attributing the gap.
+const streamScanHardLimit int64 = 1 << 30 // 1 GiB
 
 // binaryProbeBytes is how many leading bytes WalkSkill inspects to
 // decide whether a file is binary. UTF-8 validity over this prefix is
@@ -43,6 +95,19 @@ type FileEntry struct {
 	IsSymlink     bool        `json:"is_symlink,omitempty"`
 	SymlinkTarget string      `json:"symlink_target,omitempty"`
 	SymlinkBroken bool        `json:"symlink_broken,omitempty"`
+	// OversizeSecretHits carries credential-prefix matches found by
+	// the streaming scan of files above the per-file cap. The full
+	// content was skipped, so these are the only secrets findings the
+	// scanner has for that file. Empty for in-cap files (where the
+	// regular secrets check sees full content). Issue #44.
+	OversizeSecretHits []OversizeSecretHit `json:"oversize_secret_hits,omitempty"`
+}
+
+// OversizeSecretHit is one credential-prefix match recovered by
+// streaming an oversize file. Line is 1-indexed.
+type OversizeSecretHit struct {
+	PatternName string `json:"pattern"`
+	Line        int    `json:"line"`
 }
 
 // Executable reports whether any executable bit is set on the file.
@@ -140,8 +205,16 @@ func WalkSkill(dir string) ([]FileEntry, error) {
 			return nil
 		}
 
-		if fi.Size() > maxScanBytes {
+		if maxScanBytes > 0 && fi.Size() > maxScanBytes {
 			entry.Truncated = true
+			// Stream the file looking for credential prefixes only.
+			// Other detectors (patterns, unicode, signatures) still
+			// skip the file — the coverage check tells the user — but
+			// the highest-stakes leak class (secrets) at least cannot
+			// hide behind a 1-byte-over-cap pad. Issue #44.
+			if hits, err := streamScanForSecrets(path); err == nil {
+				entry.OversizeSecretHits = hits
+			}
 			entries = append(entries, entry)
 			return nil
 		}
@@ -166,6 +239,57 @@ func WalkSkill(dir string) ([]FileEntry, error) {
 
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
 	return entries, nil
+}
+
+// streamScanForSecrets opens path and runs the high-precision
+// credential-prefix regexes line-by-line, returning one hit per
+// (pattern, line) match. Stops reading after [streamScanHardLimit]
+// bytes to avoid OOM on adversarial inputs.
+//
+// We only scan against [secretpatterns.CredentialPrefixes] (the
+// vendor-anchored shapes — AWS, GitHub, OpenAI, etc.); the looser
+// assignment-shape family is omitted to keep oversize-file false-
+// positives down. Issue #44.
+func streamScanForSecrets(path string) ([]OversizeSecretHit, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	type compiledPat struct {
+		name string
+		re   *regexp.Regexp
+	}
+	compiled := make([]compiledPat, 0, 16)
+	for _, p := range secretpatterns.CredentialPrefixes() {
+		r, err := p.Compile()
+		if err != nil {
+			continue
+		}
+		compiled = append(compiled, compiledPat{name: p.Name, re: r})
+	}
+
+	// Use a Scanner with a generous buffer so a single very long line
+	// (a one-line minified bundle is the canonical case) doesn't
+	// abort the scan with bufio.ErrTooLong.
+	scanner := bufio.NewScanner(io.LimitReader(f, streamScanHardLimit))
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+
+	var hits []OversizeSecretHit
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		line := scanner.Text()
+		for _, p := range compiled {
+			if p.re.MatchString(line) {
+				hits = append(hits, OversizeSecretHit{PatternName: p.name, Line: lineNum})
+			}
+		}
+	}
+	// Ignore scanner.Err() — partial coverage on a damaged file is
+	// better than no coverage.
+	return hits, nil
 }
 
 func isBinary(content []byte) bool {

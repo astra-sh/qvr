@@ -41,13 +41,18 @@ func (coverageCheck) Run(_ context.Context, _ *model.Skill, files []FileEntry) [
 	for _, f := range files {
 		switch {
 		case f.Truncated:
+			// Issue #44: previously SeverityInfo, which left the
+			// default `--fail-on=error` blind to oversize gaps. Now
+			// Warning so `--fail-on warning` gates on it for CI users
+			// who want strict coverage. Default fail-on=error still
+			// passes — the cap is configurable.
 			findings = append(findings, Finding{
 				Check:       CoverageCheckName,
 				RuleID:      "COV_OVERSIZE",
-				Severity:    SeverityInfo,
+				Severity:    SeverityWarning,
 				File:        f.Path,
-				Message:     fmt.Sprintf("file %s skipped: size %d B exceeds the %d B per-file scan cap; secrets/patterns/unicode/permissions did not read it", f.Path, f.Size, maxScanBytes),
-				Remediation: "split the file into smaller pieces, or scan its contents independently before trusting this report",
+				Message:     fmt.Sprintf("file %s skipped: size %d B exceeds the %d B per-file scan cap; patterns/unicode/permissions did not read it (a streaming credential scan still ran)", f.Path, f.Size, CurrentMaxScanBytes()),
+				Remediation: "raise the cap with --max-file-bytes <N> (0 to disable), set QVR_MAX_FILE_BYTES, split the file, or audit it independently",
 			})
 		case f.IsBinary:
 			findings = append(findings, Finding{

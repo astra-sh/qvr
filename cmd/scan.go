@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	scanSeverity string
-	scanFailOn   string
-	scanGlobal   bool
-	scanFormat   string
+	scanSeverity     string
+	scanFailOn       string
+	scanGlobal       bool
+	scanFormat       string
+	scanMaxFileBytes int64 = -1 // -1 = no override; use security default
 )
 
 var scanCmd = &cobra.Command{
@@ -46,6 +47,8 @@ func init() {
 		"when resolving a positional as an installed skill name, read the user-global lock")
 	scanCmd.Flags().StringVar(&scanFormat, "format", "",
 		"report format override (text|json|sarif|markdown); takes precedence over --output")
+	scanCmd.Flags().Int64Var(&scanMaxFileBytes, "max-file-bytes", -1,
+		"per-file content cap in bytes (0 disables the cap); overrides QVR_MAX_FILE_BYTES and the 10 MiB default")
 	rootCmd.AddCommand(scanCmd)
 }
 
@@ -72,6 +75,14 @@ func runScan(cmd *cobra.Command, args []string) error {
 		// ok
 	default:
 		return fmt.Errorf("--format: invalid value %q: expected one of text, json, sarif, markdown", scanFormat)
+	}
+
+	// `--max-file-bytes` overrides QVR_MAX_FILE_BYTES (which security
+	// init() already applied). -1 is the sentinel "no flag given" so
+	// the env / default wins; 0 disables the cap entirely.
+	if scanMaxFileBytes >= 0 {
+		prev := security.SetMaxScanBytes(scanMaxFileBytes)
+		defer security.SetMaxScanBytes(prev)
 	}
 
 	// External inputs (git URL, zip archive, single SKILL.md) get

@@ -56,8 +56,12 @@ func TestWalkSkillDetectsBinary(t *testing.T) {
 }
 
 func TestWalkSkillTruncatesOversizeFiles(t *testing.T) {
+	// Tiny cap so the fixture stays small (default is 10 MiB).
+	prev := SetMaxScanBytes(64)
+	t.Cleanup(func() { SetMaxScanBytes(prev) })
+
 	dir := t.TempDir()
-	big := strings.Repeat("a", maxScanBytes+1)
+	big := strings.Repeat("a", int(maxScanBytes+1))
 	mustWriteFile(t, dir, "huge.txt", big)
 	mustWriteFile(t, dir, "SKILL.md", "# x\n")
 

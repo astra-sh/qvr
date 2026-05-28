@@ -12,7 +12,9 @@ import (
 // TestCoverageReportsOversizeFiles is the regression guard for
 // issue #34: padding any file over the 1 MiB cap previously turned
 // every detector blind without surfacing the gap. The coverage check
-// must emit at least an info finding for every oversize file.
+// must emit at least a warning finding for every oversize file
+// (severity raised from info per issue #44 so --fail-on warning gates
+// on it).
 func TestCoverageReportsOversizeFiles(t *testing.T) {
 	files := []FileEntry{
 		{Path: "tiny.md", Content: "hi\n", Size: 3},
@@ -21,7 +23,7 @@ func TestCoverageReportsOversizeFiles(t *testing.T) {
 	findings := NewCoverageCheck().Run(context.Background(), nil, files)
 	require.Len(t, findings, 1, "exactly one finding (the oversize file)")
 	assert.Equal(t, "COV_OVERSIZE", findings[0].RuleID)
-	assert.Equal(t, SeverityInfo, findings[0].Severity)
+	assert.Equal(t, SeverityWarning, findings[0].Severity)
 	assert.Equal(t, "huge.txt", findings[0].File)
 	assert.Contains(t, findings[0].Message, "exceeds the")
 }
@@ -45,10 +47,15 @@ func TestCoverageNoFindingsOnCleanScan(t *testing.T) {
 // walking a real temp dir with a >1MiB file must surface a finding,
 // not return a quiet "scan clean".
 func TestCoverageOversizeFileShowsInScanResult(t *testing.T) {
+	// Use a tiny cap so the test fixture stays small and fast; the
+	// real default is 10 MiB and we don't need to generate that much
+	// data just to prove the oversize path fires.
+	prev := SetMaxScanBytes(64)
+	t.Cleanup(func() { SetMaxScanBytes(prev) })
+
 	dir := t.TempDir()
 	mustWriteFile(t, dir, "SKILL.md", "---\nname: huge\ndescription: oversize regression\n---\n")
-	// padding > maxScanBytes
-	mustWriteFile(t, dir, "huge.txt", strings.Repeat("a", maxScanBytes+1))
+	mustWriteFile(t, dir, "huge.txt", strings.Repeat("a", int(maxScanBytes+1)))
 
 	res, err := New().Scan(context.Background(), nil, dir)
 	require.NoError(t, err)
