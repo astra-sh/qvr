@@ -119,9 +119,26 @@ func ToSARIF(result *ScanResult) SarifReport {
 					},
 				},
 			},
+			// SARIF's `level` only has {error, warning, note, none},
+			// so critical and error both collapse to "error" on the
+			// wire. We carry the original qvr severity in two places
+			// so the distinction survives a round-trip:
+			//
+			//   - properties.severity: the literal qvr severity name
+			//     (matches the JSON wire shape)
+			//   - properties.problem.severity: the convention GitHub
+			//     code-scanning uses to colour-code rows
+			//
+			// Issue #41 — without this, 10 critical findings and 9
+			// error findings appeared identical in the dashboard.
 			Properties: map[string]any{
 				"check":      f.Check,
+				"category":   string(f.Category),
 				"confidence": f.Confidence,
+				"severity":   string(f.Severity),
+				"problem": map[string]any{
+					"severity": sarifProblemSeverity(f.Severity),
+				},
 			},
 		})
 	}
@@ -167,6 +184,9 @@ func sarifRegion(line int) *SarifRegion {
 // SARIF doesn't have a "critical" level; we collapse critical+error
 // → error and use `level: none` for info findings (the SARIF idiom
 // for "noteworthy but not a defect").
+//
+// The lossy collapse is recovered in result.properties.severity and
+// .properties.problem.severity (issue #41).
 func sarifLevel(s Severity) string {
 	switch s {
 	case SeverityCritical, SeverityError:
@@ -177,4 +197,23 @@ func sarifLevel(s Severity) string {
 		return "note"
 	}
 	return "none"
+}
+
+// sarifProblemSeverity is the value GitHub code-scanning consumes
+// to colour-code findings. It accepts {critical, high, medium,
+// low, warning, recommendation, error, note}. We map qvr severity
+// to the closest match so a critical credential leak surfaces as
+// "critical" in the dashboard, not "error".
+func sarifProblemSeverity(s Severity) string {
+	switch s {
+	case SeverityCritical:
+		return "critical"
+	case SeverityError:
+		return "high"
+	case SeverityWarning:
+		return "medium"
+	case SeverityInfo:
+		return "low"
+	}
+	return "low"
 }

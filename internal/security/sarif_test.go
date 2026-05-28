@@ -50,6 +50,63 @@ func TestToSARIF_RulesDedupedAcrossResults(t *testing.T) {
 	assert.Len(t, sarif.Runs[0].Results, 2)
 }
 
+// TestSARIF_SeverityPreservedInProperties is the regression guard
+// for issue #41. SARIF's `level` only has three values, so critical
+// and error both flatten to "error" — properties.severity and
+// properties.problem.severity carry the qvr ladder so a code-scanning
+// UI can keep them visually distinct.
+func TestSARIF_SeverityPreservedInProperties(t *testing.T) {
+	res := &ScanResult{
+		Findings: []Finding{
+			{Check: "secrets", RuleID: "SEC_AWS_AKIA", Severity: SeverityCritical, File: "a", Line: 1, Message: "aws"},
+			{Check: "patterns", RuleID: "TM1b", Severity: SeverityError, File: "b", Line: 2, Message: "rm"},
+			{Check: "patterns", RuleID: "EA3", Severity: SeverityInfo, File: "c", Line: 3, Message: "info"},
+		},
+	}
+	sarif := ToSARIF(res)
+	require.Len(t, sarif.Runs[0].Results, 3)
+
+	critProps := sarif.Runs[0].Results[0].Properties
+	assert.Equal(t, "critical", critProps["severity"])
+	assert.Equal(t, "critical", critProps["problem"].(map[string]any)["severity"])
+
+	errProps := sarif.Runs[0].Results[1].Properties
+	assert.Equal(t, "error", errProps["severity"])
+	assert.Equal(t, "high", errProps["problem"].(map[string]any)["severity"])
+
+	infoProps := sarif.Runs[0].Results[2].Properties
+	assert.Equal(t, "info", infoProps["severity"])
+	assert.Equal(t, "low", infoProps["problem"].(map[string]any)["severity"])
+}
+
+// TestSARIF_PerDetectorRuleIDs verifies the secrets/unicode/permissions
+// checks now mint distinct ruleIDs so SARIF rules-list entries don't
+// collapse multiple unrelated detections under one description
+// (issue #41).
+func TestSARIF_PerDetectorRuleIDs(t *testing.T) {
+	res := &ScanResult{
+		Findings: []Finding{
+			{Check: "secrets", RuleID: "SEC_AWS_AKIA", Severity: SeverityCritical, File: "a", Line: 1, Message: "aws"},
+			{Check: "secrets", RuleID: "SEC_GITHUB_PAT", Severity: SeverityCritical, File: "a", Line: 2, Message: "gh"},
+			{Check: "unicode", RuleID: "UNI_ZERO_WIDTH", Severity: SeverityCritical, File: "a", Line: 3, Message: "zwsp"},
+			{Check: "unicode", RuleID: "UNI_BIDI_OVERRIDE", Severity: SeverityCritical, File: "a", Line: 4, Message: "rtl"},
+			{Check: "permissions", RuleID: "PERM_EXEC_BIT", Severity: SeverityWarning, File: "a", Line: 5, Message: "exec"},
+			{Check: "permissions", RuleID: "PERM_CURL_PIPE_SHELL", Severity: SeverityError, File: "a", Line: 6, Message: "pipe"},
+		},
+	}
+	sarif := ToSARIF(res)
+	ids := map[string]bool{}
+	for _, r := range sarif.Runs[0].Tool.Driver.Rules {
+		ids[r.ID] = true
+	}
+	for _, want := range []string{"SEC_AWS_AKIA", "SEC_GITHUB_PAT", "UNI_ZERO_WIDTH", "UNI_BIDI_OVERRIDE", "PERM_EXEC_BIT", "PERM_CURL_PIPE_SHELL"} {
+		assert.True(t, ids[want], "expected per-detector ruleId %s, got %v", want, ids)
+	}
+	assert.False(t, ids["secrets"], "generic 'secrets' ruleId must not leak into SARIF anymore")
+	assert.False(t, ids["unicode"], "generic 'unicode' ruleId must not leak into SARIF anymore")
+	assert.False(t, ids["permissions"], "generic 'permissions' ruleId must not leak into SARIF anymore")
+}
+
 func TestToSARIF_NilSafe(t *testing.T) {
 	sarif := ToSARIF(nil)
 	assert.Equal(t, "2.1.0", sarif.Version)

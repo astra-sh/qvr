@@ -38,6 +38,7 @@ func (unicodeCheck) Run(_ context.Context, _ *model.Skill, files []FileEntry) []
 			if cat, r, ok := firstHiddenRune(line); ok {
 				findings = append(findings, Finding{
 					Check:       UnicodeCheckName,
+					RuleID:      ruleIDForUnicode(cat),
 					Severity:    SeverityCritical,
 					File:        f.Path,
 					Line:        lineNum,
@@ -49,6 +50,7 @@ func (unicodeCheck) Run(_ context.Context, _ *model.Skill, files []FileEntry) []
 			if confusable, ok := firstMixedScriptWord(line); ok {
 				findings = append(findings, Finding{
 					Check:       UnicodeCheckName,
+					RuleID:      "UNI_HOMOGLYPH",
 					Severity:    SeverityWarning,
 					File:        f.Path,
 					Line:        lineNum,
@@ -59,6 +61,23 @@ func (unicodeCheck) Run(_ context.Context, _ *model.Skill, files []FileEntry) []
 		}
 	}
 	return findings
+}
+
+// ruleIDForUnicode maps a hiddenCategory to its stable SARIF rule ID
+// so each unicode class (zero-width, bidi-override, tag-char) gets a
+// distinct entry in the SARIF rules list (issue #41). Without this,
+// the SARIF viewer collapsed every unicode finding under one rule
+// whose description came from whichever class hit first.
+func ruleIDForUnicode(cat hiddenCategory) string {
+	switch cat {
+	case categoryZeroWidth:
+		return "UNI_ZERO_WIDTH"
+	case categoryBidiOverride:
+		return "UNI_BIDI_OVERRIDE"
+	case categoryTagChar:
+		return "UNI_TAG_CHAR"
+	}
+	return "UNI_HIDDEN"
 }
 
 // hiddenCategory labels the kind of invisible/dangerous codepoint a

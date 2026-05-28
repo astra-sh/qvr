@@ -49,9 +49,27 @@ func (permissionsCheck) Run(_ context.Context, skill *model.Skill, files []FileE
 	var findings []Finding
 
 	for _, f := range files {
+		if f.IsSymlink {
+			// Don't report symlink mode bits as "executable" — lstat
+			// returns 0o777 for every symlink regardless of target
+			// (issue #40). Surface dangling/cycle symlinks as their
+			// own info finding so reviewers still see the anomaly.
+			if f.SymlinkBroken {
+				findings = append(findings, Finding{
+					Check:       PermissionsCheckName,
+					RuleID:      "PERM_SYMLINK_BROKEN",
+					Severity:    SeverityInfo,
+					File:        f.Path,
+					Message:     fmt.Sprintf("symlink %s -> %s is dangling or cyclic", f.Path, f.SymlinkTarget),
+					Remediation: "remove the broken symlink or fix its target",
+				})
+			}
+			continue
+		}
 		if f.Executable() {
 			findings = append(findings, Finding{
 				Check:       PermissionsCheckName,
+				RuleID:      "PERM_EXEC_BIT",
 				Severity:    SeverityWarning,
 				File:        f.Path,
 				Message:     fmt.Sprintf("%s is marked executable (mode %s)", f.Path, f.Mode.Perm()),
@@ -69,6 +87,7 @@ func (permissionsCheck) Run(_ context.Context, skill *model.Skill, files []FileE
 				}
 				findings = append(findings, Finding{
 					Check:       PermissionsCheckName,
+					RuleID:      "PERM_" + strings.ToUpper(p.name),
 					Severity:    SeverityError,
 					File:        f.Path,
 					Line:        lineIdx + 1,
@@ -83,6 +102,7 @@ func (permissionsCheck) Run(_ context.Context, skill *model.Skill, files []FileE
 		if msg, hit := unrestrictedBash(skill.Frontmatter.AllowedTools); hit {
 			findings = append(findings, Finding{
 				Check:       PermissionsCheckName,
+				RuleID:      "PERM_BASH_UNRESTRICTED",
 				Severity:    SeverityWarning,
 				File:        "SKILL.md",
 				Message:     msg,
