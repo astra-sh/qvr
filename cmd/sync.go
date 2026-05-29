@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -17,6 +18,7 @@ var (
 	syncGlobal        bool
 	syncDryRun        bool
 	syncKeepUntracked bool
+	syncNoScan        bool
 )
 
 var syncCmd = &cobra.Command{
@@ -48,6 +50,8 @@ func init() {
 		"report what would change without touching the filesystem")
 	syncCmd.Flags().BoolVar(&syncKeepUntracked, "keep-untracked", false,
 		"warn about orphan managed symlinks instead of removing them")
+	syncCmd.Flags().BoolVar(&syncNoScan, "no-scan", false,
+		"skip the per-skill security scan that normally surfaces issues found in restored worktrees")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -97,6 +101,18 @@ func runSync(cmd *cobra.Command, args []string) error {
 		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
+	// Security gate. Sync re-materialises worktrees from the lock; we rescan
+	// each restored skill so a registry that turned hostile between add and
+	// sync gets flagged. Sync intentionally only surfaces findings and does
+	// not roll back — the lock already committed to these refs and the user
+	// can `qvr remove` individually after reviewing what the scan said.
+	if !syncDryRun && latestLock != nil {
+		cfg, cerr := config.Load()
+		if cerr == nil {
+			scanRestoredSkillsAfterSync(cmd.Context(), latestLock, cfg)
+		}
+	}
+
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(result)
 	}
@@ -120,4 +136,31 @@ func runSync(cmd *cobra.Command, args []string) error {
 		printer.Success("Already in sync.")
 	}
 	return nil
+}
+
+// scanRestoredSkillsAfterSync runs the standard scan gate against every
+// installed (non-link, non-disabled) entry in lock and surfaces findings.
+// Sync is restorative — the lock already committed to these refs — so a
+// blocked finding only WARNS rather than rolling back. The user can act on
+// the surfaced findings with `qvr remove <name>` or `qvr switch <name> <ref>`
+// to a safer version.
+func scanRestoredSkillsAfterSync(ctx context.Context, lock *model.LockFile, cfg *config.Config) {
+	if !gateAvailable(cfg, syncNoScan) {
+		return
+	}
+	for _, entry := range lock.Entries() {
+		if entry.Disabled || entry.Source == "link" {
+			continue
+		}
+		skillDir := skill.EffectiveTarget(entry)
+		if skillDir == "" {
+			continue
+		}
+		// We pass `Action: "sync"` so the surfaced banner makes it clear
+		// these findings came from the rescan, not an add.
+		_, _ = ScanAndGate(ctx, skillDir, cfg, scanGateOptions{
+			Action:  "sync",
+			Subject: entry.Name,
+		})
+	}
 }

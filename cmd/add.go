@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
@@ -19,6 +20,7 @@ var (
 	addGlobal  bool
 	addForce   bool
 	addFrozen  bool
+	addNoScan  bool
 )
 
 var addCmd = &cobra.Command{
@@ -52,6 +54,8 @@ func init() {
 		"allow replacing an existing lock entry at a different ref")
 	addCmd.Flags().BoolVar(&addFrozen, "frozen", false,
 		"refuse drift from the recorded subtree hash; the skill must already be in the lock")
+	addCmd.Flags().BoolVar(&addNoScan, "no-scan", false,
+		"skip the security scan that normally gates installs (override security.scan_on_install)")
 	rootCmd.AddCommand(addCmd)
 }
 
@@ -101,6 +105,36 @@ func runAdd(cmd *cobra.Command, args []string) error {
 				printer.Error(fmt.Sprintf("add %s: %v", ref, err))
 				if firstErr == nil {
 					firstErr = err
+				}
+				continue
+			}
+
+			// Security gate. Scan the freshly-installed worktree and roll back
+			// the install if findings meet or exceed the configured threshold.
+			// Done inside the WithLock window so a blocked install also
+			// reverts the lock entry atomically.
+			gate, gerr := ScanAndGate(cmd.Context(), skillDirFor(result, lockPath), cfg, scanGateOptions{
+				Disabled: addNoScan,
+				Action:   "add",
+				Subject:  result.Name,
+			})
+			if gerr != nil {
+				printer.Warning(fmt.Sprintf("add %s: scan failed (%v); install kept — rerun `qvr scan %s` to retry", result.Name, gerr, result.Name))
+				results = append(results, result)
+				continue
+			}
+			if gate.Blocked {
+				removeErr := installer.Remove(result.Name, skill.InstallRequest{
+					ProjectRoot: projectRoot,
+					Global:      addGlobal,
+					LockPath:    lockPath,
+				})
+				if removeErr != nil {
+					printer.Error(fmt.Sprintf("add %s: scan blocked, rollback also failed (%v); run `qvr remove %s --force` to clean up", result.Name, removeErr, result.Name))
+				}
+				blockErr := &blockedScanError{Subject: result.Name, Threshold: gate.Threshold, Result: gate.Result}
+				if firstErr == nil {
+					firstErr = blockErr
 				}
 				continue
 			}
@@ -154,4 +188,31 @@ func buildAddJSONEnvelope(results []*skill.InstallResult, err error) addJSONEnve
 		env.Error = err.Error()
 	}
 	return env
+}
+
+// skillDirFor returns the absolute path of the SKILL.md-bearing directory
+// for an InstallResult. The InstallResult's Worktree is the worktree root;
+// for layout-A skills the actual SKILL.md sits at <worktree>/<subpath>, so
+// we read the freshly-written lock entry to recover the subpath. Layout-B
+// repos (SKILL.md at repo root) have an empty/"." subpath and the worktree
+// root itself is the skill dir.
+//
+// Returns "" only if the entry can't be located — callers treat that as
+// "skip the gate" since there's nothing scannable yet.
+func skillDirFor(result *skill.InstallResult, lockPath string) string {
+	if result == nil || result.Worktree == "" {
+		return ""
+	}
+	lock, err := model.ReadLockFile(lockPath)
+	if err != nil {
+		return result.Worktree
+	}
+	entry, err := lock.Get(result.Name)
+	if err != nil {
+		return result.Worktree
+	}
+	if entry.Path == "" || entry.Path == "." {
+		return entry.Worktree
+	}
+	return filepath.Join(entry.Worktree, entry.Path)
 }

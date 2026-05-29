@@ -1,13 +1,18 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
+	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
 	"github.com/raks097/quiver/internal/registry"
 	"github.com/spf13/cobra"
@@ -61,6 +66,7 @@ var (
 	registryUpdateCheck   bool
 	registryUpdateVerbose bool
 	registryListFull      bool
+	registryAddNoScan     bool
 )
 
 var registryUpdateCmd = &cobra.Command{
@@ -73,6 +79,8 @@ var registryUpdateCmd = &cobra.Command{
 func init() {
 	registryAddCmd.Flags().StringVar(&registryAddName, "name", "",
 		"override the auto-inferred <org>/<repo> name (full literal override; pass <alias> or <org>/<alias>)")
+	registryAddCmd.Flags().BoolVar(&registryAddNoScan, "no-scan", false,
+		"skip the per-skill security scan that normally gates registry adds (override security.scan_on_install)")
 	registryUpdateCmd.Flags().BoolVar(&registryUpdateCheck, "check", false,
 		"check for upstream changes without downloading")
 	registryUpdateCmd.Flags().BoolVarP(&registryUpdateVerbose, "verbose", "v", false,
@@ -106,7 +114,13 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	mgr := registry.NewManager(git.NewGoGitClient())
+	cfg, cerr := config.Load()
+	if cerr != nil {
+		return fmt.Errorf("load config: %w", cerr)
+	}
+
+	gc := git.NewGoGitClient()
+	mgr := registry.NewManager(gc)
 
 	reg, err := mgr.Add(cmd.Context(), name, repoURL)
 	if err != nil {
@@ -116,6 +130,28 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("registry %q already exists — pass --name <alias> to use a different name", name)
 		}
 		return fmt.Errorf("add registry: %w", err)
+	}
+
+	// Security gate. Materialise each indexed skill into a throwaway worktree
+	// and scan it. Any skill exceeding cfg.Security.BlockSeverity rolls back
+	// the registry add — the user shouldn't be left with a configured but
+	// dangerous source they didn't know about.
+	if gateAvailable(cfg, registryAddNoScan) {
+		skills, _, ixerr := mgr.Index(reg.Name, registry.RegistryPath(reg.Name))
+		if ixerr == nil && len(skills) > 0 {
+			blockedSkills, gateErr := scanRegistrySkillsBeforeAdd(cmd.Context(), reg, skills, cfg)
+			if gateErr != nil {
+				printer.Warning(fmt.Sprintf("registry %s: scan pass failed (%v); registry kept — rerun `qvr scan <skill>` per-skill to retry", reg.Name, gateErr))
+			} else if len(blockedSkills) > 0 {
+				// Roll back the registry add so the user isn't left with a
+				// configured source whose contents we just refused to install.
+				if rmErr := mgr.Remove(reg.Name); rmErr != nil {
+					printer.Error(fmt.Sprintf("registry %s: scan blocked %d skill(s); rollback also failed (%v); run `qvr registry remove %s` to clean up", reg.Name, len(blockedSkills), rmErr, reg.Name))
+				}
+				return fmt.Errorf("registry %s: scan blocked %d skill(s) (%s); registry not added — see findings above or pass --no-scan to override",
+					reg.Name, len(blockedSkills), strings.Join(blockedSkills, ", "))
+			}
+		}
 	}
 
 	if printer.Format == output.FormatJSON {
@@ -132,6 +168,88 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	}
 	printer.Success(msg)
 	return nil
+}
+
+// scanRegistrySkillsBeforeAdd materialises each indexed skill into a throwaway
+// worktree (sparse-checked-out to just that skill's subpath) and runs the
+// standard scan gate. Returns the list of skill names that were blocked
+// (each already had its findings surfaced via ScanAndGate's renderer).
+//
+// The materialisation cost is proportional to the count of skills × the
+// skill subtree size, not the whole repo — sparse checkout keeps each scan
+// dir bounded to one skill. Slow registries (~30 skills) still finish in
+// under a couple of minutes; users see incremental progress via the
+// per-finding banner.
+func scanRegistrySkillsBeforeAdd(ctx context.Context, reg *model.Registry, skills []registry.SkillIndexEntry, cfg *config.Config) ([]string, error) {
+	worktreeMgr := git.NewGoGitWorktree()
+	barePath := registry.RegistryPath(reg.Name)
+
+	tmpRoot, err := os.MkdirTemp("", "qvr-registry-scan-*")
+	if err != nil {
+		return nil, fmt.Errorf("create scan workspace: %w", err)
+	}
+	defer os.RemoveAll(tmpRoot)
+
+	ref := reg.DefaultBranch
+	if ref == "" {
+		ref = "main"
+	}
+
+	var blocked []string
+	for _, s := range skills {
+		// Each skill scans in its own subdir so a per-skill failure doesn't
+		// abort the rest — we collect all blocks and report the full list.
+		stage := filepath.Join(tmpRoot, sanitizeForFs(s.Name))
+		if err := worktreeMgr.Add(barePath, stage, ref); err != nil {
+			printer.Warning(fmt.Sprintf("scan %s: could not materialise (%v); skipping gate", s.Name, err))
+			continue
+		}
+		// Sparse-checkout to just this skill's subpath to keep walks bounded.
+		subpath := s.Path
+		if subpath == "" {
+			subpath = "."
+		}
+		if err := worktreeMgr.SetSparseCheckout(stage, []string{subpath}); err != nil {
+			printer.Warning(fmt.Sprintf("scan %s: sparse-checkout failed (%v); scanning full clone", s.Name, err))
+		}
+		skillDir := stage
+		if subpath != "" && subpath != "." {
+			skillDir = filepath.Join(stage, subpath)
+		}
+		gate, gerr := ScanAndGate(ctx, skillDir, cfg, scanGateOptions{
+			Action:  "registry add",
+			Subject: s.Name,
+		})
+		if gerr != nil {
+			printer.Warning(fmt.Sprintf("scan %s: %v; skipping gate", s.Name, gerr))
+			continue
+		}
+		if gate.Blocked {
+			blocked = append(blocked, s.Name)
+		}
+	}
+	return blocked, nil
+}
+
+// sanitizeForFs produces a safe directory segment from a skill name, for the
+// per-skill scan workspace. The skill name is already lowercase-alphanumeric
+// + hyphens per spec, but we belt-and-brace strip anything funky just in
+// case the indexer accepted a borderline case.
+func sanitizeForFs(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('-')
+		}
+	}
+	out := b.String()
+	if out == "" {
+		out = "skill"
+	}
+	return out
 }
 
 func runRegistryRemove(cmd *cobra.Command, args []string) error {

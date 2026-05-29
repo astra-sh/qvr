@@ -160,6 +160,26 @@ qvr registry update         rebuilds after fetch
 qvr registry update --check refs only, no fetch, no cache write
 ```
 
+## Security scanning
+
+Every install path runs the same scanner that powers `qvr scan` as a gate,
+governed by two config keys (defaults in **bold**):
+
+- `security.scan_on_install` (**true**) — master switch for the gate.
+- `security.block_severity` (**critical**) — findings at or above this
+  severity refuse the operation. Set to `error`/`warning`/`info` to tighten,
+  unset to disable blocking (findings still surface).
+
+| When | What happens on a blocking finding |
+|---|---|
+| `qvr registry add <url>` | Every indexed skill is materialised in a temp worktree and scanned. Any blocking skill rolls back the whole registry add. |
+| `qvr add <skill>` | Staged worktree is scanned before symlinks are created. Block → `installer.Remove` rolls back the install. |
+| `qvr sync` | Each restored worktree is scanned; findings surfaced but **not** blocked — the lock already committed. Run `qvr remove <name>` or `qvr switch <name> <safer-ref>`. |
+| `qvr publish [path]` | Local skill is scanned before the registry is touched; dry-run included. |
+
+Every gated command takes `--no-scan` to bypass for that single invocation.
+Set `security.scan_on_install false` to disable globally.
+
 ## Install
 
 Prebuilt binaries are still in flight. For now, build from source:
