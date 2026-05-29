@@ -29,11 +29,15 @@ var configValueValidators = map[string]func(string) (string, error){
 		return strings.Join(parts, ","), nil
 	},
 	"security.scan_on_install": validateBool,
+	// Vocab must match what the scanner actually emits (internal/security
+	// scanner.go: info|warning|error|critical). `security.scan_on_install
+	// false` is the off switch — there's no "none" sentinel here on purpose.
 	"security.block_severity": validateEnum([]string{
-		"critical", "high", "medium", "low", "none",
+		"critical", "error", "warning", "info",
 	}),
-	"output.format": validateEnum([]string{"text", "json"}),
-	"output.color":  validateEnum([]string{"auto", "always", "never"}),
+	"cache.index_ttl": validateDuration,
+	"output.format":   validateEnum([]string{"text", "json"}),
+	"output.color":    validateEnum([]string{"auto", "always", "never"}),
 }
 
 func validateBool(v string) (string, error) {
@@ -42,6 +46,23 @@ func validateBool(v string) (string, error) {
 		return strings.ToLower(strings.TrimSpace(v)), nil
 	}
 	return "", fmt.Errorf("must be true or false, got %q", v)
+}
+
+// validateDuration accepts any Go duration string the time package can parse
+// ("1h", "15m", "0", "30s"). Negative durations are rejected. The validator
+// re-formats the value to its canonical form so `qvr config get` shows the
+// same string the user would type (e.g. "60m" → "1h0m0s"). The empty string
+// is the documented "use the default" sentinel and is allowed through.
+func validateDuration(v string) (string, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", nil
+	}
+	d, err := config.ParseCacheTTL(s)
+	if err != nil {
+		return "", err
+	}
+	return d.String(), nil
 }
 
 func validateEnum(valid []string) func(string) (string, error) {
@@ -93,6 +114,7 @@ var knownConfigKeys = []string{
 	"security.block_severity",
 	"output.format",
 	"output.color",
+	"cache.index_ttl",
 }
 
 // configRead returns the string form of key, or "" if unknown.
@@ -115,6 +137,8 @@ func configRead(cfg *config.Config, key string) string {
 		return cfg.Output.Format
 	case "output.color":
 		return cfg.Output.Color
+	case "cache.index_ttl":
+		return cfg.Cache.IndexTTL
 	}
 	return ""
 }
@@ -135,6 +159,8 @@ func configWrite(cfg *config.Config, key, value string) error {
 		cfg.Output.Format = value
 	case "output.color":
 		cfg.Output.Color = value
+	case "cache.index_ttl":
+		cfg.Cache.IndexTTL = value
 	default:
 		return fmt.Errorf("unknown config key: %s", key)
 	}

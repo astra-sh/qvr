@@ -66,6 +66,7 @@ var (
 	registryUpdateCheck   bool
 	registryUpdateVerbose bool
 	registryListFull      bool
+	registryListRefresh   bool
 	registryAddNoScan     bool
 )
 
@@ -87,6 +88,8 @@ func init() {
 		"print per-skill skip reasons when any skills could not be indexed")
 	registryListCmd.Flags().BoolVar(&registryListFull, "full", false,
 		"print full descriptions without truncation")
+	registryListCmd.Flags().BoolVar(&registryListRefresh, "refresh", false,
+		"invalidate cached indexes before listing (local rebuild; no network)")
 	registryCmd.AddCommand(registryAddCmd, registryRemoveCmd, registryListCmd, registryUpdateCmd)
 	rootCmd.AddCommand(registryCmd)
 }
@@ -120,7 +123,7 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	gc := git.NewGoGitClient()
-	mgr := registry.NewManager(gc)
+	mgr := newRegistryManager(gc)
 
 	reg, err := mgr.Add(cmd.Context(), name, repoURL)
 	if err != nil {
@@ -253,7 +256,7 @@ func sanitizeForFs(s string) string {
 }
 
 func runRegistryRemove(cmd *cobra.Command, args []string) error {
-	mgr := registry.NewManager(git.NewGoGitClient())
+	mgr := newRegistryManager(git.NewGoGitClient())
 	if err := mgr.Remove(args[0]); err != nil {
 		return fmt.Errorf("remove registry: %w", err)
 	}
@@ -266,11 +269,14 @@ func runRegistryRemove(cmd *cobra.Command, args []string) error {
 }
 
 func runRegistryList(cmd *cobra.Command, args []string) error {
+	if registryListRefresh {
+		refreshAllIndexes()
+	}
 	if len(args) > 0 {
 		return runRegistrySkillsList(args)
 	}
 
-	mgr := registry.NewManager(git.NewGoGitClient())
+	mgr := newRegistryManager(git.NewGoGitClient())
 	registries, err := mgr.List()
 	if err != nil {
 		return fmt.Errorf("list registries: %w", err)
@@ -320,7 +326,7 @@ func runRegistryList(cmd *cobra.Command, args []string) error {
 }
 
 func runRegistryUpdate(cmd *cobra.Command, args []string) error {
-	mgr := registry.NewManager(git.NewGoGitClient())
+	mgr := newRegistryManager(git.NewGoGitClient())
 	name := ""
 	if len(args) > 0 {
 		name = args[0]
@@ -436,7 +442,7 @@ func rejectWebURL(raw string) error {
 }
 
 func runRegistrySkillsList(names []string) error {
-	mgr := registry.NewManager(git.NewGoGitClient())
+	mgr := newRegistryManager(git.NewGoGitClient())
 	results, err := mgr.ListSkills(names)
 	if err != nil {
 		return fmt.Errorf("list skills: %w", err)

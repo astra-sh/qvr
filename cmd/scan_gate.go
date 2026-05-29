@@ -23,6 +23,14 @@ type scanGateOptions struct {
 	Action string
 	// Subject is the skill name for the banner — e.g. "code-review".
 	Subject string
+	// WarnOnly tells the renderer to use the ⚠ "found N finding(s)" banner
+	// even when findings meet the block threshold. Callers that do not act on
+	// scanGateResult.Blocked (sync, which is restorative — the lock already
+	// committed to these refs) set this so the surfaced wording matches what
+	// the command will actually do. Without this, sync's critical findings
+	// were rendered as `✗ scan blocked` even though the skill was restored
+	// and linked anyway (bug #59).
+	WarnOnly bool
 }
 
 // scanGateResult is the outcome of a single ScanAndGate call. Blocked is true
@@ -92,7 +100,11 @@ func ScanAndGate(ctx context.Context, skillDir string, cfg *config.Config, opts 
 	out.Skipped = false
 	out.Blocked = exceedsThreshold(res, threshold)
 
-	renderGateFindings(opts, res, threshold, out.Blocked)
+	// WarnOnly callers (sync) never block — render the warning template even
+	// when the finding meets threshold so the surfaced wording matches what
+	// the command will actually do (bug #59).
+	renderBlocked := out.Blocked && !opts.WarnOnly
+	renderGateFindings(opts, res, threshold, renderBlocked)
 	return out, nil
 }
 

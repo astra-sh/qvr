@@ -61,7 +61,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 
 		target := upgradeTo
 		if target == "" {
-			mgr := registry.NewManager(git.NewGoGitClient())
+			mgr := newRegistryManager(git.NewGoGitClient())
 			loc, err := mgr.FindSkill(name)
 			if err != nil {
 				return fmt.Errorf("locate skill: %w", err)
@@ -84,7 +84,7 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		// orphans get cleaned by `qvr cache prune`.
 		gcc := git.NewGoGitClient()
 		wt := git.NewGoGitWorktree()
-		installer := skill.NewInstaller(registry.NewManager(gcc), wt, gcc)
+		installer := skill.NewInstaller(newRegistryManager(gcc), wt, gcc)
 		if _, err := installer.Install(skill.InstallRequest{
 			Skill:       name + "@" + target,
 			Targets:     entry.Targets,

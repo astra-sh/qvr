@@ -56,7 +56,7 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		// `qvr cache prune` is the GC for the now-orphan old worktree.
 		gc := git.NewGoGitClient()
 		wt := git.NewGoGitWorktree()
-		installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+		installer := skill.NewInstaller(newRegistryManager(gc), wt, gc)
 		result, err := installer.Install(skill.InstallRequest{
 			Skill:       name + "@" + ref,
 			Targets:     entry.Targets,

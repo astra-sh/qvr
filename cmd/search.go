@@ -16,10 +16,11 @@ import (
 )
 
 var (
-	searchGithub bool
-	searchFull   bool
-	searchTags   []string
-	searchAuthor string
+	searchGithub  bool
+	searchFull    bool
+	searchTags    []string
+	searchAuthor  string
+	searchRefresh bool
 )
 
 var searchCmd = &cobra.Command{
@@ -44,6 +45,8 @@ func init() {
 		"filter by metadata.tags (repeatable; entries must match all)")
 	searchCmd.Flags().StringVar(&searchAuthor, "author", "",
 		"filter by metadata.author")
+	searchCmd.Flags().BoolVar(&searchRefresh, "refresh", false,
+		"invalidate cached indexes before searching (local rebuild; no network)")
 	rootCmd.AddCommand(searchCmd)
 }
 
@@ -72,7 +75,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 func runLocalSearch(cmd *cobra.Command, filter registry.SearchFilter) error {
-	mgr := registry.NewManager(git.NewGoGitClient())
+	if searchRefresh {
+		refreshAllIndexes()
+	}
+	mgr := newRegistryManager(git.NewGoGitClient())
 
 	results, err := mgr.SearchWithFilter(filter)
 	if err != nil {

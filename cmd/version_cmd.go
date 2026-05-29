@@ -9,7 +9,6 @@ import (
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
-	"github.com/raks097/quiver/internal/registry"
 	"github.com/spf13/cobra"
 )
 
@@ -17,6 +16,8 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Manage skill versions",
 }
+
+var versionListRefresh bool
 
 var versionListCmd = &cobra.Command{
 	Use:   "list <skill>",
@@ -26,13 +27,18 @@ var versionListCmd = &cobra.Command{
 }
 
 func init() {
+	versionListCmd.Flags().BoolVar(&versionListRefresh, "refresh", false,
+		"invalidate cached indexes before listing (local rebuild; no network)")
 	versionCmd.AddCommand(versionListCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 
 func runVersionList(cmd *cobra.Command, args []string) error {
+	if versionListRefresh {
+		refreshAllIndexes()
+	}
 	skillName := args[0]
-	mgr := registry.NewManager(git.NewGoGitClient())
+	mgr := newRegistryManager(git.NewGoGitClient())
 
 	loc, err := mgr.FindSkill(skillName)
 	if err != nil {

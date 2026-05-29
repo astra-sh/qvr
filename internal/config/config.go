@@ -5,9 +5,36 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// DefaultCacheTTL is the freshness window applied when cache.index_ttl is
+// unset or unparseable. One hour matches the historical hardcoded value
+// (registry.DefaultCacheTTL) so users who never touch the config see the
+// same behaviour they did before #46.
+const DefaultCacheTTL = time.Hour
+
+// ParseCacheTTL turns a CacheConfig.IndexTTL string into a duration. An
+// empty string returns DefaultCacheTTL. A negative duration is rejected.
+// "0" is accepted and means "always rebuild on next read" — the IsStale
+// check at the registry layer treats any Generated timestamp older than
+// zero seconds as stale.
+func ParseCacheTTL(raw string) (time.Duration, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return DefaultCacheTTL, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid duration %q: %w", raw, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("duration must be non-negative, got %s", d)
+	}
+	return d, nil
+}
 
 // Config represents the quiver configuration.
 type Config struct {
@@ -17,7 +44,16 @@ type Config struct {
 	GithubToken     string                    `yaml:"github_token,omitempty" json:"github_token,omitempty"`
 	Security        SecurityConfig            `yaml:"security,omitempty" json:"security,omitempty"`
 	Output          OutputConfig              `yaml:"output,omitempty" json:"output,omitempty"`
+	Cache           CacheConfig               `yaml:"cache,omitempty" json:"cache,omitempty"`
 	Ops             OpsConfig                 `yaml:"ops,omitempty" json:"ops,omitempty"`
+}
+
+// CacheConfig controls the registry-index cache freshness window. IndexTTL
+// is stored as the duration string the user wrote (e.g. "1h", "15m", "0")
+// so on-disk YAML round-trips unchanged. Parse with ParseCacheTTL when
+// you need a time.Duration for IsStale.
+type CacheConfig struct {
+	IndexTTL string `yaml:"index_ttl,omitempty" json:"index_ttl,omitempty"`
 }
 
 // OpsConfig controls the SkillOps audit pipeline. The struct lives here

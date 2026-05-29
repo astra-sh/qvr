@@ -57,7 +57,7 @@ func runLink(cmd *cobra.Command, args []string) error {
 	}
 	gc := git.NewGoGitClient()
 	wt := git.NewGoGitWorktree()
-	installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+	installer := skill.NewInstaller(newRegistryManager(gc), wt, gc)
 
 	resolved, discovered, err := resolveSkillDir(args[0])
 	if err != nil {

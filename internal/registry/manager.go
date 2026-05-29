@@ -48,11 +48,29 @@ func NewManager(gitClient git.GitClient) *Manager {
 // break reads. The skipped slice lists candidate skills the indexer could not
 // register (missing SKILL.md, parse errors); callers can ignore it.
 func (m *Manager) Index(name, repoPath string) ([]SkillIndexEntry, []SkippedSkill, error) {
+	return m.IndexWithOptions(name, repoPath, IndexOptions{})
+}
+
+// IndexOptions tunes a single call to IndexWithOptions.
+type IndexOptions struct {
+	// Refresh bypasses the on-disk cache read so the indexer always rebuilds
+	// from the bare clone. The fresh result is still written back to the cache
+	// so subsequent reads pick it up. Used by `qvr search --refresh` and
+	// friends to force a rebuild without going to the network.
+	Refresh bool
+}
+
+// IndexWithOptions is the variant of Index that accepts caller-supplied
+// behaviour overrides. Callers that don't need any overrides should use
+// Index — it preserves the original signature for the common path.
+func (m *Manager) IndexWithOptions(name, repoPath string, opts IndexOptions) ([]SkillIndexEntry, []SkippedSkill, error) {
 	headCommit, _ := m.Git.HeadCommit(repoPath)
 
-	if cached, err := ReadCache(name); err == nil {
-		if cached.Commit == headCommit && headCommit != "" && !cached.IsStale(m.CacheTTL) {
-			return cached.Skills, cached.Skipped, nil
+	if !opts.Refresh {
+		if cached, err := ReadCache(name); err == nil {
+			if cached.Commit == headCommit && headCommit != "" && !cached.IsStale(m.CacheTTL) {
+				return cached.Skills, cached.Skipped, nil
+			}
 		}
 	}
 

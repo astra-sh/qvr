@@ -59,7 +59,7 @@ func runRemove(cmd *cobra.Command, args []string) error {
 
 		gc := git.NewGoGitClient()
 		wt := git.NewGoGitWorktree()
-		installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+		installer := skill.NewInstaller(newRegistryManager(gc), wt, gc)
 
 		for _, name := range args {
 			req := skill.InstallRequest{ProjectRoot: projectRoot, Global: removeGlobal}
