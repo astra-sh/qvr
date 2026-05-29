@@ -12,7 +12,12 @@ import (
 )
 
 // DefaultCacheTTL is how long an index cache entry is considered fresh before
-// a TTL-based refresh. A fetch or Invalidate always bypasses the TTL check.
+// the next read triggers a local rebuild from the bare clone. The rebuild does
+// not touch the network — it only re-walks the existing bare repo at HEAD; an
+// explicit `qvr registry update` is still required to pull new commits from
+// upstream. Freshness is measured against the cache's embedded `Generated`
+// field (set on WriteCache), not the file's mtime, so a `touch` does not
+// expire the cache.
 const DefaultCacheTTL = time.Hour
 
 // ErrCacheMiss signals the cache file for a registry does not exist.

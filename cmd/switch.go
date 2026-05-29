@@ -8,6 +8,7 @@ import (
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
+	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -33,33 +34,62 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), switchGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(name)
-	if err != nil {
-		return err
-	}
-	// Perform the git switch first so a bad ref doesn't leave renamed dirs behind.
-	syncer := skill.NewSyncer(git.NewGoGitWorktree(), git.NewGoGitClient())
-	updated, err := syncer.Switch(cmd.Context(), entry, ref)
-	if err != nil {
-		return fmt.Errorf("switch: %w", err)
-	}
-	if err := skill.ApplySwitch(updated, projectRoot, switchGlobal); err != nil {
-		return err
-	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), switchGlobal)
 
-	lock.Put(updated)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
+	var (
+		updated    *model.LockEntry
+		latestLock *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
+		}
+		entry, err := lock.Get(name)
+		if err != nil {
+			return err
+		}
+		// SHA-keyed switch: install the skill again at the new ref via the
+		// standard Install flow with Force=true. That creates (or reuses) a
+		// worktree at the new SHA's path and leaves any existing worktree at
+		// the old SHA untouched — projects pinned to the old SHA keep working.
+		// `qvr cache prune` is the GC for the now-orphan old worktree.
+		gc := git.NewGoGitClient()
+		wt := git.NewGoGitWorktree()
+		installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+		result, err := installer.Install(skill.InstallRequest{
+			Skill:       name + "@" + ref,
+			Targets:     entry.Targets,
+			Global:      switchGlobal,
+			ProjectRoot: projectRoot,
+			LockPath:    lockPath,
+			Force:       true,
+		})
+		if err != nil {
+			return fmt.Errorf("switch: %w", err)
+		}
+		// Re-read so we have the freshly-written entry — Install just wrote it.
+		lock, err = model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("re-read lock: %w", err)
+		}
+		updated, err = lock.Get(name)
+		if err != nil {
+			return fmt.Errorf("entry vanished after install: %w", err)
+		}
+		_ = result
+		latestLock = lock
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
+	registry.TouchProject(lockPath)
 	// Keep AGENTS.md in sync with the new ref so descriptions and version
 	// markers don't drift until the user next runs `qvr sync`. AGENTS.md is
 	// project-scoped, so skip the refresh when switching a global entry.
-	if !switchGlobal {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	if !switchGlobal && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(updated)

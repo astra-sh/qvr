@@ -114,18 +114,68 @@ func runLockVerify(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), lockVerifyGlobal)
-	lock, err := model.ReadLockFile(lockPath)
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
+
+	var (
+		out     *VerifyOutput
+		empty   bool
+		failure string
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
+		}
+		if len(lock.Skills) == 0 {
+			empty = true
+			out = &VerifyOutput{LockVersion: lock.Version, Entries: []skill.VerifyEntryResult{}}
+			return nil
+		}
+		o, fail, err := lockVerifyInternal(lock)
+		if err != nil {
+			return err
+		}
+		out = o
+		failure = fail
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
-	if len(lock.Skills) == 0 {
+	if empty {
 		printer.Info("No installed skills.")
 		if printer.Format == output.FormatJSON {
-			return printer.JSON(&VerifyOutput{LockVersion: lock.Version, Entries: []skill.VerifyEntryResult{}})
+			return printer.JSON(out)
 		}
 		return nil
 	}
 
+	if printer.Format == output.FormatJSON {
+		if failure != "" {
+			out.Error = failure
+		}
+		if err := printer.JSON(out); err != nil {
+			return err
+		}
+		if failure != "" {
+			// errJSONHandled suppresses Execute()'s {"error": "..."} envelope —
+			// the body's `error` field already carries the failure string, so
+			// stdout stays a single JSON document.
+			return errJSONHandled
+		}
+		return nil
+	}
+
+	renderVerifyText(out)
+	if failure != "" {
+		return errors.New(failure)
+	}
+	return nil
+}
+
+// lockVerifyInternal is the read-modify-write loop extracted out of
+// runLockVerify so it can run inside WithLock. Returns the result, an
+// optional --frozen/--strict failure string, and any fatal error.
+func lockVerifyInternal(lock *model.LockFile) (*VerifyOutput, string, error) {
 	out := &VerifyOutput{LockVersion: lock.Version, Entries: make([]skill.VerifyEntryResult, 0, len(lock.Skills))}
 	changed := false
 	for _, entry := range lock.Entries() {
@@ -182,7 +232,7 @@ func runLockVerify(cmd *cobra.Command, args []string) error {
 
 	if changed {
 		if err := lock.Write(); err != nil {
-			return fmt.Errorf("write lock after repair: %w", err)
+			return nil, "", fmt.Errorf("write lock after repair: %w", err)
 		}
 	}
 
@@ -196,28 +246,7 @@ func runLockVerify(cmd *cobra.Command, args []string) error {
 	} else if lockVerifyStrict && out.Summary.Unverified > 0 {
 		failure = fmt.Sprintf("lock verify: --strict failed (%d unverified)", out.Summary.Unverified)
 	}
-
-	if printer.Format == output.FormatJSON {
-		if failure != "" {
-			out.Error = failure
-		}
-		if err := printer.JSON(out); err != nil {
-			return err
-		}
-		if failure != "" {
-			// errJSONHandled suppresses Execute()'s {"error": "..."} envelope —
-			// the body's `error` field already carries the failure string, so
-			// stdout stays a single JSON document.
-			return errJSONHandled
-		}
-		return nil
-	}
-
-	renderVerifyText(out)
-	if failure != "" {
-		return errors.New(failure)
-	}
-	return nil
+	return out, failure, nil
 }
 
 // failureCategories renders only the non-zero failing counts so the error
@@ -326,9 +355,42 @@ func runLockUpgrade(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), lockUpgradeGlobal)
+
+	var out *UpgradeOutput
+	lockErr := model.WithLock(lockPath, func() error {
+		o, err := lockUpgradeInternal(lockPath)
+		if err != nil {
+			return err
+		}
+		out = o
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
+	}
+
+	if printer.Format == output.FormatJSON {
+		return printer.JSON(out)
+	}
+	for _, e := range out.Entries {
+		switch e.Status {
+		case "would-upgrade":
+			printer.Info(fmt.Sprintf("%s: would upgrade", e.Name))
+		case "upgraded":
+			printer.Success(fmt.Sprintf("%s: upgraded", e.Name))
+		case "unchanged":
+			printer.Info(fmt.Sprintf("%s: unchanged", e.Name))
+		case "skipped":
+			printer.Warning(fmt.Sprintf("%s: skipped — %s", e.Name, e.Message))
+		}
+	}
+	return nil
+}
+
+func lockUpgradeInternal(lockPath string) (*UpgradeOutput, error) {
 	lock, err := model.ReadLockFile(lockPath)
 	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
+		return nil, fmt.Errorf("read lock: %w", err)
 	}
 	// Config feeds the v2→v3 provenance backfill — the v2 entry knows its
 	// registry name, but the canonical clone URL only lives in config. When
@@ -401,30 +463,14 @@ func runLockUpgrade(cmd *cobra.Command, args []string) error {
 
 	if changed && !lockUpgradeDryRun {
 		if err := lock.Write(); err != nil {
-			return fmt.Errorf("write lock: %w", err)
+			return nil, fmt.Errorf("write lock: %w", err)
 		}
 		// After a successful write the on-disk version is now LockFileVersion.
 		// Reflect that in the output so JSON consumers don't see a stale
 		// pre-migration value next to "upgraded" rows.
 		out.LockVersion = model.LockFileVersion
 	}
-
-	if printer.Format == output.FormatJSON {
-		return printer.JSON(out)
-	}
-	for _, e := range out.Entries {
-		switch e.Status {
-		case "would-upgrade":
-			printer.Info(fmt.Sprintf("%s: would upgrade", e.Name))
-		case "upgraded":
-			printer.Success(fmt.Sprintf("%s: upgraded", e.Name))
-		case "unchanged":
-			printer.Info(fmt.Sprintf("%s: unchanged", e.Name))
-		case "skipped":
-			printer.Warning(fmt.Sprintf("%s: skipped — %s", e.Name, e.Message))
-		}
-	}
-	return nil
+	return out, nil
 }
 
 // provenanceFromLegacyEntry reconstructs a ProvenanceRef from a v2-era

@@ -58,6 +58,13 @@ type GitClient interface {
 	// HeadCommit returns the commit hash of HEAD.
 	HeadCommit(repoPath string) (string, error)
 
+	// ResolveRef resolves a ref (branch, tag, or hash) in the repository at
+	// repoPath to a full commit hash. Local-only — no network. Used by the
+	// installer to derive a SHA-keyed worktree path from a human ref before
+	// any worktree exists on disk, so two projects pinning the same SHA via
+	// different ref labels share one worktree.
+	ResolveRef(repoPath, ref string) (string, error)
+
 	// DefaultBranch returns the name of the default branch.
 	DefaultBranch(repoPath string) (string, error)
 

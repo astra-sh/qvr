@@ -42,47 +42,80 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), upgradeGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(name)
-	if err != nil {
-		return err
-	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), upgradeGlobal)
 
-	target := upgradeTo
-	if target == "" {
-		mgr := registry.NewManager(git.NewGoGitClient())
-		loc, err := mgr.FindSkill(name)
+	var (
+		updated         *model.LockEntry
+		alreadyOnTarget bool
+		latestLock      *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
 		if err != nil {
-			return fmt.Errorf("locate skill: %w", err)
+			return fmt.Errorf("read lock: %w", err)
 		}
-		target = skill.LatestSemverTag(loc.Entry.Versions.Tags)
+		entry, err := lock.Get(name)
+		if err != nil {
+			return err
+		}
+
+		target := upgradeTo
 		if target == "" {
-			return fmt.Errorf("no semver tags found for %s in registry %s; pass --to <ref> to pick manually", name, loc.RegistryName)
+			mgr := registry.NewManager(git.NewGoGitClient())
+			loc, err := mgr.FindSkill(name)
+			if err != nil {
+				return fmt.Errorf("locate skill: %w", err)
+			}
+			target = skill.LatestSemverTag(loc.Entry.Versions.Tags)
+			if target == "" {
+				return fmt.Errorf("no semver tags found for %s in registry %s; pass --to <ref> to pick manually", name, loc.RegistryName)
+			}
 		}
+		if target == entry.Ref {
+			alreadyOnTarget = true
+			printer.Info(fmt.Sprintf("%s: already on %s", name, target))
+			return nil
+		}
+
+		// SHA-keyed upgrade: same machinery as switch — Install at the new
+		// ref builds a fresh worktree under the new SHA's path and leaves
+		// any existing worktree at the old SHA in place. Shared worktrees
+		// across projects survive other projects upgrading off them; the
+		// orphans get cleaned by `qvr cache prune`.
+		gcc := git.NewGoGitClient()
+		wt := git.NewGoGitWorktree()
+		installer := skill.NewInstaller(registry.NewManager(gcc), wt, gcc)
+		if _, err := installer.Install(skill.InstallRequest{
+			Skill:       name + "@" + target,
+			Targets:     entry.Targets,
+			Global:      upgradeGlobal,
+			ProjectRoot: projectRoot,
+			LockPath:    lockPath,
+			Force:       true,
+		}); err != nil {
+			return fmt.Errorf("upgrade: %w", err)
+		}
+		// Re-read so updated reflects what Install just wrote.
+		lock, err = model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("re-read lock: %w", err)
+		}
+		updated, err = lock.Get(name)
+		if err != nil {
+			return fmt.Errorf("entry vanished after upgrade: %w", err)
+		}
+		latestLock = lock
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
-	if target == entry.Ref {
-		printer.Info(fmt.Sprintf("%s: already on %s", name, target))
+	if alreadyOnTarget {
 		return nil
 	}
-
-	syncer := skill.NewSyncer(git.NewGoGitWorktree(), git.NewGoGitClient())
-	updated, err := syncer.Switch(cmd.Context(), entry, target)
-	if err != nil {
-		return fmt.Errorf("upgrade: %w", err)
-	}
-	if err := skill.ApplySwitch(updated, projectRoot, upgradeGlobal); err != nil {
-		return err
-	}
-
-	lock.Put(updated)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
-	}
-	if !upgradeGlobal {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	registry.TouchProject(lockPath)
+	if !upgradeGlobal && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(updated)

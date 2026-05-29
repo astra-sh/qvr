@@ -40,7 +40,7 @@ type LockEntry struct {
 	Path        string    `json:"path"` // relative path inside the registry repo
 	Ref         string    `json:"ref"`  // human label: branch or tag at install time
 	ResolvedSHA string    `json:"resolvedSha"`
-	Worktree    string    `json:"worktree"`    // ~/.quiver/worktrees/<reg>--<skill>--<sha7>
+	Worktree    string    `json:"worktree"`    // ~/.quiver/worktrees/<org>/<repo>/<skill>/<sha7>
 	InstallPath string    `json:"installPath"` // first managed agent-dir symlink (or vendor dir)
 	Targets     []string  `json:"targets"`
 	InstalledAt time.Time `json:"installedAt"`

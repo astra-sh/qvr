@@ -290,6 +290,37 @@ func (g *GoGitClient) HeadCommit(repoPath string) (string, error) {
 	return head.Hash().String(), nil
 }
 
+// ResolveRef resolves a ref (branch, tag, or hash) to a full commit hash by
+// trying each ref namespace in turn — local branch, tag (peeled to commit if
+// it's an annotated tag), then a generic revision parse covering hashes,
+// remote-tracking refs, and abbreviations. Returns the canonical commit hash
+// or an error if none of the namespaces match.
+func (g *GoGitClient) ResolveRef(repoPath, ref string) (string, error) {
+	if ref == "" {
+		return "", fmt.Errorf("ref is empty")
+	}
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return "", fmt.Errorf("open repo: %w", err)
+	}
+	if r, err := repo.Reference(plumbing.NewBranchReferenceName(ref), true); err == nil {
+		return r.Hash().String(), nil
+	}
+	if r, err := repo.Reference(plumbing.NewTagReferenceName(ref), true); err == nil {
+		hash := r.Hash()
+		if tagObj, err := repo.TagObject(hash); err == nil {
+			if commit, err := tagObj.Commit(); err == nil {
+				hash = commit.Hash
+			}
+		}
+		return hash.String(), nil
+	}
+	if resolved, err := repo.ResolveRevision(plumbing.Revision(ref)); err == nil && resolved != nil {
+		return resolved.String(), nil
+	}
+	return "", fmt.Errorf("%w: %q", ErrRefNotFound, ref)
+}
+
 func (g *GoGitClient) DefaultBranch(repoPath string) (string, error) {
 	repo, err := gogit.PlainOpen(repoPath)
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
+	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
 	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
@@ -73,15 +74,26 @@ func runLink(cmd *cobra.Command, args []string) error {
 		printer.Info(fmt.Sprintf("discovered skill at %s", resolved))
 	}
 
-	result, err := installer.Link(resolved, skill.InstallRequest{
-		Targets:     targets,
-		Global:      linkGlobal,
-		ProjectRoot: projectRoot,
-		Force:       linkForce,
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), linkGlobal)
+	var result *skill.InstallResult
+	lockErr := model.WithLock(lockPath, func() error {
+		r, err := installer.Link(resolved, skill.InstallRequest{
+			Targets:     targets,
+			Global:      linkGlobal,
+			ProjectRoot: projectRoot,
+			LockPath:    lockPath,
+			Force:       linkForce,
+		})
+		if err != nil {
+			return fmt.Errorf("link: %w", err)
+		}
+		result = r
+		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("link: %w", err)
+	if lockErr != nil {
+		return lockErr
 	}
+	registry.TouchProject(lockPath)
 	refreshAgentsMDFromLock(projectRoot)
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(result)

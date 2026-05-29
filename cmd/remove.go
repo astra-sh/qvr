@@ -36,38 +36,47 @@ func runRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	// Atomic precondition check: refuse to remove anything if any arg is
-	// missing from the lock. Mirrors `git rm` — partial execution on a
-	// mid-batch error is a footgun for destructive verbs.
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), removeGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	var missing []string
-	for _, name := range args {
-		if _, err := lock.Get(name); err != nil {
-			missing = append(missing, name)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("skill(s) not present in lock file: %v (no changes made)", missing)
-	}
-
-	gc := git.NewGoGitClient()
-	wt := git.NewGoGitWorktree()
-	installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), removeGlobal)
 
 	var removed []string
-	for _, name := range args {
-		req := skill.InstallRequest{ProjectRoot: projectRoot, Global: removeGlobal}
-		if err := installer.Remove(name, req); err != nil {
-			if len(removed) > 0 && !removeGlobal {
-				refreshAgentsMDFromLock(projectRoot)
-			}
-			return fmt.Errorf("remove %s: %w", name, err)
+	lockErr := model.WithLock(lockPath, func() error {
+		// Atomic precondition check: refuse to remove anything if any arg is
+		// missing from the lock. Mirrors `git rm` — partial execution on a
+		// mid-batch error is a footgun for destructive verbs.
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
 		}
-		removed = append(removed, name)
+		var missing []string
+		for _, name := range args {
+			if _, err := lock.Get(name); err != nil {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("skill(s) not present in lock file: %v (no changes made)", missing)
+		}
+
+		gc := git.NewGoGitClient()
+		wt := git.NewGoGitWorktree()
+		installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+
+		for _, name := range args {
+			req := skill.InstallRequest{ProjectRoot: projectRoot, Global: removeGlobal}
+			if err := installer.Remove(name, req); err != nil {
+				return fmt.Errorf("remove %s: %w", name, err)
+			}
+			removed = append(removed, name)
+		}
+		return nil
+	})
+	if lockErr != nil {
+		if len(removed) > 0 && !removeGlobal {
+			refreshAgentsMDFromLock(projectRoot)
+		}
+		return lockErr
 	}
+	registry.TouchProject(lockPath)
 	if !removeGlobal {
 		refreshAgentsMDFromLock(projectRoot)
 	}

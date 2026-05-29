@@ -10,6 +10,7 @@ import (
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
+	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -43,49 +44,73 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), editGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(name)
-	if err != nil {
-		return err
-	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), editGlobal)
 
 	branch := editBranch
 	if branch == "" {
 		branch = defaultEditBranch(name)
 	}
-	// Idempotent no-op: matches the behavior of `switch`/`upgrade`/`install`
-	// so wrapper scripts can call `qvr edit <skill>` defensively without
-	// guarding with `qvr info` first.
-	if branch == entry.Ref {
+
+	var (
+		updated          *model.LockEntry
+		warning          string
+		alreadyEditing   bool
+		alreadyEditEntry *model.LockEntry
+		latestLock       *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
+		}
+		entry, err := lock.Get(name)
+		if err != nil {
+			return err
+		}
+
+		// Idempotent no-op: matches the behavior of `switch`/`upgrade`/`install`
+		// so wrapper scripts can call `qvr edit <skill>` defensively without
+		// guarding with `qvr info` first.
+		if branch == entry.Ref {
+			alreadyEditing = true
+			alreadyEditEntry = entry
+			return nil
+		}
+
+		syncer := skill.NewSyncer(git.NewGoGitWorktree(), git.NewGoGitClient())
+		u, w, err := syncer.CreateEditBranch(cmd.Context(), entry, branch)
+		if err != nil {
+			return fmt.Errorf("edit: %w", err)
+		}
+		if err := skill.ApplySwitch(u, projectRoot, editGlobal); err != nil {
+			return err
+		}
+		lock.Put(u)
+		if err := lock.Write(); err != nil {
+			return fmt.Errorf("write lock: %w", err)
+		}
+		updated = u
+		warning = w
+		latestLock = lock
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
+	}
+	if alreadyEditing {
 		if printer.Format == output.FormatJSON {
 			return printer.JSON(map[string]any{
-				"skill":   entry,
+				"skill":   alreadyEditEntry,
 				"status":  "already-editing",
 				"message": fmt.Sprintf("already editing on %s", branch),
 			})
 		}
-		printer.Info(fmt.Sprintf("%s: already editing on %s", entry.Name, branch))
+		printer.Info(fmt.Sprintf("%s: already editing on %s", alreadyEditEntry.Name, branch))
 		return nil
 	}
-
-	syncer := skill.NewSyncer(git.NewGoGitWorktree(), git.NewGoGitClient())
-	updated, warning, err := syncer.CreateEditBranch(cmd.Context(), entry, branch)
-	if err != nil {
-		return fmt.Errorf("edit: %w", err)
-	}
-	if err := skill.ApplySwitch(updated, projectRoot, editGlobal); err != nil {
-		return err
-	}
-
-	lock.Put(updated)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
-	}
-	if !editGlobal {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	registry.TouchProject(lockPath)
+	if !editGlobal && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 	if printer.Format == output.FormatJSON {
 		out := map[string]any{"skill": updated}

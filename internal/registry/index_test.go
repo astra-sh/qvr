@@ -59,6 +59,10 @@ func (m *mockGitClient) HeadCommit(repoPath string) (string, error) {
 	return m.headCommit, nil
 }
 
+func (m *mockGitClient) ResolveRef(repoPath, ref string) (string, error) {
+	return m.headCommit, nil
+}
+
 func (m *mockGitClient) DefaultBranch(repoPath string) (string, error) {
 	return m.defaultBranch, nil
 }

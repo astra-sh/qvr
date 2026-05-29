@@ -93,9 +93,14 @@ func TestEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("install @v2: %v", err)
 	}
-	expected := registry.WorktreePath("acme", "code-review", "v2")
-	if result.Worktree != expected {
-		t.Errorf("v2 worktree = %s, want %s", result.Worktree, expected)
+	// Worktree path is now SHA-keyed, so we can't compute it without
+	// resolving v2 → SHA. Sanity-check it sits under the registry's
+	// worktree tree and points at a real directory.
+	if !strings.HasPrefix(result.Worktree, filepath.Join(registry.WorktreesRoot(), "acme", "code-review")+string(filepath.Separator)) {
+		t.Errorf("v2 worktree %s not under expected registry/skill prefix", result.Worktree)
+	}
+	if _, err := os.Stat(result.Worktree); err != nil {
+		t.Errorf("v2 worktree missing on disk: %v", err)
 	}
 
 	// 6. Remove — everything is cleaned up.

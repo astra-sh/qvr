@@ -37,8 +37,7 @@ func TestInstall_BasicFlow(t *testing.T) {
 	}
 
 	// Worktree exists with the skill dir.
-	expectedWt := registry.WorktreePath("acme", "code-review", "main")
-	if _, err := os.Stat(filepath.Join(expectedWt, "skills", "code-review", "SKILL.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(result.Worktree, "skills", "code-review", "SKILL.md")); err != nil {
 		t.Errorf("worktree skill missing: %v", err)
 	}
 
@@ -56,7 +55,7 @@ func TestInstall_BasicFlow(t *testing.T) {
 	}
 
 	// Sparse checkout trimmed deploy-helper.
-	if _, err := os.Stat(filepath.Join(expectedWt, "skills", "deploy-helper")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(result.Worktree, "skills", "deploy-helper")); !os.IsNotExist(err) {
 		t.Errorf("sparse should have removed deploy-helper: %v", err)
 	}
 
@@ -136,8 +135,7 @@ func TestInstall_AtVersion(t *testing.T) {
 	if result.Version != "v2" {
 		t.Errorf("version = %s, want v2", result.Version)
 	}
-	expectedWt := registry.WorktreePath("acme", "code-review", "v2")
-	if _, err := os.Stat(expectedWt); err != nil {
+	if _, err := os.Stat(result.Worktree); err != nil {
 		t.Errorf("worktree at v2 missing: %v", err)
 	}
 }
@@ -156,6 +154,9 @@ func TestInstall_AtomicOnBadRef(t *testing.T) {
 		t.Fatal("expected failure on missing ref")
 	}
 	// No staging, no final dir, no broken symlink should remain.
+	// The worktree path is now SHA-keyed; for a bad ref, ResolveRef fails
+	// and falls back to the ref label itself, so the would-be path is
+	// computable for the leak check.
 	finalPath := registry.WorktreePath("acme", "code-review", "nope")
 	if _, err := os.Stat(finalPath); !os.IsNotExist(err) {
 		t.Errorf("finalPath leaked: %v", err)
@@ -205,6 +206,13 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("install: %v", err)
 	}
 
+	// Capture the worktree path from the lock before removing.
+	lock, _ := model.ReadLockFile(filepath.Join(h.project, model.LockFileName))
+	preWt := ""
+	if e, err := lock.Get("code-review"); err == nil {
+		preWt = e.Worktree
+	}
+
 	err := h.installer.Remove("code-review", skill.InstallRequest{ProjectRoot: h.project})
 	if err != nil {
 		t.Fatalf("Remove: %v", err)
@@ -213,9 +221,10 @@ func TestRemove(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(h.project, ".claude/skills/code-review")); !os.IsNotExist(err) {
 		t.Errorf("symlink survived: %v", err)
 	}
-	wt := registry.WorktreePath("acme", "code-review", "main")
-	if _, err := os.Stat(wt); !os.IsNotExist(err) {
-		t.Errorf("worktree survived: %v", err)
+	if preWt != "" {
+		if _, err := os.Stat(preWt); !os.IsNotExist(err) {
+			t.Errorf("worktree survived: %v", err)
+		}
 	}
 }
 

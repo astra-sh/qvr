@@ -56,29 +56,45 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), syncGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), syncGlobal)
 
-	gc := git.NewGoGitClient()
-	wt := git.NewGoGitWorktree()
-	installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
-	reconciler := skill.NewReconciler(installer)
+	var (
+		result     *skill.ReconcileResult
+		latestLock *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
+		}
 
-	result, err := reconciler.Reconcile(lock, projectRoot, config.Dir(), skill.ReconcileOptions{
-		DryRun:        syncDryRun,
-		KeepUntracked: syncKeepUntracked,
+		gc := git.NewGoGitClient()
+		wt := git.NewGoGitWorktree()
+		installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+		reconciler := skill.NewReconciler(installer)
+
+		r, err := reconciler.Reconcile(lock, projectRoot, config.Dir(), skill.ReconcileOptions{
+			DryRun:        syncDryRun,
+			KeepUntracked: syncKeepUntracked,
+		})
+		if err != nil {
+			return fmt.Errorf("sync: %w", err)
+		}
+		result = r
+		latestLock = lock
+		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("sync: %w", err)
+	if lockErr != nil {
+		return lockErr
 	}
+
+	registry.TouchProject(lockPath)
 
 	// Refresh AGENTS.md if the user has opted in (file already present). The
 	// reconciler may have changed which skills are visible, so the doc cache
 	// can otherwise lie until the next manual `qvr docs`.
-	if !syncGlobal && !syncDryRun {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	if !syncGlobal && !syncDryRun && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
 	if printer.Format == output.FormatJSON {

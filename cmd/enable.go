@@ -7,6 +7,7 @@ import (
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
+	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -33,29 +34,43 @@ func runEnable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), enableGlobal)
-	lock, err := model.ReadLockFile(lockPath)
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(name)
-	if err != nil {
-		return err
-	}
-	if entry.Source == "link" {
-		return fmt.Errorf("cannot enable link install %q", name)
-	}
 
-	created, err := enableSkill(entry, projectRoot, enableGlobal)
-	if err != nil {
-		return err
+	var (
+		created    []string
+		latestLock *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
+		}
+		entry, err := lock.Get(name)
+		if err != nil {
+			return err
+		}
+		if entry.Source == "link" {
+			return fmt.Errorf("cannot enable link install %q", name)
+		}
+
+		cs, eerr := enableSkill(entry, projectRoot, enableGlobal)
+		if eerr != nil {
+			return eerr
+		}
+		entry.Disabled = false
+		lock.Put(entry)
+		if err := lock.Write(); err != nil {
+			return fmt.Errorf("write lock: %w", err)
+		}
+		created = cs
+		latestLock = lock
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
-	entry.Disabled = false
-	lock.Put(entry)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
-	}
-	if !enableGlobal {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	registry.TouchProject(lockPath)
+	if !enableGlobal && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
 	if printer.Format == output.FormatJSON {

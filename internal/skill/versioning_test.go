@@ -39,8 +39,10 @@ func TestInstall_DefaultPrefersLatestTag(t *testing.T) {
 	if result.Version != "v2.0.0" {
 		t.Errorf("version = %q, want v2.0.0", result.Version)
 	}
-	if !strings.Contains(result.Worktree, "v2.0.0") {
-		t.Errorf("worktree path = %q, expected to contain v2.0.0", result.Worktree)
+	// Worktree path is SHA-keyed, so it won't contain the human ref label.
+	// Just check that it points at a real directory holding the skill.
+	if _, err := os.Stat(filepath.Join(result.Worktree, "skills", "code-review", "SKILL.md")); err != nil {
+		t.Errorf("v2.0.0 worktree missing skill: %v", err)
 	}
 }
 
@@ -101,36 +103,43 @@ func TestInstall_MultipleRefsCoexistOnDisk(t *testing.T) {
 	}, "v1.0.0")
 	h.addRegistry(t, "acme", remote)
 
-	if _, err := h.installer.Install(skill.InstallRequest{
+	mainResult, err := h.installer.Install(skill.InstallRequest{
 		Skill:       "code-review@main",
 		Targets:     []string{"claude"},
 		ProjectRoot: h.project,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("install main: %v", err)
 	}
-	mainPath := registry.WorktreePath("acme", "code-review", "main")
 
 	// Second install at a different ref requires Force after the
 	// "silently replaces the lock" footgun was closed (issue #12); this
 	// test still exercises that worktrees coexist on disk.
-	if _, err := h.installer.Install(skill.InstallRequest{
+	tagResult, err := h.installer.Install(skill.InstallRequest{
 		Skill:       "code-review@v1.0.0",
 		Targets:     []string{"claude"},
 		ProjectRoot: h.project,
 		Force:       true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("install v1.0.0: %v", err)
 	}
-	tagPath := registry.WorktreePath("acme", "code-review", "v1.0.0")
 
-	if _, err := os.Stat(mainPath); err != nil {
+	if _, err := os.Stat(mainResult.Worktree); err != nil {
 		t.Errorf("main worktree missing: %v", err)
 	}
-	if _, err := os.Stat(tagPath); err != nil {
+	if _, err := os.Stat(tagResult.Worktree); err != nil {
 		t.Errorf("v1.0.0 worktree missing: %v", err)
 	}
-	if mainPath == tagPath {
-		t.Errorf("worktrees should have distinct paths, both = %q", mainPath)
+	// With SHA-keyed paths, two refs pointing at the *same* commit collapse
+	// onto one worktree — that's the shared-cache invariant from #52.
+	// Different commits (main HEAD vs v1.0.0 tag at HEAD~1 or wherever)
+	// still split. seedRemoteWithTags places the tag at HEAD, so the two
+	// install paths can legitimately share. The important property is that
+	// both worktree paths exist and the main one wasn't deleted by the
+	// second install (the #52 corruption symptom).
+	if _, err := os.Stat(mainResult.Worktree); err != nil {
+		t.Errorf("main worktree should survive a forced reinstall at a different ref: %v", err)
 	}
 }
 
@@ -246,6 +255,7 @@ func TestEdit_CreatesLocalBranchFromHEAD(t *testing.T) {
 		t.Fatalf("lock get: %v", err)
 	}
 	tagCommit := entry.ResolvedSHA
+	installPath := entry.Worktree
 
 	syncer := newSyncer()
 	updated, _, err := syncer.CreateEditBranch(context.Background(), entry, "qvr/alice/code-review")
@@ -263,9 +273,11 @@ func TestEdit_CreatesLocalBranchFromHEAD(t *testing.T) {
 		t.Errorf("commit changed: was %s, now %s", tagCommit, updated.ResolvedSHA)
 	}
 
-	expectedPath := registry.WorktreePath("acme", "code-review", "qvr/alice/code-review")
-	if updated.Worktree != expectedPath {
-		t.Errorf("worktree = %q, want %q", updated.Worktree, expectedPath)
+	// Worktree path is SHA-keyed and the edit didn't change the commit, so
+	// the on-disk path is unchanged from install — only the in-worktree HEAD
+	// label and the lock entry's Ref move.
+	if updated.Worktree != installPath {
+		t.Errorf("worktree path drifted: was %q, now %q", installPath, updated.Worktree)
 	}
 	if _, err := os.Stat(updated.Worktree); err != nil {
 		t.Errorf("new worktree path does not exist: %v", err)
@@ -563,21 +575,29 @@ func TestUpgrade_FollowsLatestTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lock get: %v", err)
 	}
-	syncer := newSyncer()
-	updated, err := syncer.Switch(context.Background(), entry, latest)
-	if err != nil {
-		t.Fatalf("switch: %v", err)
+	// Upgrade is now Install(Force=true) at the new ref — see cmd/upgrade.go.
+	// That creates a fresh SHA-keyed worktree and leaves the previous one in
+	// place for other projects pinned to it.
+	_ = entry
+	if _, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "code-review@" + latest,
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+		Force:       true,
+	}); err != nil {
+		t.Fatalf("upgrade install: %v", err)
 	}
-	if err := skill.ApplySwitch(updated, h.project, false); err != nil {
-		t.Fatalf("apply switch: %v", err)
+	lock2, err := model.ReadLockFile(filepath.Join(h.project, model.LockFileName))
+	if err != nil {
+		t.Fatalf("re-read lock: %v", err)
+	}
+	updated, err := lock2.Get("code-review")
+	if err != nil {
+		t.Fatalf("lock get after upgrade: %v", err)
 	}
 
 	if updated.Ref != "v2.0.0" {
 		t.Errorf("branch = %q, want v2.0.0", updated.Ref)
-	}
-	expected := registry.WorktreePath("acme", "code-review", "v2.0.0")
-	if updated.Worktree != expected {
-		t.Errorf("worktree = %q, want %q", updated.Worktree, expected)
 	}
 	if _, err := os.Stat(updated.Worktree); err != nil {
 		t.Errorf("new worktree missing: %v", err)

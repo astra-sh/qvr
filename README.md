@@ -142,9 +142,15 @@ tags**, which become the versions you can `qvr add <skill>@<ref>`.
 
 ### Index cache
 
-The index is persisted at `~/.quiver/cache/index/<name>.json`, TTL **1 hour**.
-Written atomically (tmp + rename) so a concurrent reader never sees a
-half-written file.
+The index is persisted at `~/.quiver/cache/index/<name>.json`. Written
+atomically (tmp + rename) so a concurrent reader never sees a half-written
+file.
+
+After **1 hour** the next read rebuilds the index from the local bare clone —
+purely a local operation, no network. To pull new commits from upstream, run
+`qvr registry update`; that fetches and rebuilds the cache immediately. The
+TTL is measured against the cache's embedded `generated` timestamp (set on
+write), not the file's mtime, so manually touching the file won't expire it.
 
 ```
 qvr search <q>              reads cache, builds if missing
@@ -278,12 +284,11 @@ Shipping today:
 - **Project-local install** — `add`, `sync`, `link`, worktrees, symlinks,
   `pull`/`push`, `publish`, edit → push → release flow, `upgrade`/`switch`,
   AGENTS.md auto-sync, `doctor`/`info`/`list`/`diff`/`outdated`,
-  `disable`/`enable`, private registries
+  `disable`/`enable`, private registries, `cache list`/`cache prune` with
+  `projects.json` reachability tracking
 
 Planned:
 
-- `qvr cache prune` / `qvr cache list` with a `projects.json` reachability
-  registry behind it.
 - `qvr add --local` vendor mode (materialize real files into the project)
   - a `qvr publish` flow that can round-trip vendored edits back upstream.
 - Teams: namespaces, forks, `TEAMS.yaml`.

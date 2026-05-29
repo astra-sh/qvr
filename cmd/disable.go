@@ -8,6 +8,7 @@ import (
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
+	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
@@ -36,39 +37,53 @@ func runDisable(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), disableGlobal)
-	lock, err := model.ReadLockFile(lockPath)
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(name)
-	if err != nil {
-		return err
-	}
-	if entry.Source == "link" {
-		return fmt.Errorf("cannot disable link install %q; use qvr remove instead", name)
-	}
 
-	// Persist the disabled state before touching symlinks. A mid-flight crash
-	// then leaves a consistent "disabled but symlinks may still be present"
-	// state that a rerun of `qvr disable` cleans up idempotently. The
-	// alternative — remove first, write after — risks losing symlinks while
-	// the lock still claims the skill is enabled.
-	entry.Disabled = true
-	lock.Put(entry)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
-	}
-	removed, err := disableSkill(entry, projectRoot, disableGlobal)
-	if err != nil {
-		entry.Disabled = false
-		lock.Put(entry)
-		if werr := lock.Write(); werr != nil {
-			return fmt.Errorf("disable failed (%v) and rollback lock write also failed: %w", err, werr)
+	var (
+		removed    []string
+		latestLock *model.LockFile
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
 		}
-		return err
+		entry, err := lock.Get(name)
+		if err != nil {
+			return err
+		}
+		if entry.Source == "link" {
+			return fmt.Errorf("cannot disable link install %q; use qvr remove instead", name)
+		}
+
+		// Persist the disabled state before touching symlinks. A mid-flight crash
+		// then leaves a consistent "disabled but symlinks may still be present"
+		// state that a rerun of `qvr disable` cleans up idempotently. The
+		// alternative — remove first, write after — risks losing symlinks while
+		// the lock still claims the skill is enabled.
+		entry.Disabled = true
+		lock.Put(entry)
+		if err := lock.Write(); err != nil {
+			return fmt.Errorf("write lock: %w", err)
+		}
+		rs, derr := disableSkill(entry, projectRoot, disableGlobal)
+		if derr != nil {
+			entry.Disabled = false
+			lock.Put(entry)
+			if werr := lock.Write(); werr != nil {
+				return fmt.Errorf("disable failed (%v) and rollback lock write also failed: %w", derr, werr)
+			}
+			return derr
+		}
+		removed = rs
+		latestLock = lock
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
-	if !disableGlobal {
-		_ = refreshAgentsMDIfPresent(projectRoot, lock.Entries())
+	registry.TouchProject(lockPath)
+	if !disableGlobal && latestLock != nil {
+		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
 	if printer.Format == output.FormatJSON {

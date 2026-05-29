@@ -140,10 +140,22 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		}
 	}
 
+	// Resolve the ref → full SHA against the bare clone so the worktree path
+	// is SHA-keyed, not ref-keyed. Two projects pinning the same commit then
+	// share one worktree even when they wrote different ref labels (one pinned
+	// "main", the other "abc123"). Falls back to a degraded path using the ref
+	// label when resolution fails — the install still succeeds and the lock
+	// entry's Worktree field is still self-consistent; only the cross-project
+	// share-by-SHA optimization is lost.
+	resolvedSHA, sherr := in.Git.ResolveRef(loc.RepoPath, version)
+	if sherr != nil || resolvedSHA == "" {
+		resolvedSHA = version
+	}
+
 	// Staging path → final path. Worktree creation can fail mid-way (e.g., bad
 	// ref), and we don't want a half-populated directory masquerading as an
 	// installed skill. Stage in a sibling dir and rename at the end.
-	finalPath := registry.WorktreePath(loc.RegistryName, name, version)
+	finalPath := registry.WorktreePath(loc.RegistryName, name, registry.ShortSHA(resolvedSHA))
 	stagingPath := finalPath + ".staging"
 	_ = os.RemoveAll(stagingPath) // clear any stale staging from a prior crash
 
@@ -160,7 +172,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 			_ = os.RemoveAll(stagingPath)
 			return nil, fmt.Errorf("sparse checkout: %w", err)
 		}
-		if err := validateStagedSkill(stagingPath, loc.Entry.Path); err != nil {
+		if err := validateStagedSkill(stagingPath, loc.Entry.Path, name); err != nil {
 			_ = os.RemoveAll(stagingPath)
 			return nil, err
 		}
@@ -456,11 +468,22 @@ func (in *Installer) resolveCommit(worktreePath string) (string, error) {
 // validateStagedSkill loads the skill at the expected path inside the staged
 // worktree and runs the standard validator. Refuses installs that would produce
 // a symlink to a non-conformant skill.
-func validateStagedSkill(stagingPath, skillRelPath string) error {
+//
+// expectedName is the skill's canonical name from the registry index. The
+// loader sets Skill.Name from the on-disk directory's basename, which for a
+// layout-B repo (SKILL.md at the root, skillRelPath == ".") is the staging
+// directory itself (e.g. `<reg>--<skill>--<ref>.staging`) — definitely not
+// what the user wrote in `name:`. Overriding to expectedName before validation
+// keeps the name↔dir match meaningful for layout A while letting layout B
+// pass without leaking internal `.staging` paths to the user (bug #50).
+func validateStagedSkill(stagingPath, skillRelPath, expectedName string) error {
 	skillDir := filepath.Join(stagingPath, skillRelPath)
 	loaded, err := LoadFromPath(skillDir)
 	if err != nil {
 		return fmt.Errorf("load staged skill: %w", err)
+	}
+	if expectedName != "" {
+		loaded.Name = expectedName
 	}
 	if result := Validate(loaded); !result.Valid {
 		var lines []string
@@ -494,40 +517,20 @@ func mergeTargets(existing, add []string) []string {
 	return out
 }
 
-// ApplySwitch finalizes a ref change after Syncer.Switch has moved the
-// worktree's git HEAD. It renames the on-disk worktree directory to the path
-// matching the new ref and repoints every target symlink for the skill.
-// Callers own lock.Put + lock.Write; this helper only touches the filesystem.
-// entry.Ref must already reflect the new ref when called.
+// ApplySwitch refreshes the agent-target symlinks and verification record
+// for an entry whose ref label changed in place. Used by `qvr edit` after
+// CreateEditBranch mutates the worktree's HEAD onto a new branch at the same
+// commit — same SHA, same on-disk path, just a new label in the lockfile.
+//
+// `qvr switch` / `qvr upgrade` no longer call this — they re-run Install with
+// Force=true, which creates (or reuses) a fresh worktree at the new SHA's
+// path and leaves the previous worktree in place for the shared-cache
+// invariant to hold across projects (issue #52).
 //
 // global picks between project-local (`<project>/.claude/skills/`) and
 // user-global (`~/.claude/skills/`) symlink targets — derive from the
 // lock file's location via LockFile.IsGlobal.
 func ApplySwitch(entry *model.LockEntry, projectRoot string, global bool) error {
-	newPath := registry.WorktreePath(entry.Registry, entry.Name, entry.Ref)
-	oldPath := entry.Worktree
-	if newPath != oldPath {
-		_, statErr := os.Stat(newPath)
-		switch {
-		case statErr == nil:
-			// A worktree at the target path already exists (prior install of
-			// the same ref). Drop the stale old directory and point at it.
-			if err := os.RemoveAll(oldPath); err != nil {
-				return fmt.Errorf("remove old worktree %s: %w", oldPath, err)
-			}
-		case os.IsNotExist(statErr):
-			if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
-				return fmt.Errorf("mkdir for new worktree: %w", err)
-			}
-			if err := os.Rename(oldPath, newPath); err != nil {
-				return fmt.Errorf("rename worktree: %w", err)
-			}
-		default:
-			return fmt.Errorf("stat new worktree path %s: %w", newPath, statErr)
-		}
-		entry.Worktree = newPath
-	}
-
 	skillDir := EffectiveTarget(entry)
 	for _, target := range entry.Targets {
 		linkPath, err := ResolveTargetPath(target, entry.Name, projectRoot, global)
@@ -538,8 +541,8 @@ func ApplySwitch(entry *model.LockEntry, projectRoot string, global bool) error 
 			return fmt.Errorf("refresh symlink %s: %w", target, err)
 		}
 	}
-	// Ref change altered the worktree contents; the recorded subtree hash
-	// and git refs no longer match reality. Refresh them so the lockfile
+	// Ref label or branch tip changed; the recorded subtree hash and git
+	// refs may no longer match reality. Refresh them so the lockfile
 	// reflects the new state.
 	RefreshVerification(entry)
 	return nil

@@ -43,55 +43,80 @@ func runPush(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), pushGlobal))
-	if err != nil {
-		return fmt.Errorf("read lock: %w", err)
-	}
-	entry, err := lock.Get(args[0])
-	if err != nil {
-		return fmt.Errorf("lookup %s: %w", args[0], err)
-	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), pushGlobal)
 
-	gc := git.NewGoGitClient()
-	if entry.Registry != "" {
-		if defaultBranch, err := gc.DefaultBranch(registry.RegistryPath(entry.Registry)); err == nil && defaultBranch != "" && defaultBranch == entry.Ref {
-			printer.Warning(fmt.Sprintf("%s is on registry default branch %q — this push targets the shared upstream. Use 'qvr edit' first if you want to land on your own branch.",
-				entry.Name, entry.Ref))
+	var (
+		pushedEntry *model.LockEntry
+		pushedHash  string
+		noChanges   bool
+		warning     string
+	)
+	lockErr := model.WithLock(lockPath, func() error {
+		lock, err := model.ReadLockFile(lockPath)
+		if err != nil {
+			return fmt.Errorf("read lock: %w", err)
 		}
-	}
+		entry, err := lock.Get(args[0])
+		if err != nil {
+			return fmt.Errorf("lookup %s: %w", args[0], err)
+		}
 
-	syncer := skill.NewSyncer(git.NewGoGitWorktree(), gc)
-	hash, err := syncer.Push(cmd.Context(), entry, skill.PushOptions{
-		Message:     pushMessage,
-		Author:      pushAuthor,
-		AuthorEmail: pushEmail,
-	})
-	if err != nil {
-		if errors.Is(err, skill.ErrPushNoChanges) {
-			if printer.Format == output.FormatJSON {
-				return printer.JSON(map[string]string{
-					"name":    entry.Name,
-					"status":  "no-op",
-					"message": "no local changes",
-				})
+		gc := git.NewGoGitClient()
+		if entry.Registry != "" {
+			if defaultBranch, err := gc.DefaultBranch(registry.RegistryPath(entry.Registry)); err == nil && defaultBranch != "" && defaultBranch == entry.Ref {
+				warning = fmt.Sprintf("%s is on registry default branch %q — this push targets the shared upstream. Use 'qvr edit' first if you want to land on your own branch.",
+					entry.Name, entry.Ref)
 			}
-			printer.Info(fmt.Sprintf("%s: no local changes", entry.Name))
-			return nil
 		}
-		return fmt.Errorf("push %s: %w", entry.Name, err)
+
+		syncer := skill.NewSyncer(git.NewGoGitWorktree(), gc)
+		hash, err := syncer.Push(cmd.Context(), entry, skill.PushOptions{
+			Message:     pushMessage,
+			Author:      pushAuthor,
+			AuthorEmail: pushEmail,
+		})
+		if err != nil {
+			if errors.Is(err, skill.ErrPushNoChanges) {
+				noChanges = true
+				pushedEntry = entry
+				return nil
+			}
+			return fmt.Errorf("push %s: %w", entry.Name, err)
+		}
+		entry.ResolvedSHA = hash
+		lock.Put(entry)
+		if err := lock.Write(); err != nil {
+			return fmt.Errorf("write lock: %w", err)
+		}
+		pushedEntry = entry
+		pushedHash = hash
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
-	entry.ResolvedSHA = hash
-	lock.Put(entry)
-	if err := lock.Write(); err != nil {
-		return fmt.Errorf("write lock: %w", err)
+	registry.TouchProject(lockPath)
+	if warning != "" {
+		printer.Warning(warning)
+	}
+	if noChanges {
+		if printer.Format == output.FormatJSON {
+			return printer.JSON(map[string]string{
+				"name":    pushedEntry.Name,
+				"status":  "no-op",
+				"message": "no local changes",
+			})
+		}
+		printer.Info(fmt.Sprintf("%s: no local changes", pushedEntry.Name))
+		return nil
 	}
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(map[string]string{
-			"name":   entry.Name,
+			"name":   pushedEntry.Name,
 			"status": "pushed",
-			"commit": hash,
+			"commit": pushedHash,
 		})
 	}
-	printer.Success(fmt.Sprintf("%s: pushed %s", entry.Name, shortHash(hash)))
+	printer.Success(fmt.Sprintf("%s: pushed %s", pushedEntry.Name, shortHash(pushedHash)))
 	return nil
 }

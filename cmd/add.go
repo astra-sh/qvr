@@ -7,6 +7,7 @@ import (
 
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
+	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
 	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
@@ -75,40 +76,52 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	gc := git.NewGoGitClient()
 	wt := git.NewGoGitWorktree()
 	installer := skill.NewInstaller(registry.NewManager(gc), wt, gc)
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), addGlobal)
 
 	var results []*skill.InstallResult
 	var firstErr error
-	for _, ref := range args {
-		result, err := installer.Install(skill.InstallRequest{
-			Skill:       ref,
-			Targets:     targets,
-			Global:      addGlobal,
-			ProjectRoot: projectRoot,
-			Force:       addForce,
-			Frozen:      addFrozen,
-		})
-		if err != nil {
-			// Skill not found is the headline error — point at `qvr registry add`
-			// so the user knows the next step. Everything else falls through with
-			// the wrapped error.
-			if errors.Is(err, skill.ErrSkillNotFound) {
-				err = fmt.Errorf("no registered source contains a skill named %q — register one with `qvr registry add <url>`", ref)
+	lockErr := model.WithLock(lockPath, func() error {
+		for _, ref := range args {
+			result, err := installer.Install(skill.InstallRequest{
+				Skill:       ref,
+				Targets:     targets,
+				Global:      addGlobal,
+				ProjectRoot: projectRoot,
+				LockPath:    lockPath,
+				Force:       addForce,
+				Frozen:      addFrozen,
+			})
+			if err != nil {
+				// Skill not found is the headline error — point at `qvr registry add`
+				// so the user knows the next step. Everything else falls through with
+				// the wrapped error.
+				if errors.Is(err, skill.ErrSkillNotFound) {
+					err = fmt.Errorf("no registered source contains a skill named %q — register one with `qvr registry add <url>`", ref)
+				}
+				printer.Error(fmt.Sprintf("add %s: %v", ref, err))
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
-			printer.Error(fmt.Sprintf("add %s: %v", ref, err))
-			if firstErr == nil {
-				firstErr = err
-			}
-			continue
+			results = append(results, result)
 		}
-		results = append(results, result)
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
 	}
+
+	// Record the project so `qvr cache prune` knows this lock is reachable.
+	registry.TouchProject(lockPath)
 
 	if !addGlobal {
 		refreshAgentsMDFromLock(projectRoot)
 	}
 
 	if printer.Format == output.FormatJSON {
-		if jerr := printer.JSON(results); jerr != nil {
+		payload := buildAddJSONEnvelope(results, firstErr)
+		if jerr := printer.JSON(payload); jerr != nil {
 			return jerr
 		}
 		if firstErr != nil {
@@ -120,4 +133,25 @@ func runAdd(cmd *cobra.Command, args []string) error {
 		printer.Success(fmt.Sprintf("Added %s@%s → %v", r.Name, r.Version, r.Targets))
 	}
 	return firstErr
+}
+
+// addJSONEnvelope is the stable shape emitted by `qvr add --output json`. The
+// installed array is always present (never null) so consumers can safely call
+// `.installed[]` without branching on the empty case. error is populated only
+// when at least one input failed to install — matches the {"error": ...}
+// contract every other command uses on its failure path (bug #54).
+type addJSONEnvelope struct {
+	Installed []*skill.InstallResult `json:"installed"`
+	Error     string                 `json:"error,omitempty"`
+}
+
+func buildAddJSONEnvelope(results []*skill.InstallResult, err error) addJSONEnvelope {
+	if results == nil {
+		results = []*skill.InstallResult{}
+	}
+	env := addJSONEnvelope{Installed: results}
+	if err != nil {
+		env.Error = err.Error()
+	}
+	return env
 }
