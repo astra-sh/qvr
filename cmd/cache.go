@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +14,38 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// stdinIsTTYFn is the package-level seam tests use to drive the
+// `qvr cache prune` confirmation gate without inheriting the test
+// runner's actual TTY status. Real callers see the os.Stdin check;
+// tests override to return false (non-TTY = CI / pipeline path).
+var stdinIsTTYFn = func() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// stdinIsTTY reports whether stdin is attached to a terminal. The
+// character-device mode bit is the cross-platform indicator
+// (linux/darwin tty, windows console). Used by `qvr cache prune` to
+// gate the destructive op: on a TTY we can prompt; off one we refuse
+// without --yes.
+func stdinIsTTY() bool { return stdinIsTTYFn() }
+
+// confirmYesNo prints prompt to stderr (so it doesn't pollute --output
+// json's stdout) and returns true iff the user answers y/yes. Anything
+// else — including EOF, an empty line, or a read error — is "no".
+func confirmYesNo(prompt string) bool {
+	fmt.Fprint(os.Stderr, prompt)
+	scanner := bufio.NewScanner(os.Stdin)
+	if !scanner.Scan() {
+		return false
+	}
+	resp := strings.ToLower(strings.TrimSpace(scanner.Text()))
+	return resp == "y" || resp == "yes"
+}
+
 var cacheCmd = &cobra.Command{
 	Use:   "cache",
 	Short: "Inspect and clean the shared worktree cache",
@@ -23,7 +56,10 @@ var cacheCmd = &cobra.Command{
   qvr cache prune            delete orphan worktrees`,
 }
 
-var cachePruneDryRun bool
+var (
+	cachePruneDryRun bool
+	cachePruneYes    bool
+)
 
 var cacheListCmd = &cobra.Command{
 	Use:   "list",
@@ -46,6 +82,8 @@ Use --dry-run to see the targets without deleting anything.`,
 func init() {
 	cachePruneCmd.Flags().BoolVar(&cachePruneDryRun, "dry-run", false,
 		"report what would be removed without touching disk")
+	cachePruneCmd.Flags().BoolVar(&cachePruneYes, "yes", false,
+		"confirm the destructive prune non-interactively (required for non-TTY callers — issue #110)")
 	cacheCmd.AddCommand(cacheListCmd)
 	cacheCmd.AddCommand(cachePruneCmd)
 	rootCmd.AddCommand(cacheCmd)
@@ -127,10 +165,43 @@ func runCachePrune(cmd *cobra.Command, args []string) error {
 		DryRun:          cachePruneDryRun,
 		MissingProjects: missing,
 	}
+
+	// First pass: pick out the orphans + the bytes they hold so we can
+	// summarise them for the confirmation gate before any disk touch.
+	var orphans []CacheEntry
+	var orphanBytes int64
 	for _, e := range entries {
 		if e.Reachable {
 			continue
 		}
+		orphans = append(orphans, e)
+		orphanBytes += e.SizeBytes
+	}
+
+	// Confirmation gate (issue #110). Pre-fix, prune deleted
+	// unconditionally with --dry-run as the only safety — an
+	// inverse-polarity footgun (the absence of a flag was destructive).
+	// Now: --yes is the affirmative consent; missing it on a TTY
+	// prompts; missing it off a TTY (CI, pipelines) refuses. Dry-run
+	// bypasses since nothing actually deletes.
+	if !cachePruneDryRun && len(orphans) > 0 && !cachePruneYes {
+		if printer.Format != output.FormatJSON {
+			printer.Info(fmt.Sprintf("Would remove %d orphan worktree(s), freeing %s:",
+				len(orphans), humanBytes(orphanBytes)))
+			for _, e := range orphans {
+				printer.Info(fmt.Sprintf("  - %s (%s)", shortenCachePath(e.Path), humanBytes(e.SizeBytes)))
+			}
+		}
+		if printer.Format == output.FormatJSON || !stdinIsTTY() {
+			return fmt.Errorf("refuse to delete %d orphan worktree(s) without --yes; pass --yes to confirm or --dry-run to preview (issue #110)", len(orphans))
+		}
+		if !confirmYesNo("Proceed? [y/N] ") {
+			printer.Info("Aborted.")
+			return nil
+		}
+	}
+
+	for _, e := range orphans {
 		// In dry-run we record the would-remove without touching disk.
 		// In real-run we only count Removed + FreedBytes when the delete
 		// actually succeeded — otherwise FreedBytes would lie and CI

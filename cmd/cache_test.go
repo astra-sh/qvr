@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/raks097/quiver/internal/model"
@@ -130,6 +131,11 @@ func TestRunCachePrune_DeletesOrphans(t *testing.T) {
 
 	resetPrinter(t)
 	cachePruneDryRun = false
+	// v0.8.7 (#110) gate: explicit consent required for the destructive
+	// real-run when stdin isn't a TTY. `go test` runs with non-TTY
+	// stdin so we'd hit the refusal without --yes.
+	cachePruneYes = true
+	t.Cleanup(func() { cachePruneYes = false })
 
 	if err := runCachePrune(nil, nil); err != nil {
 		t.Fatalf("runCachePrune: %v", err)
@@ -169,6 +175,8 @@ func TestRunCachePrune_ReturnsErrorOnDeleteFailure(t *testing.T) {
 
 	resetPrinter(t)
 	cachePruneDryRun = false
+	cachePruneYes = true
+	t.Cleanup(func() { cachePruneYes = false })
 	err := runCachePrune(nil, nil)
 	if err == nil {
 		t.Fatal("expected error on delete failure, got nil")
@@ -176,6 +184,41 @@ func TestRunCachePrune_ReturnsErrorOnDeleteFailure(t *testing.T) {
 	// The orphan should still be on disk (delete failed).
 	if _, statErr := os.Stat(orphan); statErr != nil {
 		t.Fatalf("orphan unexpectedly removed even though delete failed: %v", statErr)
+	}
+}
+
+// TestRunCachePrune_NonInteractiveRefusesWithoutYes guards issue #110:
+// off a TTY (CI, pipelines) and without --yes, prune must refuse rather
+// than silently delete. Forces the non-TTY path via the stdinIsTTYFn
+// seam (real test runners can themselves be attached to a TTY).
+func TestRunCachePrune_NonInteractiveRefusesWithoutYes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+
+	orphan := fakeWorktree(t, "acme", "demo", "deadbee")
+	_ = fakeWorktree(t, "acme", "demo", "abc1234")
+	proj := filepath.Join(t.TempDir(), "proj")
+	_ = os.MkdirAll(proj, 0o755)
+	recordProjectWithLock(t, proj)
+
+	resetPrinter(t)
+	cachePruneDryRun = false
+	cachePruneYes = false
+	prevTTY := stdinIsTTYFn
+	stdinIsTTYFn = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTYFn = prevTTY })
+
+	err := runCachePrune(nil, nil)
+	if err == nil {
+		t.Fatal("expected non-interactive refusal without --yes, got nil")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error should hint at --yes, got %v", err)
+	}
+	// Critically: the orphan must still exist — refusal means no
+	// destructive op ran.
+	if _, statErr := os.Stat(orphan); statErr != nil {
+		t.Errorf("orphan was deleted despite refusal: %v", statErr)
 	}
 }
 
@@ -201,6 +244,8 @@ func TestRunCachePrune_ForgetsVanishedProjects(t *testing.T) {
 
 	resetPrinter(t)
 	cachePruneDryRun = false
+	cachePruneYes = true
+	t.Cleanup(func() { cachePruneYes = false })
 	if err := runCachePrune(nil, nil); err != nil {
 		t.Fatalf("runCachePrune: %v", err)
 	}
