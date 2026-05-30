@@ -16,7 +16,6 @@ acme-skills/
 │   │   └── references/GUIDE.md
 │   └── test-runner/
 │       └── SKILL.md
-├── TEAMS.yaml                       # Optional: team definitions
 └── README.md                        # Optional: human-readable docs
 ```
 
@@ -68,23 +67,9 @@ qvr add code-review@v1.0.0
 
 **Resolution order**: exact tag → exact branch → error.
 
-## TEAMS.yaml (Optional)
+## Team membership and access control
 
-Defines team structure for collaboration. See [team-workflows.md](guides/team-workflows.md).
-
-```yaml
-teams:
-  platform:
-    description: Platform engineering team
-    members:
-      - github: alice
-        role: maintainer
-      - github: bob
-        role: contributor
-    skills:
-      - deploy-helper
-      - infra-scanner
-```
+Quiver doesn't define a team file. Membership, permissions, and review gating are owned by your git host — GitHub Teams + branch protection + CODEOWNERS, or the equivalent on your platform. See [team-workflows.md](guides/team-workflows.md) for the recommended layout.
 
 ## Standalone Skill Repos
 

@@ -1,10 +1,24 @@
 # Team Workflows
 
-> **Status: planned.** First-class team commands (`qvr fork`, `qvr team`)
-> are not yet shipping — `qvr diff` already exists for inspecting local
-> worktree changes. Use registries + branches in the meantime.
+Quiver is deliberately thin on team primitives. Git and your git host (GitHub, GitLab, …) already own team membership, permissions, fork/diff, and review. Quiver builds on top of that surface instead of duplicating it.
 
-## Multi-Team Setup
+## What Quiver does and doesn't do for teams
+
+| You need to… | Quiver-native | Use this instead |
+|---|---|---|
+| Add/remove team members | — | GitHub Teams (or your host's equivalent). |
+| Gate who can merge to a registry | — | Branch protection + CODEOWNERS. |
+| Fork a skill into your own registry | — | `gh repo fork` or `git clone && push to a new remote`. Copy the skill's subdir if you only want one. |
+| Diff two versions of a skill | partial (`qvr diff` shows local worktree edits) | `git diff <v1>..<v2> -- skills/<name>/` inside the registry for version-to-version. |
+| Use the same skill across multiple teams | ✓ | One registry per team plus a shared org registry. Install from any of them. |
+| Pin a skill to a specific version or branch | ✓ | `qvr add acme/code-review@v2.1.0` (any git ref). |
+| Track upstream changes after a fork | ✓ | `qvr publish --fork --migrate` records `forkedFrom: <upstream>@<sha>` in the lockfile entry. The published SKILL.md stays byte-identical. `qvr verify` will read this in the v0.9 trust layer to surface the provenance chain. |
+| Audit who's installed what across machines | ✓ (planned) | `qvr inventory` — lands with the trust layer. |
+| Require a registry's skills be signed | ✓ (planned) | `quiver.trust.yaml` with `require-signature: true` — lands with the trust layer. |
+
+If you find yourself wanting a `qvr team`/`qvr fork` command, the answer is almost always "use the git tool you'd reach for outside Quiver." That keeps a single source of truth (the git host) and avoids parallel state.
+
+## Multi-team setup
 
 ### Organization with multiple teams
 
@@ -17,96 +31,89 @@ qvr registry add platform git@github.com:acme/platform-skills.git
 qvr registry add ml-ops git@github.com:acme/ml-skills.git
 ```
 
-### Namespaced skills
+Permissions are enforced by the git host (who can push to `acme/platform-skills`). Quiver reads everything; it writes nothing back without you explicitly running `qvr push` or `qvr publish`.
 
-Skills from different registries are namespaced to avoid collision:
+### Namespaced skill references
 
-```bash
-qvr add acme/code-review          # From org registry
-qvr add platform/deploy-helper    # From platform registry
-qvr add ml-ops/model-deploy       # From ML ops registry
-```
-
-## Forking Skills
-
-Customize a shared skill for your team:
+Each registry's name is its namespace:
 
 ```bash
-# Fork from org registry to your team's registry
-qvr fork acme/code-review --to platform
-
-# The fork has forked-from metadata
-# Now modify it for your team's needs
-qvr push code-review -m "customized for platform team"
+qvr add acme/code-review          # from "acme" registry
+qvr add platform/deploy-helper    # from platform registry
+qvr add ml-ops/model-deploy       # from ml-ops registry
 ```
 
-## Comparing Versions
+When a bare name (`qvr add code-review`) could resolve to multiple registries, Quiver should fail with a chooser instead of silently picking one. (Tracked as issue #106 — getting tightened up in the v1.0 close-out.)
+
+## Forking a skill
+
+Quiver doesn't ship a `qvr fork` command. Two paths, depending on whether you're forking from outside Quiver or from an already-installed skill.
+
+**From outside Quiver — straight git:**
 
 ```bash
-# Diff between branches
-qvr diff code-review main v2
+# 1. Fork the upstream registry (or clone + push to a new remote you own).
+gh repo fork acme/org-skills --clone --remote
 
-# Diff between fork and original
-qvr diff platform/code-review acme/code-review
+# 2. Pull just the skill you want into your team's registry.
+cp -R org-skills/skills/code-review platform-skills/skills/
+cd platform-skills
+git add skills/code-review && git commit -m "fork code-review from acme/org-skills"
+git push
 ```
 
-## Bidirectional Sync Workflow
-
-### Scenario: Agent improves a skill
-
-1. Agent modifies skill during work session (through symlink)
-2. You review changes: `qvr status`
-3. Push improvements: `qvr push code-review -m "agent-improved patterns"`
-4. Team benefits from the improvement
-
-### Scenario: Upstream changes
-
-1. Teammate pushes skill update
-2. Check for updates: `qvr pull --check`
-3. Pull changes: `qvr pull code-review`
-4. If conflict: resolve in worktree, then `qvr push`
-
-### Scenario: Version switch
-
-1. New version available on `v2` branch
-2. Switch: `qvr switch code-review v2`
-3. Test with your agent
-4. If issues: `qvr switch code-review main` (rollback)
-
-## Team Management
-
-### TEAMS.yaml
-
-```yaml
-teams:
-  platform:
-    description: Platform engineering
-    members:
-      - github: alice
-        role: maintainer
-      - github: bob
-        role: contributor
-    skills:
-      - deploy-helper
-      - infra-scanner
-```
-
-### Commands
+**From an installed skill — `qvr publish --fork --migrate`:**
 
 ```bash
-# View teams
-qvr team list --registry org
-
-# Add a member
-qvr team add platform carol --registry org
-
-# Remove a member
-qvr team remove platform bob --registry org
+qvr edit code-review
+# ...make your changes...
+qvr publish code-review --fork git@github.com:acme/platform-skills.git --migrate --tag v0.1.0
 ```
 
-Team changes are committed to the registry repo (auditable via git log).
+After `--migrate`, the lockfile entry records `forkedFrom: <original-upstream>@<sha>` so the provenance chain is preserved locally. The published SKILL.md is byte-identical to your eject dir — qvr never stamps metadata into the artifact. The v0.9 trust layer's `qvr verify` reads `forkedFrom` from the lockfile to enforce fork policy.
 
-## CI/CD Integration
+## Comparing versions
+
+`qvr diff <skill>` shows uncommitted edits in the local worktree — useful before `qvr push`. For version-to-version comparison, use git directly inside the registry clone:
+
+```bash
+# Local worktree edits before push
+qvr diff code-review
+
+# Diff between two branches/tags inside one registry
+cd ~/.quiver/registries/acme/org-skills.git
+git diff main..v2 -- skills/code-review/
+
+# Diff between a fork and its origin (after both are cloned locally)
+diff -ruN \
+  ~/.quiver/registries/acme/org-skills.git/skills/code-review/ \
+  ~/.quiver/registries/acme/platform-skills.git/skills/code-review/
+```
+
+## Bidirectional sync workflow
+
+### Agent improves a skill
+
+1. Agent modifies the skill during a work session (through the symlink — `qvr` doesn't get involved).
+2. Review: `qvr status` (and `qvr diff <skill>` for the line-level changes).
+3. Push: `qvr push code-review -m "agent-improved patterns"`.
+4. Team benefits from the improvement.
+
+### Upstream changes
+
+1. Teammate pushes a skill update.
+2. Check: `qvr pull --check`.
+3. Pull: `qvr pull code-review`.
+4. Resolve conflicts in the worktree, then `qvr push`.
+
+### Version switch
+
+1. New version available on `v2`.
+2. Switch: `qvr switch code-review v2`.
+3. Test with your agent.
+4. Rollback if needed: `qvr switch code-review main`.
+
+## CI / CD integration
 
 ### Validate skills in CI
 
@@ -120,7 +127,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          go install github.com/quiver-sh/qvr@latest
+          go install github.com/raks097/quiver@latest
           qvr validate skills/ --output json
           qvr scan skills/ --format json
 ```
@@ -140,17 +147,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          go install github.com/quiver-sh/qvr@latest
+          go install github.com/raks097/quiver@latest
           qvr validate skills/
           qvr scan skills/
 ```
 
-## Best Practices
+## Best practices
 
-1. **One registry per team** — keeps permissions simple
-2. **Shared org registry** for cross-team skills
-3. **Use branches for versions** — `main` is latest stable, `v1`/`v2` for pinned versions
-4. **Tag releases** — `v1.0.0` for reproducible installs
-5. **Require scan in CI** — catch issues before they reach agents
-6. **Fork, don't copy** — `forked-from` metadata enables tracking upstream changes
-7. **Review skill changes** like code — PRs, reviews, CI checks
+1. **One registry per team** — keeps git permissions simple. Cross-team skills live in a shared `org` registry.
+2. **Use branches for versions** — `main` is latest stable; `v1`/`v2` for pinned majors.
+3. **Tag releases** — `v1.0.0` makes installs reproducible (`qvr add foo@v1.0.0`).
+4. **Require scan in CI** — catch issues before they reach agents. Once the trust layer ships, also require `qvr verify` to enforce trust policy.
+5. **Treat skills like code** — PRs, reviews, CI checks. Your git host already does this; let it.

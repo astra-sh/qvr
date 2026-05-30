@@ -184,23 +184,20 @@ func setupBareForkWithHEAD(t *testing.T, branch string) string {
 	return bare
 }
 
-// TestPublishInstalled_Fork_StampsForkedFrom verifies that --fork writes
-// `forked-from: <upstream>@<sha>` into the SKILL.md that lands on the fork
-// remote. Post-#98 the stamp lives in the stage clone, never in the user's
-// eject dir — so we verify the *published* artifact carries it, and
-// separately assert the eject dir stays clean.
-func TestPublishInstalled_Fork_StampsForkedFrom(t *testing.T) {
+// TestPublishInstalled_Fork_LeavesSKILLMdAlone verifies that --fork
+// publishes byte-identical content — the eject dir's SKILL.md and the
+// published artifact's SKILL.md both equal the user's checked-in version,
+// with no `forked-from:` key inserted by qvr. Fork provenance lives in
+// the lockfile entry (ForkedFrom), not in the artifact.
+func TestPublishInstalled_Fork_LeavesSKILLMdAlone(t *testing.T) {
 	entry, projectRoot, editDir := ejectedFixture(t, "demo")
-	originalSource := entry.SourceUpstream // captured at eject time
+	originalSource := entry.SourceUpstream
 
-	// Stand up a real bare repo as the fork destination so the push lands.
 	forkURL := filepath.Join(t.TempDir(), "fork.git")
 	if _, err := gogit.PlainInit(forkURL, true); err != nil {
 		t.Fatalf("init fork bare: %v", err)
 	}
 
-	// Snapshot the eject dir's SKILL.md BEFORE publish so we can assert
-	// publish didn't touch it (#98 regression guard).
 	editSKILLBefore, err := os.ReadFile(filepath.Join(editDir, "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read eject SKILL.md (before): %v", err)
@@ -219,28 +216,29 @@ func TestPublishInstalled_Fork_StampsForkedFrom(t *testing.T) {
 		t.Fatalf("PublishInstalled: %v", err)
 	}
 
-	// #98: eject dir's SKILL.md must NOT have been mutated by qvr's stamp.
 	editSKILLAfter, err := os.ReadFile(filepath.Join(editDir, "SKILL.md"))
 	if err != nil {
 		t.Fatalf("read eject SKILL.md (after): %v", err)
 	}
 	if string(editSKILLBefore) != string(editSKILLAfter) {
-		t.Errorf("publish mutated eject SKILL.md (issue #98): before=%q after=%q", editSKILLBefore, editSKILLAfter)
+		t.Errorf("publish mutated eject SKILL.md: before=%q after=%q", editSKILLBefore, editSKILLAfter)
 	}
 
-	// The fork's SKILL.md must carry the stamp — that's where the published
-	// artifact actually lives.
 	forkSKILL := readSKILLFromBareRepo(t, forkURL, "v0.1.0", "SKILL.md")
-	if !strings.Contains(forkSKILL, "forked-from:") {
-		t.Errorf("fork SKILL.md missing forked-from stamp: %q", forkSKILL)
+	if strings.Contains(forkSKILL, "forked-from:") {
+		t.Errorf("fork SKILL.md contains forked-from (v0.8.2 moved provenance to lockfile): %q", forkSKILL)
 	}
-	if !strings.Contains(forkSKILL, originalSource) {
-		t.Errorf("forked-from missing original upstream %q: %q", originalSource, forkSKILL)
+	if forkSKILL != string(editSKILLBefore) {
+		t.Errorf("fork SKILL.md differs from eject SKILL.md — publish should be a verbatim copy.\nfork:  %q\neject: %q", forkSKILL, editSKILLBefore)
 	}
 
-	// Without --migrate, the lock entry's Source must NOT have flipped.
 	if entry.Source != originalSource {
 		t.Errorf("entry.Source = %q, want unchanged %q (Migrate=false)", entry.Source, originalSource)
+	}
+	// Migrate=false → ForkedFrom must remain empty (the entry's identity
+	// hasn't moved to the fork; this was a one-shot push).
+	if entry.ForkedFrom != "" {
+		t.Errorf("entry.ForkedFrom = %q, want empty without --migrate", entry.ForkedFrom)
 	}
 }
 
@@ -288,7 +286,9 @@ func readSKILLFromBareRepo(t *testing.T, bareRepoPath, ref, file string) string 
 
 // TestPublishInstalled_ForkMigrate_RewritesSource covers the same --fork
 // flow with Migrate=true: after the successful push, entry.Source flips to
-// the fork URL and entry.SourceUpstream preserves the original.
+// the fork URL, entry.SourceUpstream preserves the original, and
+// entry.ForkedFrom records the upstream + base sha as the lockfile-side
+// fork provenance (v0.8.2 — replaces the old SKILL.md stamping).
 func TestPublishInstalled_ForkMigrate_RewritesSource(t *testing.T) {
 	entry, projectRoot, _ := ejectedFixture(t, "demo")
 	originalSource := entry.SourceUpstream
@@ -305,7 +305,6 @@ func TestPublishInstalled_ForkMigrate_RewritesSource(t *testing.T) {
 		ForkURL:     forkURL,
 		Migrate:     true,
 		Tag:         "v0.1.0",
-		AutoCommit:  true, // forked-from stamping dirties SKILL.md; explicit opt-in (issue #83)
 	})
 	if err != nil {
 		t.Fatalf("PublishInstalled: %v", err)
@@ -318,6 +317,12 @@ func TestPublishInstalled_ForkMigrate_RewritesSource(t *testing.T) {
 	}
 	if entry.SourceUpstream != originalSource {
 		t.Errorf("entry.SourceUpstream = %q, want preserved original %q", entry.SourceUpstream, originalSource)
+	}
+	if entry.ForkedFrom == "" {
+		t.Errorf("entry.ForkedFrom is empty after --fork --migrate; want recorded provenance")
+	}
+	if !strings.HasPrefix(entry.ForkedFrom, originalSource+"@") {
+		t.Errorf("entry.ForkedFrom = %q, want prefix %q@<sha>", entry.ForkedFrom, originalSource)
 	}
 }
 
@@ -373,7 +378,6 @@ func TestPublishInstalled_MigrateClearsRegistry(t *testing.T) {
 		ProjectRoot: projectRoot,
 		ForkURL:     forkURL,
 		Migrate:     true,
-		AutoCommit:  true,
 		Tag:         "v0.1.0",
 	}); err != nil {
 		t.Fatalf("PublishInstalled: %v", err)
@@ -383,12 +387,11 @@ func TestPublishInstalled_MigrateClearsRegistry(t *testing.T) {
 	}
 }
 
-// TestPublishInstalled_Fork_CleanWD_NoAutoCommit covers issue #98: when the
-// user's eject dir is clean and they pass --fork without --auto-commit, the
-// publish must succeed. qvr's own forked-from stamp lands in the stage
-// clone — never in the user's eject dir — so the guard meant for user WIP
-// has nothing to complain about. The stamp ships in the publish commit on
-// the fork; the eject dir's SKILL.md stays byte-identical.
+// TestPublishInstalled_Fork_CleanWD_NoAutoCommit covers issue #98 (now
+// trivially satisfied by v0.8.2): publish never touches SKILL.md, so a
+// clean eject dir + no --auto-commit must succeed. Originally the guard
+// rejected this case because qvr stamped `forked-from:` into the stage,
+// dirtying it; with stamping removed the path is clean by construction.
 func TestPublishInstalled_Fork_CleanWD_NoAutoCommit(t *testing.T) {
 	entry, projectRoot, editDir := ejectedFixture(t, "demo")
 	forkURL := filepath.Join(t.TempDir(), "fork.git")
@@ -421,10 +424,9 @@ func TestPublishInstalled_Fork_CleanWD_NoAutoCommit(t *testing.T) {
 		t.Errorf("publish mutated eject SKILL.md (issue #98): before=%q after=%q", editSKILLBefore, editSKILLAfter)
 	}
 
-	// The stamp lives on the fork. Read the just-pushed branch and confirm.
 	forkSKILL := readSKILLFromBareRepo(t, forkURL, res.Branch, "SKILL.md")
-	if !strings.Contains(forkSKILL, "forked-from:") {
-		t.Errorf("fork SKILL.md missing forked-from stamp after publish: %q", forkSKILL)
+	if strings.Contains(forkSKILL, "forked-from:") {
+		t.Errorf("fork SKILL.md contains forked-from (v0.8.2 moved provenance to lockfile): %q", forkSKILL)
 	}
 }
 

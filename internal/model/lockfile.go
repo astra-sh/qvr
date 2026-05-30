@@ -112,6 +112,16 @@ type LockEntry struct {
 	// diverged. Provenance only — never used to drive pushes.
 	SourceUpstream string `json:"sourceUpstream,omitempty"`
 
+	// ForkedFrom records the upstream this skill was forked from when
+	// published via `qvr publish --fork --migrate`. Format:
+	// "<git-url>@<commit-sha>" (short sha). Empty for skills never
+	// forked. Set on the author's local lock at migrate time; the
+	// published artifact's SKILL.md is never mutated, so downstream
+	// consumers don't carry this field unless they themselves migrate.
+	// Provenance only in v0.8; v0.9's trust layer will read this to
+	// verify fork policy.
+	ForkedFrom string `json:"forkedFrom,omitempty"`
+
 	// Mode is the install mode: "" (shared, default for `qvr add`),
 	// "edit" (`qvr edit` ejected to EditPath), or "link" (`qvr link`).
 	// Empty-string default keeps existing v5 locks loading unchanged.

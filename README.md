@@ -305,8 +305,10 @@ Key properties:
   no manual round-trip.
 - `qvr publish <skill> --fork <git-url>` retargets the push to a new
   remote (your fork). Add `--migrate` to flip the lock entry's `Source`
-  so future publishes track the fork. SKILL.md is stamped with a
-  `forked-from: <upstream>@<sha7>` provenance line.
+  so future publishes track the fork and record
+  `forkedFrom: <upstream>@<sha7>` in the lockfile entry. The published
+  SKILL.md is byte-identical to the eject dir — qvr never stamps
+  metadata into the artifact.
 - `qvr publish ./path --registry <name>` (greenfield mode) clones the
   named registry, drops the local skill at `skills/<name>/`, commits,
   pushes — for adding a brand-new skill to a multi-skill registry.
@@ -391,8 +393,15 @@ Planned:
 
 - `qvr add --local` vendor mode (materialize real files into the project),
   plus a `qvr publish` flow that round-trips vendored edits back upstream.
-- Teams: namespaces, forks, `TEAMS.yaml`.
-- Local dashboard + prebuilt binary distribution.
+- v0.9 — trust layer (`qvr sign`, attestations, per-registry `quiver.trust.yaml`),
+  two-stage scanner (`qvr scan --deep`, SBOM), `qvr inventory`, `qvr audit`,
+  and the embedded React dashboard (`qvr ui`).
+- v1.0 — prebuilt multi-platform binaries via Homebrew / `go install` /
+  curl installer, `qvr doctor`, shell completions.
+
+Team workflows are deliberately delegated to git + your git host (GitHub
+Teams, branch protection, CODEOWNERS); see
+[team-workflows.md](documentation/guides/team-workflows.md).
 
 ## Documentation
 

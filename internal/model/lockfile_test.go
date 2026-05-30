@@ -301,6 +301,52 @@ func TestLockFile_DisabledRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLockFile_ForkedFromRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, model.LockFileName)
+	l := model.NewLockFile(path)
+	l.Put(&model.LockEntry{
+		Name:       "auth",
+		Source:     "git@github.com:me/fork.git",
+		Ref:        "main",
+		Targets:    []string{"claude"},
+		ForkedFrom: "git@github.com:up/auth.git@abc1234",
+	})
+	if err := l.Write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	loaded, err := model.ReadLockFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	entry, err := loaded.Get("auth")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if entry.ForkedFrom != "git@github.com:up/auth.git@abc1234" {
+		t.Errorf("ForkedFrom round-trip lost: %q", entry.ForkedFrom)
+	}
+
+	// Empty ForkedFrom must omit the JSON key entirely (omitempty).
+	l2 := model.NewLockFile(filepath.Join(dir, "empty.lock"))
+	l2.Put(&model.LockEntry{
+		Name:    "plain",
+		Source:  "git@x:y.git",
+		Ref:     "main",
+		Targets: []string{"claude"},
+	})
+	if err := l2.Write(); err != nil {
+		t.Fatalf("write empty: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "empty.lock"))
+	if err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if strings.Contains(string(raw), "forkedFrom") {
+		t.Errorf("empty ForkedFrom should not serialise; got: %s", raw)
+	}
+}
+
 func TestLockFile_RejectsUnsupportedVersion(t *testing.T) {
 	// v4 is the floor — anything older is rejected outright (qvr is
 	// pre-release with no users, so the only recourse is to delete the

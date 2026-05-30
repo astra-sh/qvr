@@ -46,7 +46,6 @@ my-team-skills/
 │   │   └── references/
 │   └── test-runner/
 │       └── SKILL.md
-├── TEAMS.yaml            # Optional: team definitions
 └── README.md             # Optional: documentation
 ```
 
@@ -104,30 +103,7 @@ qvr add code-review         # Default branch (main)
 
 ## Team Collaboration
 
-Add a TEAMS.yaml for team visibility:
-
-```yaml
-teams:
-  platform:
-    description: Platform engineering
-    members:
-      - github: alice
-        role: maintainer
-      - github: bob
-        role: contributor
-    skills:
-      - deploy-helper
-      - infra-scanner
-
-  frontend:
-    description: Frontend team
-    members:
-      - github: carol
-        role: maintainer
-    skills:
-      - react-patterns
-      - a11y-checker
-```
+Quiver doesn't define its own team file. Use your git host's existing team primitives — GitHub Teams + branch protection + CODEOWNERS are the recommended pattern. See [team-workflows.md](team-workflows.md) for the full story.
 
 ## Access Control
 

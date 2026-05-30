@@ -72,7 +72,7 @@ func init() {
 	publishCmd.Flags().BoolVar(&publishNoCreateBranch, "no-create-branch", false, "(path mode) refuse to create --branch if it doesn't already exist on origin")
 	publishCmd.Flags().BoolVar(&publishNoScan, "no-scan", false, "skip the security scan that normally gates publishes")
 	publishCmd.Flags().BoolVar(&publishGlobal, "global", false, "(installed mode) read the user-global lock file instead of the project lock")
-	publishCmd.Flags().StringVar(&publishFork, "fork", "", "(installed mode) retarget the publish to a new git URL; stamps `forked-from` provenance in SKILL.md")
+	publishCmd.Flags().StringVar(&publishFork, "fork", "", "(installed mode) retarget the publish to a new git URL; pair with --migrate to record `forked-from` provenance in the lockfile")
 	publishCmd.Flags().BoolVar(&publishMigrate, "migrate", false, "(installed mode + --fork) rewrite the lock entry so future publishes track the fork URL")
 	publishCmd.Flags().BoolVar(&publishAllowHeal, "allow-lockfile-heal", false, "(installed mode) proceed even when qvr.lock.commit doesn't match the edit repo HEAD — overrides the integrity refusal added for #74")
 	publishCmd.Flags().BoolVar(&publishAutoCommit, "auto-commit", false, "(installed mode) stage and commit dirty changes in the eject dir before pushing (default refuses dirty WD — issue #83)")

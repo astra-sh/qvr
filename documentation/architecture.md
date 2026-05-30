@@ -140,7 +140,9 @@ internal/registry/
 pkg/skillspec/           (public, no internal deps)
 
 # Planned (not yet shipping):
-#   internal/team/       (namespaces, TEAMS.yaml, fork tooling)
-#   internal/ui/ + ui/   (embedded React dashboard)
+#   internal/attestation/, internal/trust/  (signing + per-registry trust policy, v0.9)
+#   internal/inventory/, internal/audit/    (cross-agent inventory + local audit log, v0.9)
+#   internal/ui/ + ui/                      (embedded React dashboard, v0.9)
+#   internal/doctor/                        (environment diagnostics, v1.0)
 ```
 

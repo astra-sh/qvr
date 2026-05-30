@@ -27,10 +27,6 @@ type rawFrontmatter struct {
 	Compatibility string            `yaml:"compatibility"`
 	Metadata      map[string]string `yaml:"metadata"`
 	AllowedTools  yaml.Node         `yaml:"allowed-tools"`
-	// ForkedFrom records provenance for skills derived from another via
-	// `qvr publish --fork`. Format: "<upstream-url>@<commit-sha>". Optional;
-	// round-tripped on parse; never validated.
-	ForkedFrom string `yaml:"forked-from"`
 }
 
 // Parse parses a SKILL.md file content into a Skill struct.
@@ -99,7 +95,6 @@ func Parse(content string) (*Skill, error) {
 		Compatibility: strings.TrimSpace(raw.Compatibility),
 		Metadata:      raw.Metadata,
 		AllowedTools:  allowed,
-		ForkedFrom:    strings.TrimSpace(raw.ForkedFrom),
 	}
 
 	return &Skill{

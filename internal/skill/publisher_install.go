@@ -34,12 +34,12 @@ var (
 type PublishInstalledRequest struct {
 	Entry       *model.LockEntry
 	ProjectRoot string
-	// ForkURL re-targets the publish to a new remote. When set, the
-	// initial commit is stamped with `forked-from: <SourceUpstream>@<sha>`
-	// in SKILL.md frontmatter, origin is rewritten to ForkURL, and the
-	// push lands there. Migrate=true also rewrites entry.Source so future
-	// publishes track the fork. Migrate also clears entry.Registry (issue
-	// #85) because the fork is registry-independent.
+	// ForkURL re-targets the publish to a new remote: origin is rewritten
+	// to ForkURL and the push lands there. SKILL.md is never mutated — the
+	// published artifact is byte-identical to the eject dir's checked-in
+	// SKILL.md. Migrate=true rewrites entry.Source so future publishes
+	// track the fork, records the upstream in entry.ForkedFrom, and clears
+	// entry.Registry (issue #85) because the fork is registry-independent.
 	ForkURL string
 	Migrate bool
 	// Tag, when non-empty, creates an annotated tag at the new commit
@@ -85,21 +85,22 @@ type PublishInstalledResult struct {
 }
 
 // PublishInstalled commits + pushes the local edit copy of an installed
-// skill to its Source URL (or a --fork override). When --fork is supplied,
-// the SKILL.md frontmatter is stamped with `forked-from: <upstream>@<sha>`
-// before the commit, and origin is rewritten to the fork URL. When
-// --migrate is also set, the lock entry's Source is updated post-push so
-// subsequent `qvr publish` calls track the fork.
+// skill to its Source URL (or a --fork override). SKILL.md is never
+// mutated by this path — fork provenance lives in the lockfile entry
+// (ForkedFrom), not the artifact. When --fork is supplied, origin is
+// rewritten to the fork URL. When --migrate is also set, the lock
+// entry's Source is updated post-push so subsequent `qvr publish` calls
+// track the fork, and entry.ForkedFrom records the upstream the fork
+// derived from.
 //
 // Both root and nested layouts stage through a temp clone of the upstream
-// (issue #86, #95, #98): the user's eject dir is never modified, the
+// (issue #86, #95): the user's eject dir is never modified, and the
 // publish-time commit is one clean cherry-pick on top of the upstream's
-// branch (no history graft from the eject dir's synthetic-init repo), and
-// the forked-from stamp lands in the stage, never in the eject WD.
+// branch (no history graft from the eject dir's synthetic-init repo).
 //
 // The entry is mutated in place on success (Commit advances to the eject
 // dir's HEAD — the snapshot the user just published — and Source/
-// SourceUpstream may flip for --fork --migrate).
+// SourceUpstream/ForkedFrom may flip for --fork --migrate).
 func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRequest) (*PublishInstalledResult, error) {
 	e := req.Entry
 	if e == nil {
@@ -154,9 +155,9 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		return nil, fmt.Errorf("skill validation failed:\n  %s", strings.Join(msgs, "\n  "))
 	}
 
-	// Compute provenance value once for both dry-run reporting and the
-	// stamp-into-stage step below. Built from the eject entry's source
-	// info, never read from the stage.
+	// Compute provenance value for both dry-run reporting and the
+	// lockfile ForkedFrom field set on --migrate below. Built from the
+	// eject entry's source info; never written to any SKILL.md.
 	forkedFromValue := ""
 	if req.ForkURL != "" {
 		upstream := e.SourceUpstream
@@ -233,8 +234,9 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 
 	// Stage clone. Both layouts now go through here (issue #86: eject dir
 	// is never mutated; issue #95: branch comes from the stage's clone,
-	// not the eject's `git init` default of "master"; issue #98: the
-	// forked-from stamp lives in the stage, not the user's WD).
+	// not the eject's `git init` default of "master"). The SKILL.md that
+	// lands in the stage is the eject dir's verbatim — qvr never stamps
+	// metadata into the published artifact.
 	tmp, terr := os.MkdirTemp("", "quiver-publish-installed-*")
 	if terr != nil {
 		return nil, fmt.Errorf("temp dir: %w", terr)
@@ -322,13 +324,6 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 
 	if err := copyDir(editAbs, contentDest); err != nil {
 		return nil, fmt.Errorf("copy skill into stage: %w", err)
-	}
-
-	// Stamp forked-from in the stage (never in eject dir — issue #98).
-	if forkedFromValue != "" {
-		if err := stampForkedFrom(filepath.Join(contentDest, "SKILL.md"), forkedFromValue); err != nil {
-			return nil, fmt.Errorf("stamp forked-from: %w", err)
-		}
 	}
 
 	// Stage + commit.
@@ -452,6 +447,13 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		}
 		e.Source = req.ForkURL
 		e.Registry = ""
+		// Record fork provenance in the lockfile. forkedFromValue was
+		// computed from the pre-publish upstream + eject HEAD, so it
+		// captures "this fork was based on <upstream>@<sha>" — read at
+		// trust-policy time in v0.9.
+		if forkedFromValue != "" {
+			e.ForkedFrom = forkedFromValue
+		}
 	}
 	if h, hErr := canonical.HashSubtreeFromDisk(editAbs); hErr == nil {
 		e.SubtreeHash = h
@@ -577,51 +579,6 @@ func setRepoOriginURL(repo *gogit.Repository, url string) error {
 		cfg.Remotes["origin"] = &gogitcfg.RemoteConfig{Name: "origin", URLs: []string{url}}
 	}
 	return repo.SetConfig(cfg)
-}
-
-// stampForkedFrom rewrites a SKILL.md to insert (or replace) the
-// `forked-from: <value>` key in its YAML frontmatter. Preserves the rest
-// of the frontmatter and body verbatim — line-based edit, no YAML
-// round-tripping (which would reorder keys and lose user comments).
-func stampForkedFrom(skillPath, value string) error {
-	data, err := os.ReadFile(skillPath)
-	if err != nil {
-		return fmt.Errorf("read: %w", err)
-	}
-	lines := strings.Split(string(data), "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
-		return fmt.Errorf("%s: missing frontmatter delimiter", skillPath)
-	}
-	// Find the closing "---" line.
-	closeIdx := -1
-	for i := 1; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) == "---" {
-			closeIdx = i
-			break
-		}
-	}
-	if closeIdx == -1 {
-		return fmt.Errorf("%s: missing closing frontmatter delimiter", skillPath)
-	}
-	// Look for an existing `forked-from:` line and replace, else insert
-	// just before the closing "---".
-	replaced := false
-	for i := 1; i < closeIdx; i++ {
-		if strings.HasPrefix(strings.TrimLeft(lines[i], " \t"), "forked-from:") {
-			lines[i] = fmt.Sprintf("forked-from: %s", value)
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		insert := fmt.Sprintf("forked-from: %s", value)
-		out := make([]string, 0, len(lines)+1)
-		out = append(out, lines[:closeIdx]...)
-		out = append(out, insert)
-		out = append(out, lines[closeIdx:]...)
-		lines = out
-	}
-	return os.WriteFile(skillPath, []byte(strings.Join(lines, "\n")), 0o644)
 }
 
 // Compile-time guard: keep git.GitClient referenced so go-mod-tidy doesn't
