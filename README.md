@@ -8,9 +8,10 @@
   the git-native agent skills manager · CLI: qvr
 ```
 
-> **Status: pre-alpha.** Project-local lockfile, shared SHA-keyed cache, strict
-> visibility — the v4 model below. Surface is stable enough to use; internals
-> still moving.
+> **Status: pre-alpha.** Project-local `qvr.lock` (schema v5), shared
+> SHA-keyed cache, strict visibility, supply-chain scan gates wired into
+> install/sync/publish. Surface is stable enough to use; internals still
+> moving.
 
 ---
 
@@ -103,11 +104,36 @@ $ qvr add tdd                            # writes ./qvr.lock, symlinks .claude/s
 $ qvr add tdd@v2                         # pin a branch or tag
 $ qvr add --global diagnose              # ambient: appears in every Claude session
 $ qvr sync                               # reconcile project against qvr.lock
+$ qvr sync --strict                      # CI gate: fail on any subtree-hash drift
 ```
 
 Anything under `.claude/skills/` that isn't in `qvr.lock` is hidden from the
 agent on `qvr sync`. The lockfile is the only source of truth for what your
 agent loads.
+
+### Common `qvr add` flags
+
+| Flag                 | What it does                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| `--target <agent>`   | Install into a specific agent dir (`claude`, `cursor`, `copilot`, …). Repeatable.                     |
+| `--registry <name>`  | Scope resolution to one registered source. Disambiguates same-named skills across registries.         |
+| `--as <local-name>`  | Install under a different lock-entry / symlink name so two versions of the same skill coexist (A/B). |
+| `--frozen`           | Re-install from the lockfile entry. Refuses drift from the recorded subtree hash; no resolution.      |
+| `--force`            | Replace an existing lock entry at a different ref. Use sparingly — `qvr switch` is usually cleaner.   |
+| `--no-scan`          | Skip the security gate for this install only (see [Security scanning](#security-scanning)).           |
+| `--global`           | Write to the user-global lock and symlink under `~/.<agent>/skills/` instead of the project.          |
+
+#### A/B testing the same skill at two refs
+
+```
+$ qvr add code-review@v1.2.0
+$ qvr add code-review@v1.3.0-rc1 --as code-review-rc
+# both coexist; symlinks .claude/skills/code-review and .claude/skills/code-review-rc
+```
+
+`--as` is local-only — the lockfile records `canonical: code-review` so
+`qvr upgrade`, `qvr publish`, etc. still resolve the alias back to its
+registry-side skill.
 
 `qvr link <local-path>` symlinks a local directory you're actively developing —
 different from `qvr add`, which always goes through a registered source and a
@@ -241,33 +267,51 @@ The lockfile (`qvr.lock`) always pins the **resolved commit SHA** regardless of
 ref type, so reruns on another machine via `qvr sync` get the same bytes even if
 the tag or branch shifts upstream.
 
-### The edit → push → release flow
+### The edit → publish → release flow
 
 ```
     # pin to a specific release
     $ qvr add foo@v1.2.0
 
-    # branch off so edits don't touch upstream main
-    $ qvr edit foo                 # creates qvr/<user>/foo locally
+    # eject into the project so the skill becomes editable
+    $ qvr edit foo                          # promotes .claude/skills/foo to a real dir
     $ vim .claude/skills/foo/SKILL.md
-    $ qvr push foo                 # pushes the user branch upstream
+    $ git -C .claude/skills/foo commit -am "tighten review checklist"
 
-    # cut a new release
-    $ qvr publish .claude/skills/foo --tag v1.3.0
+    # push the commit back to the skill's origin (HEAD-only)
+    $ qvr publish foo -m "tighten review checklist"
+
+    # cut a new release on the same origin (auto un-ejects + repoints at the tag)
+    $ qvr publish foo --tag v1.3.0 -m "v1.3.0"
 
     # teammate picks up the new release
     $ qvr registry update vercel-labs/agent-skills
-    $ qvr upgrade foo              # resolves latest semver tag, moves worktree
+    $ qvr upgrade foo                       # resolves latest semver tag, moves worktree
 ```
 
 Key properties:
 
-- `qvr edit` forks onto a user-owned branch; upstream stays untouched until you
-  explicitly push.
-- `qvr push` warns when the worktree still tracks the registry's default branch,
-  so a casual push doesn't land on someone else's `main` by accident.
-- `qvr publish --tag` creates an annotated tag on the new commit and pushes
-  both.
+- `qvr edit` is the eject: the symlink under `.claude/skills/<skill>` is
+  replaced with a real directory containing a fresh git history, copied
+  out of the shared worktree. Other agent targets (cursor, codex, …) get
+  re-pointed to the canonical edit dir so they stay in sync.
+- `qvr publish <skill>` (installed-skill mode) commits the eject dir into
+  a staged clone of the skill's origin and pushes — never touches the
+  remote until the local validate + scan gates pass.
+- `qvr publish <skill> --tag v1.x.y` creates an annotated tag on the new
+  commit, pushes branch+tag, then auto un-ejects: the lockfile flips out
+  of edit mode and symlinks are repointed at the new tag's shared
+  worktree. Same end state as `qvr remove --force && qvr add @<tag>` —
+  no manual round-trip.
+- `qvr publish <skill> --fork <git-url>` retargets the push to a new
+  remote (your fork). Add `--migrate` to flip the lock entry's `Source`
+  so future publishes track the fork. SKILL.md is stamped with a
+  `forked-from: <upstream>@<sha7>` provenance line.
+- `qvr publish ./path --registry <name>` (greenfield mode) clones the
+  named registry, drops the local skill at `skills/<name>/`, commits,
+  pushes — for adding a brand-new skill to a multi-skill registry.
+- `qvr publish --dry-run` validates + scans + reports the target
+  branch/tag without touching the remote.
 - `qvr upgrade` follows the tag channel (latest semver); pass an explicit
   `<ref>` to repin elsewhere.
 - `qvr switch <skill> <ref>` moves to any ref without branching — useful for
@@ -288,11 +332,38 @@ makes sense).
 qvr list                    skills in the project lock
 qvr list --all              project + global, with scope column
 qvr info <skill>            structured details — frontmatter, refs, targets
+qvr status [skill...]       per-skill modification state (clean / dirty / drift)
 qvr outdated                per-registry ls-remote vs. pinned SHAs
 qvr diff <skill>            local worktree changes against HEAD
 qvr doctor                  diagnose broken installs, orphan artifacts,
                             unreferenced registries; --strict to fail on those
 ```
+
+### Integrity
+
+```
+qvr lock verify             re-hash every entry, report drift / missing / unverified
+qvr lock verify --frozen    exit non-zero on drift, missing worktree, or hash failure
+qvr lock verify --strict    implies --frozen + also fails on unverified entries
+qvr lock verify --repair    rewrite drifting Verification blocks from current disk
+qvr lock upgrade            populate Verification blocks for any entries missing them
+```
+
+`--strict` is the CI gate: "every entry is verifiably the recorded state."
+A missing worktree or a hash-computation failure flips it to exit 1, so the
+gate can't silently pass when something's gone sideways.
+
+### Shared cache
+
+```
+qvr cache list              reachable + orphan worktrees with sizes
+qvr cache prune --dry-run   show what would be removed
+qvr cache prune             delete worktrees no longer referenced by any project lock
+```
+
+A worktree is reachable if any tracked project lock (or the global lock)
+references it. `qvr add` and `qvr remove` keep the project list (~/.quiver/
+`projects.json`) up to date automatically.
 
 ## Roadmap
 
@@ -301,16 +372,25 @@ Shipping today:
 - **Foundation** — `init`, `validate`, `config`, `skillspec` parser
 - **Registry** — `add`, `remove`, `list`, `update` (with `--check` dry-run),
   `search`, `version`, TTL-cached index
-- **Project-local install** — `add`, `sync`, `link`, worktrees, symlinks,
-  `pull`/`push`, `publish`, edit → push → release flow, `upgrade`/`switch`,
-  AGENTS.md auto-sync, `doctor`/`info`/`list`/`diff`/`outdated`,
-  `disable`/`enable`, private registries, `cache list`/`cache prune` with
-  `projects.json` reachability tracking
+- **Project-local install** — `add` (with `--as`, `--frozen`, `--registry`),
+  `sync` (with `--strict`), `link`, worktrees, symlinks, `pull`,
+  `upgrade`/`switch`, AGENTS.md auto-sync, `read`,
+  `doctor`/`info`/`list`/`status`/`diff`/`outdated`, `disable`/`enable`,
+  private registries
+- **Edit → publish flow** — `edit` (eject), `publish` with installed-skill
+  mode (`--tag`, `--fork`, `--migrate`, `--auto-commit`,
+  `--allow-lockfile-heal`) and greenfield path mode, auto un-eject after a
+  tagged publish
+- **Supply chain** — `scan` + scan gates on add/sync/publish, lock
+  Verification blocks, `lock verify --frozen/--strict/--repair`,
+  configurable severity thresholds
+- **Cache** — `cache list`/`cache prune` with `projects.json` reachability
+  tracking and orphan-cleanup hints
 
 Planned:
 
-- `qvr add --local` vendor mode (materialize real files into the project)
-  - a `qvr publish` flow that can round-trip vendored edits back upstream.
+- `qvr add --local` vendor mode (materialize real files into the project),
+  plus a `qvr publish` flow that round-trips vendored edits back upstream.
 - Teams: namespaces, forks, `TEAMS.yaml`.
 - Local dashboard + prebuilt binary distribution.
 
