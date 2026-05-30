@@ -67,30 +67,21 @@ func runUpgrade(cmd *cobra.Command, args []string) error {
 		if entry.Canonical != "" {
 			canonicalName = entry.Canonical
 		}
+		// Refresh the source registry before resolving the target ref so
+		// a just-published v0.2.0 is visible without first running
+		// `qvr registry update`. Previously the no-flag path did this
+		// inline and the --to path skipped it — same surprise as #107.
+		// Network failure is non-fatal: fall through with the stale
+		// index so offline workflows still resolve to the best known
+		// tag.
+		mgr := newRegistryManager(git.NewGoGitClient())
+		maybeRefreshRegistryForSkill(cmd.Context(), mgr, canonicalName, "upgrade")
+
 		target := upgradeTo
 		if target == "" {
-			mgr := newRegistryManager(git.NewGoGitClient())
 			loc, err := mgr.FindSkill(canonicalName)
 			if err != nil {
 				return fmt.Errorf("locate skill: %w", err)
-			}
-			// Refresh the source registry before consulting tags so a
-			// just-published v0.2.0 is visible without first running
-			// `qvr registry update`. Without this, the TTL'd index cache
-			// makes upgrade lie about the latest version while `qvr
-			// outdated` (which ls-remotes) sees the new tag — the
-			// "feels broken on first try" finding from the OSS-readiness
-			// audit. Network failure is non-fatal: fall through with the
-			// stale index so offline workflows still resolve to the best
-			// known tag.
-			if _, uerr := mgr.Update(cmd.Context(), loc.RegistryName); uerr != nil {
-				printer.Warning(fmt.Sprintf("upgrade: refresh %s failed (%v); using cached tags", loc.RegistryName, uerr))
-			} else {
-				// Re-read with the refreshed index so the new tags land
-				// in loc.Entry.Versions.Tags.
-				if refreshed, rerr := mgr.FindSkill(canonicalName); rerr == nil {
-					loc = refreshed
-				}
 			}
 			target = skill.LatestSemverTag(loc.Entry.Versions.Tags)
 			if target == "" {

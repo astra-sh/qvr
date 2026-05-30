@@ -65,7 +65,14 @@ func runSwitch(cmd *cobra.Command, args []string) error {
 		}
 		gc := git.NewGoGitClient()
 		wt := git.NewGoGitWorktree()
-		installer := skill.NewInstaller(newRegistryManager(gc), wt, gc)
+		mgr := newRegistryManager(gc)
+		// Refresh the source registry so a just-published ref is visible
+		// to Install — `qvr add` has done this for a while; switch
+		// previously skipped it, leading to "ref not found" on freshly
+		// pushed tags. Best-effort; offline flows continue against the
+		// cached index. Issue #107.
+		maybeRefreshRegistryForSkill(cmd.Context(), mgr, canonicalName, "switch")
+		installer := skill.NewInstaller(mgr, wt, gc)
 		result, err := installer.Install(skill.InstallRequest{
 			Skill:       canonicalName + "@" + ref,
 			Targets:     entry.Targets,

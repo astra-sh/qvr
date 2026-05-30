@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/registry"
@@ -20,6 +23,28 @@ func newRegistryManager(gc git.GitClient) *registry.Manager {
 		}
 	}
 	return mgr
+}
+
+// maybeRefreshRegistryForSkill best-effort fetches the registry that
+// publishes canonicalName so the next Install / FindSkill sees a
+// just-published ref. Non-fatal: network failures log a warning and the
+// caller proceeds against the cached index so offline flows still resolve.
+//
+// Used by `qvr switch` and `qvr upgrade --to <ref>` to close the surprise
+// where a tag pushed seconds ago is invisible until the user manually runs
+// `qvr registry update`. `qvr upgrade` (no --to) has had this behaviour
+// inline for a while; this helper unifies the three call sites. Issue #107.
+func maybeRefreshRegistryForSkill(ctx context.Context, mgr *registry.Manager, canonicalName, op string) {
+	loc, err := mgr.FindSkill(canonicalName)
+	if err != nil {
+		// Skill isn't locatable in the current registry set; let the
+		// caller's Install / FindSkill surface the error itself with
+		// the message it picks for the operation.
+		return
+	}
+	if _, uerr := mgr.Update(ctx, loc.RegistryName); uerr != nil {
+		printer.Warning(fmt.Sprintf("%s: refresh %s failed (%v); using cached index", op, loc.RegistryName, uerr))
+	}
 }
 
 // refreshAllIndexes invalidates the cached index for every configured
