@@ -148,6 +148,48 @@ func TestInstall_AmbiguousName_RefMissingErrorsHelpfully(t *testing.T) {
 	}
 }
 
+// TestInstall_ConflictHint_PointsAtRemoveAndAdd guards issue #111: the
+// conflict error message when re-adding a skill at a different ref must
+// not lead with `qvr switch <name> <ref>` — that's only correct for
+// same-source ref changes and is misleading for cross-registry alias
+// collisions. The hint must surface remove+add and --force as the
+// always-correct recovery paths.
+func TestInstall_ConflictHint_PointsAtRemoveAndAdd(t *testing.T) {
+	h := newHarness(t)
+	remote := seedRemoteWithTags(t, map[string]string{"shared": sharedSkill}, "v1.0.0", "v2.0.0")
+	h.addRegistry(t, "acme", remote)
+
+	if _, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "shared@v1.0.0",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+	}); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	// Same alias, different ref → conflict.
+	_, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "shared@v2.0.0",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+	})
+	if err == nil {
+		t.Fatal("expected conflict error on re-install at different ref, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"--force", "qvr remove", "qvr add", "v1.0.0", "v2.0.0"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("conflict hint missing %q: %s", want, msg)
+		}
+	}
+	// The old hint led with `qvr switch <name> v2.0.0` as the primary
+	// recommendation. v0.8.8 demotes it: it now only appears as a
+	// qualifier ("`qvr switch` only moves the ref within the same
+	// source") — never as the leading verb in the message.
+	if strings.Index(msg, "use `qvr switch") < strings.Index(msg, "qvr remove") && strings.Contains(msg, "use `qvr switch") {
+		t.Errorf("conflict hint still leads with `qvr switch`: %s", msg)
+	}
+}
+
 // TestInstall_AmbiguousRef_WarnsWhenMultipleHaveRef covers issue #106:
 // when two registries both expose "shared" AND both carry v1.0.0, the @ref
 // path used to silently pick alphabetical without surfacing the same

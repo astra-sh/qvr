@@ -203,10 +203,17 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 
 	// Conflict check: silently swapping the lock entry to a different ref
 	// would contradict the "switching refs is a symlink repoint, not a
-	// re-install" contract. Refuse and point at `qvr switch`. Idempotent
-	// when the existing ref matches. Uses localName so `--as <alias>`
-	// installs only conflict with prior installs of the same alias, not
-	// the canonical name — the whole point of --as is coexistence.
+	// re-install" contract. Refuse with a hint that covers all three
+	// recovery paths. Issue #111: the old hint led with `qvr switch
+	// <name> <ref>`, which only works when the source is the same as
+	// the requested one — for a same-alias-different-registry conflict
+	// it silently kept the wrong source. The new hint leads with
+	// remove+add (always correct), keeps --force as the in-place
+	// overwrite, and qualifies `qvr switch` as "same-source-only".
+	// Idempotent when the existing ref matches. Uses localName so
+	// `--as <alias>` installs only conflict with prior installs of the
+	// same alias, not the canonical name — the whole point of --as is
+	// coexistence.
 	if !req.Force {
 		lp := req.LockPath
 		if lp == "" {
@@ -214,8 +221,8 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		}
 		if existingLock, lerr := model.ReadLockFile(lp); lerr == nil {
 			if existing, gerr := existingLock.Get(localName); gerr == nil && existing.Ref != "" && existing.Ref != version {
-				return nil, fmt.Errorf("%s already installed at %s; use `qvr switch %s %s` to change refs, or `qvr remove %s --force` to uninstall (then re-run `qvr add %s@%s`), or pass --force to `qvr add` to overwrite in place",
-					localName, existing.Ref, localName, version, localName, localName, version)
+				return nil, fmt.Errorf("%s already installed at %s (from %s); pass --force to overwrite, or `qvr remove %s --force && qvr add %s@%s` to reinstall (if the source is changing too — `qvr switch` only moves the ref within the same source)",
+					localName, existing.Ref, existing.Source, localName, localName, version)
 			}
 		}
 	}
