@@ -477,6 +477,157 @@ func TestPublishInstalled_Fork_EmptyRemote_PushesNotNoop(t *testing.T) {
 	}
 }
 
+// TestPublishInstalled_Fork_EmptyBare_UsesBareHEADNotEntryRef is the
+// follow-up regression for issue #113: when the entry was installed at a
+// tag (e.Ref = "v0.1.0") and the user publishes to a fresh `git init
+// --bare` fork whose HEAD points at refs/heads/main, the push must land
+// on `main` — the bare's intended default branch — not on `v0.1.0`.
+//
+// Pre-fix the branch-resolution chain fell from "remote default branch"
+// (empty for a ref-less bare) straight through to entry.Ref, pushing the
+// fork's only commit onto a branch named after the source's tag. The
+// bare's HEAD stayed pointing at the never-created `main`, so any
+// indexer / installer that walked HEAD saw zero skills and the
+// auto-uneject re-install path failed with "skill not found in
+// registry". This test pins the corrected behaviour: e.Ref is ignored
+// for the emptyOrNew code path and the bare's symref wins.
+func TestPublishInstalled_Fork_EmptyBare_UsesBareHEADNotEntryRef(t *testing.T) {
+	entry, projectRoot, _ := ejectedFixture(t, "demo")
+	// Mirror the issue repro: the source install pinned a tag.
+	entry.Ref = "v0.1.0"
+
+	// Fresh bare with HEAD → refs/heads/main, no refs (the `git init
+	// --bare` shape from the issue body). gogit's PlainInit defaults
+	// to "master", so we pin the symref to "main" explicitly to mirror
+	// what `git init --bare` produces on a system with
+	// init.defaultBranch = main.
+	forkURL := filepath.Join(t.TempDir(), "fork.git")
+	bare, err := gogit.PlainInit(forkURL, true)
+	if err != nil {
+		t.Fatalf("init fork bare: %v", err)
+	}
+	if err := bare.Storer.SetReference(plumbingPkg.NewSymbolicReference(
+		plumbingPkg.HEAD, plumbingPkg.NewBranchReferenceName("main"),
+	)); err != nil {
+		t.Fatalf("set bare HEAD → main: %v", err)
+	}
+
+	p := skill.NewPublisher(git.NewGoGitClient())
+	res, err := p.PublishInstalled(context.Background(), skill.PublishInstalledRequest{
+		Entry:       entry,
+		ProjectRoot: projectRoot,
+		ForkURL:     forkURL,
+		Message:     "graduate to empty bare",
+	})
+	if err != nil {
+		t.Fatalf("PublishInstalled to empty bare with tagged e.Ref: %v", err)
+	}
+	if res.Branch == "v0.1.0" {
+		t.Fatalf("res.Branch = %q — publish followed the source install's tag instead of the bare's HEAD symref (issue #113)", res.Branch)
+	}
+	if res.Branch != "main" {
+		t.Errorf("res.Branch = %q, want %q (bare's HEAD symref)", res.Branch, "main")
+	}
+
+	// And the bare must actually have refs/heads/main populated — not a
+	// dangling refs/heads/v0.1.0.
+	forkRepo, err := gogit.PlainOpen(forkURL)
+	if err != nil {
+		t.Fatalf("open fork: %v", err)
+	}
+	if _, err := forkRepo.Reference(plumbingPkg.NewBranchReferenceName("main"), true); err != nil {
+		t.Errorf("fork missing refs/heads/main after publish: %v", err)
+	}
+	if _, err := forkRepo.Reference(plumbingPkg.NewBranchReferenceName("v0.1.0"), true); err == nil {
+		t.Errorf("fork has refs/heads/v0.1.0 — publish landed on the source's tag-as-branch (issue #113)")
+	}
+}
+
+// TestPublishInstalled_Fork_EmptyBare_HonoursCustomBareHEAD covers the
+// same code path as above but with a non-`main` bare HEAD (e.g. a repo
+// initialised with `init.defaultBranch = trunk`). The publisher must
+// read the bare's actual symref rather than hardcoding "main" as a
+// fallback — otherwise users with custom init defaults silently get
+// their first push on the wrong branch.
+func TestPublishInstalled_Fork_EmptyBare_HonoursCustomBareHEAD(t *testing.T) {
+	entry, projectRoot, _ := ejectedFixture(t, "demo")
+	entry.Ref = "v0.1.0"
+
+	forkURL := filepath.Join(t.TempDir(), "fork.git")
+	bare, err := gogit.PlainInit(forkURL, true)
+	if err != nil {
+		t.Fatalf("init fork bare: %v", err)
+	}
+	if err := bare.Storer.SetReference(plumbingPkg.NewSymbolicReference(
+		plumbingPkg.HEAD, plumbingPkg.NewBranchReferenceName("trunk"),
+	)); err != nil {
+		t.Fatalf("set bare HEAD → trunk: %v", err)
+	}
+
+	p := skill.NewPublisher(git.NewGoGitClient())
+	res, err := p.PublishInstalled(context.Background(), skill.PublishInstalledRequest{
+		Entry:       entry,
+		ProjectRoot: projectRoot,
+		ForkURL:     forkURL,
+		Message:     "graduate to empty bare (trunk)",
+	})
+	if err != nil {
+		t.Fatalf("PublishInstalled to empty bare with HEAD=trunk: %v", err)
+	}
+	if res.Branch != "trunk" {
+		t.Errorf("res.Branch = %q, want %q (custom bare HEAD symref)", res.Branch, "trunk")
+	}
+	forkRepo, err := gogit.PlainOpen(forkURL)
+	if err != nil {
+		t.Fatalf("open fork: %v", err)
+	}
+	if _, err := forkRepo.Reference(plumbingPkg.NewBranchReferenceName("trunk"), true); err != nil {
+		t.Errorf("fork missing refs/heads/trunk after publish: %v", err)
+	}
+}
+
+// TestPublishInstalled_DryRun_EmptyBare_AgreesWithRealRun mirrors the
+// dry-run / real-run agreement contract (see
+// TestPublishInstalled_DryRun_AgreesWithRealPublishOnBranch) for the
+// empty-bare case from issue #113. Dry-run's branch precedence has to
+// stay in lockstep with the real path or the user gets misleading
+// "would publish ...@v0.1.0" output that doesn't match what the real
+// publish actually does.
+func TestPublishInstalled_DryRun_EmptyBare_AgreesWithRealRun(t *testing.T) {
+	entry, projectRoot, _ := ejectedFixture(t, "demo")
+	entry.Ref = "v0.1.0"
+	forkURL := filepath.Join(t.TempDir(), "fork.git")
+	if _, err := gogit.PlainInit(forkURL, true); err != nil {
+		t.Fatalf("init fork bare: %v", err)
+	}
+
+	p := skill.NewPublisher(git.NewGoGitClient())
+	dryRes, err := p.PublishInstalled(context.Background(), skill.PublishInstalledRequest{
+		Entry:       entry,
+		ProjectRoot: projectRoot,
+		ForkURL:     forkURL,
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("dry-run: %v", err)
+	}
+	if dryRes.Branch == "v0.1.0" {
+		t.Fatalf("dry-run Branch = %q (entry.Ref) — dry-run still follows the source tag for empty bare (issue #113)", dryRes.Branch)
+	}
+	realRes, err := p.PublishInstalled(context.Background(), skill.PublishInstalledRequest{
+		Entry:       entry,
+		ProjectRoot: projectRoot,
+		ForkURL:     forkURL,
+		Message:     "real publish after dry-run",
+	})
+	if err != nil {
+		t.Fatalf("real-run: %v", err)
+	}
+	if dryRes.Branch != realRes.Branch {
+		t.Errorf("dry-run/real-run divergence on empty bare: dry=%q real=%q", dryRes.Branch, realRes.Branch)
+	}
+}
+
 // TestPublishInstalled_ExplicitBranch_RemapsRefspec covers issue #95 part 2:
 // passing --branch main when the local eject dir only has a "master" branch
 // must succeed. The push refspec uses HEAD (not refs/heads/<name>) for root

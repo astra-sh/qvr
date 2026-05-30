@@ -450,7 +450,18 @@ func runPublishInstalled(cmd *cobra.Command, name, projectRoot, lockPath string)
 	}
 	if result.Migrated {
 		msg += " — lock entry now tracks the fork"
-		if !autoUnejected {
+		// Three states for the trailing context:
+		//   - autoUnejected:        success line is enough (followed by
+		//                           "Switched ... back to consume mode").
+		//   - autoUnejectNeedsAdd:  Remove ran, Install failed — the
+		//                           warning printed above already spells
+		//                           out "eject torn down, re-install
+		//                           failed". Saying "auto-uneject did
+		//                           not run" here would contradict it
+		//                           (issue #113).
+		//   - neither (registry "", autoRegister refused, etc.):
+		//                           keep the legacy explanation.
+		if !autoUnejected && !autoUnejectNeedsAdd {
 			msg += " (Registry field cleared; auto-uneject did not run)"
 		}
 		_ = entry // suppress unused — kept for future hook points

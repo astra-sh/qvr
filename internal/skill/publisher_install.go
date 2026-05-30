@@ -207,13 +207,31 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		// goes to the symref-resolved branch (the user-reported divergence
 		// for issue #95). Precedence here matches the real path minus the
 		// stage-HEAD step (which requires the clone we're avoiding).
+		//
+		// Empty-remote detection (issue #113 follow-up): when ls-remote
+		// returns no refs the remote is fresh — entry.Ref (typically the
+		// source install's tag like "v0.1.0") can't be a real branch on
+		// it, so we skip the entry.Ref fallback and try to read the local
+		// bare's HEAD symref instead. Without this dry-run reports
+		// "would publish ...@v0.1.0" against an empty bare whose HEAD is
+		// actually `main`.
 		branch := req.Branch
 		if branch == "" {
 			if def, dErr := p.Git.RemoteDefaultBranch(ctx, remoteURL); dErr == nil && def != "" {
 				branch = def
 			}
 		}
-		if branch == "" && e.Ref != "" {
+		dryRunEmpty := false
+		if branch == "" {
+			if refs, lerr := p.Git.LsRemote(ctx, remoteURL); lerr == nil && len(refs.Refs) == 0 {
+				dryRunEmpty = true
+			}
+			if def := localBareDefaultBranch(remoteURL); def != "" {
+				branch = def
+				dryRunEmpty = true
+			}
+		}
+		if branch == "" && !dryRunEmpty && e.Ref != "" {
 			branch = e.Ref
 		}
 		if branch == "" {
@@ -262,9 +280,19 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 	//     emptyOrNew, fork-to-new-remote, and any host that doesn't include
 	//     a symref header in clone). One extra network round-trip but
 	//     correct under upstream renames (master → main).
-	//  4. entry.Ref (last-published label) — fallback only; stale by
-	//     construction once the upstream renames.
-	//  5. "main".
+	//  4. (emptyOrNew only) Local bare's HEAD symref — `ls-remote` on a
+	//     refs-less bare returns nothing, but a local `git init --bare`
+	//     still has HEAD → refs/heads/main set in $GIT_DIR/HEAD. Reading
+	//     it directly catches the issue #113 case where the user pipes
+	//     a fresh bare as --fork and we'd otherwise fall through to
+	//     entry.Ref (a tag from the source install, not a branch).
+	//  5. entry.Ref (last-published label) — fallback only; stale by
+	//     construction once the upstream renames. Skipped for emptyOrNew
+	//     because a fresh empty repo has no concept of "last-published";
+	//     forwarding the source's install ref (often `v0.1.0`) onto an
+	//     empty bare pushes the very first commit onto a branch named
+	//     after a tag, which is never what the user wants (issue #113).
+	//  6. "main".
 	branch := req.Branch
 	if branch == "" && !emptyOrNew {
 		if head, hErr := stagedRepo.Head(); hErr == nil && head.Name().IsBranch() {
@@ -276,7 +304,12 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 			branch = def
 		}
 	}
-	if branch == "" && e.Ref != "" {
+	if branch == "" && emptyOrNew {
+		if def := localBareDefaultBranch(remoteURL); def != "" {
+			branch = def
+		}
+	}
+	if branch == "" && !emptyOrNew && e.Ref != "" {
 		branch = e.Ref
 	}
 	if branch == "" {
@@ -471,6 +504,75 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		Layout:           layout,
 		NothingToPublish: false,
 	}, nil
+}
+
+// localBareDefaultBranch opens a local bare repo at url and returns the
+// short branch name from its HEAD symref. Returns "" for non-local URLs,
+// unreadable repos, non-branch HEADs (detached / tag symref), or any
+// error — caller falls through to the next branch-resolution step.
+//
+// Why this exists (issue #113): a fresh `git init --bare` has HEAD
+// pointing at refs/heads/main (or whatever init.defaultBranch is) but
+// no refs to advertise, so `git ls-remote --symref` returns nothing.
+// Without this helper the publisher falls through to entry.Ref — which
+// is typically the source install's tag like "v0.1.0" — and pushes the
+// very first commit onto a branch named after that tag. Reading
+// $GIT_DIR/HEAD directly catches the local-bare case the network
+// query can't see.
+func localBareDefaultBranch(url string) string {
+	path := localBarePath(url)
+	if path == "" {
+		return ""
+	}
+	repo, err := gogit.PlainOpen(path)
+	if err != nil {
+		return ""
+	}
+	head, err := repo.Reference(plumbing.HEAD, false)
+	if err != nil {
+		return ""
+	}
+	if head.Type() != plumbing.SymbolicReference {
+		return ""
+	}
+	target := head.Target()
+	if !target.IsBranch() {
+		return ""
+	}
+	return target.Short()
+}
+
+// localBarePath returns the filesystem path corresponding to url when
+// url refers to a local repository (an absolute/relative path or a
+// file:// URL). Returns "" for ssh/https URLs and for paths that don't
+// exist on disk.
+func localBarePath(url string) string {
+	if url == "" {
+		return ""
+	}
+	const fileScheme = "file://"
+	switch {
+	case strings.HasPrefix(url, fileScheme):
+		path := strings.TrimPrefix(url, fileScheme)
+		if _, err := os.Stat(path); err != nil {
+			return ""
+		}
+		return path
+	case strings.HasPrefix(url, "/"), strings.HasPrefix(url, "./"), strings.HasPrefix(url, "../"):
+		if _, err := os.Stat(url); err != nil {
+			return ""
+		}
+		return url
+	}
+	// Bare relative path (no leading ./, e.g. "fork.git"). Treat as a
+	// path only when it actually exists — refuses to misclassify
+	// "user@host:repo" SSH URLs as local.
+	if !strings.Contains(url, "://") && !strings.Contains(url, "@") {
+		if _, err := os.Stat(url); err == nil {
+			return url
+		}
+	}
+	return ""
 }
 
 // openOrInitStage clones remoteURL into stageDir. If the remote returns
