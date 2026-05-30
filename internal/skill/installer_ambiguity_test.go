@@ -148,6 +148,41 @@ func TestInstall_AmbiguousName_RefMissingErrorsHelpfully(t *testing.T) {
 	}
 }
 
+// TestInstall_AmbiguousRef_WarnsWhenMultipleHaveRef covers issue #106:
+// when two registries both expose "shared" AND both carry v1.0.0, the @ref
+// path used to silently pick alphabetical without surfacing the same
+// ambiguity warning the bare-name path emits. The fix harmonises the two:
+// multiple ref-matches → warn + alphabetical pick (1 → silent; 0 →
+// ErrAmbiguousRef, the existing behavior).
+func TestInstall_AmbiguousRef_WarnsWhenMultipleHaveRef(t *testing.T) {
+	h := newHarness(t)
+	remoteA := seedRemoteWithTags(t, map[string]string{"shared": sharedSkill}, "v1.0.0")
+	remoteB := seedRemoteWithTags(t, map[string]string{"shared": sharedSkill}, "v1.0.0")
+	h.addRegistry(t, "alpha", remoteA)
+	h.addRegistry(t, "beta", remoteB)
+
+	result, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "shared@v1.0.0",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+	})
+	if err != nil {
+		t.Fatalf("install shared@v1.0.0: %v", err)
+	}
+	if result.Registry != "alpha" {
+		t.Errorf("Registry = %q, want alpha (alphabetical pick)", result.Registry)
+	}
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected ambiguity warning for shared@v1.0.0 across two registries, got none")
+	}
+	got := result.Warnings[0]
+	for _, want := range []string{"shared", "v1.0.0", "alpha", "beta", "--registry"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("warning missing %q: %s", want, got)
+		}
+	}
+}
+
 // TestInstall_AsAlias is the basic happy path for the new --as flag: an
 // alias install puts the lock entry and symlink at the alias name, while
 // the underlying worktree stays keyed by the canonical skill name + SHA.

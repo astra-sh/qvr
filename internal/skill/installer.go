@@ -433,18 +433,37 @@ func (in *Installer) resolveSkill(name, version, registryName string) (*registry
 		return picked, warning, nil
 	}
 
+	// Collect every registry whose bare clone contains the requested ref
+	// rather than short-circuiting on the first match. Mirrors the bare-name
+	// ambiguity shape: 1 → silent pick, 2+ → warn + alphabetical pick.
+	// Before this, `qvr add skill@v1` with two registries both holding v1
+	// silently picked alphabetical with no warning (issue #106).
+	var matched []*registry.SkillLocation
 	for _, l := range locs {
 		if _, rerr := in.Git.ResolveRef(l.RepoPath, version); rerr == nil {
-			return l, "", nil
+			matched = append(matched, l)
 		}
 	}
-
-	var lines []string
-	for _, l := range locs {
-		lines = append(lines, fmt.Sprintf("  - %s: %s", l.RegistryName, summarizeVersions(l)))
+	switch len(matched) {
+	case 0:
+		var lines []string
+		for _, l := range locs {
+			lines = append(lines, fmt.Sprintf("  - %s: %s", l.RegistryName, summarizeVersions(l)))
+		}
+		return nil, "", fmt.Errorf("%w: ref %q not found in any registry that provides %q:\n%s\nPass --registry <name> to scope",
+			ErrAmbiguousRef, version, name, strings.Join(lines, "\n"))
+	case 1:
+		return matched[0], "", nil
 	}
-	return nil, "", fmt.Errorf("%w: ref %q not found in any registry that provides %q:\n%s\nPass --registry <name> to scope",
-		ErrAmbiguousRef, version, name, strings.Join(lines, "\n"))
+
+	matchedNames := make([]string, len(matched))
+	for i, l := range matched {
+		matchedNames[i] = l.RegistryName
+	}
+	picked := matched[0]
+	warning := fmt.Sprintf("%s@%s resolves in %d registries (%s) — picked %s (alphabetical). Pass --registry %s to silence this, or --registry <name> to pick another.",
+		name, version, len(matched), strings.Join(matchedNames, ", "), picked.RegistryName, picked.RegistryName)
+	return picked, warning, nil
 }
 
 // summarizeVersions renders a compact "tags: vA..vZ; branches: main, dev"
