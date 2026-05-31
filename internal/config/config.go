@@ -109,8 +109,14 @@ type OutputConfig struct {
 	Color  string `yaml:"color,omitempty" json:"color,omitempty"`
 }
 
-// Dir returns the quiver home directory. Override with QUIVER_HOME.
+// Dir returns the quiver home directory. Override with QVR_HOME (preferred,
+// matches the binary name and the QVR_* prefix used by every other env var —
+// QVR_MAX_FILE_BYTES, QVR_LLM_PROVIDER, …) or QUIVER_HOME (legacy alias kept
+// for back-compat). QVR_HOME wins if both are set. Issue #119.
 func Dir() string {
+	if env := os.Getenv("QVR_HOME"); env != "" {
+		return env
+	}
 	if env := os.Getenv("QUIVER_HOME"); env != "" {
 		return env
 	}

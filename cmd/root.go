@@ -85,4 +85,21 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "output", "text", "output format (text|json)")
 	rootCmd.SetVersionTemplate("qvr version {{.Version}}\n")
+	// Force-materialise cobra's auto-generated `completion` parent command
+	// so we can override its RunE. Without this, `qvr completion <garbage>`
+	// falls through to the default that prints help with exit 0 — a CI
+	// script doing `qvr completion "$SHELL_KIND"` with $SHELL_KIND unset
+	// silently installs an empty completion file. Issue #120.
+	rootCmd.InitDefaultCompletionCmd()
+	for _, c := range rootCmd.Commands() {
+		if c.Name() == "completion" {
+			c.RunE = func(cmd *cobra.Command, args []string) error {
+				if len(args) > 0 {
+					return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+				}
+				return cmd.Help()
+			}
+			break
+		}
+	}
 }

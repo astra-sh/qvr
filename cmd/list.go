@@ -88,9 +88,24 @@ func runList(cmd *cobra.Command, args []string) error {
 		if reg == "" {
 			reg = "-"
 		}
-		source := r.Source
-		if source == "" {
-			source = "registry"
+		// SOURCE column precedence (issue #117): mode wins over the raw
+		// Source field. A `qvr edit`-ejected skill still has the
+		// upstream URL in Source (preserved as SourceUpstream too), so
+		// keying the column off Source alone painted ejected entries
+		// identical to shared ones — the user couldn't tell at a glance
+		// that the row was now eject-mode and writable. Link installs
+		// get their own marker for the same reason; only true shared
+		// installs surface the upstream URL.
+		var source string
+		switch {
+		case r.LockEntry != nil && r.IsEdit():
+			source = "edit"
+		case r.LockEntry != nil && r.IsLink():
+			source = "local"
+		case r.Source != "":
+			source = r.Source
+		default:
+			source = "-"
 		}
 		status := "enabled"
 		if r.Disabled {

@@ -35,16 +35,17 @@ func TestErrTextHandled_SentinelDistinctAndWrappable(t *testing.T) {
 	}
 }
 
-// TestBuildAddJSONEnvelope locks the JSON shape `qvr add --output json` emits
-// for each of the three outcomes the bug #54 fix has to cover:
+// TestBuildAddJSONEnvelope locks the JSON shape `qvr add --output json`
+// emits for each of the three outcomes. Issue #121 — the `installed`
+// array is no longer emitted on the all-fail path so add's failure
+// envelope matches the universal `{"error": "..."}` shape every other
+// command uses:
 //
 //   - all-success: {"installed": [...]}, no `error` key
-//   - all-fail:    {"installed": [], "error": "..."}
+//   - all-fail:    {"error": "..."}                  (was: {"installed":[],"error":...})
 //   - partial:     {"installed": [...], "error": "..."}
 //
-// The key shape promise is that `installed` is always an array (never null) so
-// `jq '.installed[]'` works uniformly. Before #54 the all-fail case emitted
-// the bare literal `null`.
+// `jq '.installed // []'` is the recommended consumer pattern.
 func TestBuildAddJSONEnvelope(t *testing.T) {
 	one := []*skill.InstallResult{{Name: "tdd", Version: "main"}}
 
@@ -64,7 +65,7 @@ func TestBuildAddJSONEnvelope(t *testing.T) {
 			name:    "all-fail",
 			results: nil,
 			err:     errors.New("nope"),
-			want:    `{"installed":[],"error":"nope"}`,
+			want:    `{"error":"nope"}`,
 		},
 		{
 			name:    "partial",
@@ -107,6 +108,8 @@ func TestRunAdd_EmptyAs_Rejects(t *testing.T) {
 		t.Fatalf("chdir: %v", err)
 	}
 
+	resetPrinter(t)
+
 	// Reset and reattach the package var to a fresh cobra command, then
 	// parse `--as ""` so Flags().Changed("as") reports true the same way
 	// real CLI invocation would.
@@ -122,8 +125,23 @@ func TestRunAdd_EmptyAs_Rejects(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for explicit --as \"\", got nil")
 	}
-	if !strings.Contains(err.Error(), "invalid --as value") {
-		t.Errorf("error = %v; want substring 'invalid --as value'", err)
+	// Post-#121 the --as path emits its own envelope (text: ✗ add: ...,
+	// JSON: standard error envelope) and returns errTextHandled so
+	// Execute() doesn't duplicate the message into a trailing
+	// `Error: …` line.
+	if !errors.Is(err, errTextHandled) {
+		t.Errorf("err = %v, want errTextHandled (#121 — add errors should use add's own printer path, not Execute's default envelope)", err)
+	}
+	errBuf, ok := printer.Err.(interface{ String() string })
+	if !ok {
+		t.Fatalf("printer.Err is not a stringer; got %T", printer.Err)
+	}
+	got := errBuf.String()
+	if !strings.Contains(got, "invalid --as value") {
+		t.Errorf("printed error missing reason; got %q", got)
+	}
+	if !strings.Contains(got, "add:") {
+		t.Errorf("printed error missing 'add:' prefix; got %q (issue #121 — should match the ✗ add ...: prefix of other add failures)", got)
 	}
 }
 

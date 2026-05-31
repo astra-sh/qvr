@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
@@ -34,27 +35,58 @@ type targetStatus struct {
 // the on-disk lock only carries Source (URL or absolute path), so the JSON
 // surface keeps the friendlier fields for downstream consumers that already
 // scripted against them.
+// skillInfo is the structured single-skill summary returned by `qvr info`.
+//
+// Issue #116: the field names and shape are aligned with
+// `qvr list --output json` (which surfaces the LockEntry directly):
+//   - All camelCase (no snake_case stragglers like `subtree_hash`).
+//   - Targets carries the lockfile's `[]string` array so a consumer
+//     walking list→info gets the same shape. The richer per-target
+//     link status moved to TargetDetails (`targetDetails` in JSON),
+//     keeping the info-only enrichment without colliding with list.
+//   - Lockfile fields previously absent from info (`mode`, `editPath`,
+//     `installCommit`, `installedAt`, `sourceUpstream`, `path`) are
+//     present here too.
 type skillInfo struct {
 	Name          string            `json:"name"`
 	Description   string            `json:"description"`
 	License       string            `json:"license,omitempty"`
 	Compatibility string            `json:"compatibility,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
-	AllowedTools  string            `json:"allowed_tools,omitempty"`
+	AllowedTools  string            `json:"allowedTools,omitempty"`
 	Registry      string            `json:"registry,omitempty"`
-	Branch        string            `json:"branch,omitempty"`
-	Commit        string            `json:"commit,omitempty"`
+	// Ref is the install-time version label — branch, tag, or "local" for
+	// link installs. JSON field name matches the lockfile schema (and
+	// `qvr list --output json`) so consumers walking list-then-info don't
+	// learn the divergence the hard way. Pre-#123 this was `"branch"`,
+	// which mislabelled every tagged install as a branch.
+	Ref    string `json:"ref,omitempty"`
+	Commit string `json:"commit,omitempty"`
 	// CommitDrift, when non-empty, is the worktree's actual HEAD SHA when
 	// it differs from the recorded `commit` field. Populated by `qvr info`
 	// for issue #73 so tampered or unhealed lockfile entries are visible
 	// next to the recorded commit instead of buried behind `qvr lock verify`.
-	CommitDrift string         `json:"commit_drift,omitempty"`
-	Worktree    string         `json:"worktree,omitempty"`
-	LinkTarget  string         `json:"link_target,omitempty"`
-	Source      string         `json:"source,omitempty"`
-	SubtreeHash string         `json:"subtree_hash,omitempty"`
-	Targets     []targetStatus `json:"targets"`
-	Files       []string       `json:"files"`
+	CommitDrift    string `json:"commitDrift,omitempty"`
+	Worktree       string `json:"worktree,omitempty"`
+	LinkTarget     string `json:"linkTarget,omitempty"`
+	Source         string `json:"source,omitempty"`
+	SourceUpstream string `json:"sourceUpstream,omitempty"`
+	SubtreeHash    string `json:"subtreeHash,omitempty"`
+	// Lockfile-side fields previously absent from info but present on
+	// list. Surfaced here so list→info walkers don't have to read the
+	// raw lockfile to recover them. Issue #116.
+	Mode          string    `json:"mode,omitempty"`
+	EditPath      string    `json:"editPath,omitempty"`
+	Path          string    `json:"path,omitempty"`
+	InstallCommit string    `json:"installCommit,omitempty"`
+	InstalledAt   time.Time `json:"installedAt"`
+	// Targets mirrors `list`'s `targets: ["claude", …]` — the canonical
+	// LockEntry shape. TargetDetails carries the info-only enrichment
+	// (path + symlink-OK status) under a distinct key so the two
+	// commands' `targets` fields aren't subtly incompatible. Issue #116.
+	Targets       []string       `json:"targets"`
+	TargetDetails []targetStatus `json:"targetDetails,omitempty"`
+	Files         []string       `json:"files"`
 	// Verification surfaces real signals (scan, signature, eval, attestation,
 	// skill card) when present on the lock entry.
 	Verification *model.VerificationRecord `json:"verification,omitempty"`
@@ -113,11 +145,17 @@ func runInfo(cmd *cobra.Command, args []string) error {
 // hand-built lock entry instead of going through Cobra.
 func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*skillInfo, error) {
 	info := &skillInfo{
-		Name:         entry.Name,
-		Registry:     entry.Registry,
-		Source:       entry.Source,
-		SubtreeHash:  entry.SubtreeHash,
-		Verification: entry.Verification,
+		Name:           entry.Name,
+		Registry:       entry.Registry,
+		Source:         entry.Source,
+		SourceUpstream: entry.SourceUpstream,
+		SubtreeHash:    entry.SubtreeHash,
+		Mode:           entry.Mode,
+		EditPath:       entry.EditPath,
+		Path:           entry.Path,
+		InstallCommit:  entry.InstallCommit,
+		InstalledAt:    entry.InstalledAt,
+		Verification:   entry.Verification,
 	}
 	if entry.IsLink() {
 		// Link installs carry no upstream git state — leave Branch/Commit/
@@ -126,7 +164,7 @@ func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*s
 		// remote installs.
 		info.LinkTarget = entry.Source
 	} else {
-		info.Branch = entry.Ref
+		info.Ref = entry.Ref
 		info.Commit = entry.Commit
 		info.Worktree = skill.EntryWorktreePath(entry)
 		// Cross-check entry.Commit against the worktree HEAD so a tampered
@@ -157,23 +195,41 @@ func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*s
 		}
 	}
 
+	// Targets is the canonical lockfile shape (`["claude", "cursor", …]`).
+	// TargetDetails carries the per-target link verification info
+	// kept under a distinct key after #116.
+	info.Targets = append([]string(nil), entry.Targets...)
 	expectedTarget := skillDir
 	for _, t := range entry.Targets {
 		linkPath, err := skill.ResolveTargetPath(t, entry.Name, projectRoot, global)
 		ts := targetStatus{Target: t, Path: linkPath}
 		if err != nil {
 			ts.Error = err.Error()
-			info.Targets = append(info.Targets, ts)
+			info.TargetDetails = append(info.TargetDetails, ts)
 			continue
 		}
+		// Edit-mode entries (qvr init / qvr edit): the canonical target
+		// dir IS a real directory — the eject dir itself — not a symlink
+		// pointing at the shared worktree. VerifyTarget expects a
+		// symlink, so it flagged every ejected canonical as
+		// "✗ symlink path already exists and is not a symlink". Mirror
+		// doctor's ejected-check path (cmd/doctor.go checkSymlink) for
+		// the canonical target; sibling targets remain symlinks pointing
+		// at the canonical and still go through VerifyTarget. Issue #117.
 		if expectedTarget != "" {
-			if verr := skill.VerifyTarget(linkPath, expectedTarget); verr != nil {
+			var verr error
+			if entry.IsEdit() && linkPath == expectedTarget {
+				verr = skill.VerifyDirContainsSkill(linkPath)
+			} else {
+				verr = skill.VerifyTarget(linkPath, expectedTarget)
+			}
+			if verr != nil {
 				ts.Error = verr.Error()
 			} else {
 				ts.OK = true
 			}
 		}
-		info.Targets = append(info.Targets, ts)
+		info.TargetDetails = append(info.TargetDetails, ts)
 	}
 	return info, nil
 }
@@ -195,8 +251,8 @@ func renderInfoText(info *skillInfo) {
 			fmt.Fprintf(w, "LinkTarget:  %s\n", info.LinkTarget)
 		}
 	} else {
-		if info.Branch != "" {
-			fmt.Fprintf(w, "Branch:      %s\n", info.Branch)
+		if info.Ref != "" {
+			fmt.Fprintf(w, "Ref:         %s\n", info.Ref)
 		}
 		if info.Commit != "" {
 			fmt.Fprintf(w, "Commit:      %s\n", info.Commit)
@@ -208,7 +264,28 @@ func renderInfoText(info *skillInfo) {
 			fmt.Fprintf(w, "Worktree:    %s\n", info.Worktree)
 		}
 	}
-	if info.Source != "" {
+	// Source row precedence (issue #117 follow-up): mode trumps the raw
+	// Source URL. A `qvr edit`-ejected entry keeps the upstream URL in
+	// Source so the publish/sync/lock-verify paths can still reach it,
+	// but for a human reading `qvr info` the URL is misleading — the
+	// canonical-of-truth is now the eject dir. Show "edit" instead and
+	// move the upstream URL to a separate Upstream row so the
+	// provenance is still on the card. EditPath gets its own row too so
+	// users see where the dir lives without grepping JSON.
+	switch {
+	case info.Mode == "edit":
+		fmt.Fprintf(w, "Source:      edit\n")
+		if info.EditPath != "" {
+			fmt.Fprintf(w, "EditPath:    %s\n", info.EditPath)
+		}
+		upstream := info.SourceUpstream
+		if upstream == "" {
+			upstream = info.Source
+		}
+		if upstream != "" {
+			fmt.Fprintf(w, "Upstream:    %s\n", upstream)
+		}
+	case info.Source != "":
 		fmt.Fprintf(w, "Source:      %s\n", info.Source)
 	}
 	if info.License != "" {
@@ -233,9 +310,12 @@ func renderInfoText(info *skillInfo) {
 		}
 	}
 
-	if len(info.Targets) > 0 {
+	// Text view iterates TargetDetails (the link-verified shape); JSON
+	// consumers get both the plain `targets` array (issue #116) and
+	// the richer `targetDetails` block.
+	if len(info.TargetDetails) > 0 {
 		fmt.Fprintln(w, "Targets:")
-		for _, t := range info.Targets {
+		for _, t := range info.TargetDetails {
 			marker := "✗"
 			detail := t.Error
 			if t.OK {

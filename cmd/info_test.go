@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/registry"
@@ -73,8 +75,11 @@ func TestBuildSkillInfo_FullSkill(t *testing.T) {
 			t.Errorf("expected %q in files, got %v", want, info.Files)
 		}
 	}
-	if len(info.Targets) != 1 || info.Targets[0].Target != "claude" || !info.Targets[0].OK {
-		t.Errorf("expected one OK target for claude, got %+v", info.Targets)
+	if len(info.Targets) != 1 || info.Targets[0] != "claude" {
+		t.Errorf("expected one target 'claude', got %+v", info.Targets)
+	}
+	if len(info.TargetDetails) != 1 || info.TargetDetails[0].Target != "claude" || !info.TargetDetails[0].OK {
+		t.Errorf("expected one OK target detail for claude, got %+v", info.TargetDetails)
 	}
 }
 
@@ -97,13 +102,13 @@ func TestBuildSkillInfo_BrokenSymlinkReportsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSkillInfo: %v", err)
 	}
-	if len(info.Targets) != 1 {
-		t.Fatalf("expected 1 target, got %d", len(info.Targets))
+	if len(info.TargetDetails) != 1 {
+		t.Fatalf("expected 1 target detail, got %d", len(info.TargetDetails))
 	}
-	if info.Targets[0].OK {
-		t.Errorf("symlink mismatch should not be OK: %+v", info.Targets[0])
+	if info.TargetDetails[0].OK {
+		t.Errorf("symlink mismatch should not be OK: %+v", info.TargetDetails[0])
 	}
-	if info.Targets[0].Error == "" {
+	if info.TargetDetails[0].Error == "" {
 		t.Errorf("expected an error message, got empty string")
 	}
 }
@@ -165,7 +170,7 @@ func TestBuildSkillInfo_LinkedSkill(t *testing.T) {
 	if info.Source != src {
 		t.Errorf("LinkTarget = %q, want %q", info.Source, src)
 	}
-	if info.Branch != "" || info.Commit != "" || info.Worktree != "" {
+	if info.Ref != "" || info.Commit != "" || info.Worktree != "" {
 		t.Errorf("link entry should have empty git state, got %+v", info)
 	}
 	if info.Description != "detailed test skill" {
@@ -224,15 +229,216 @@ func TestBuildSkillInfo_TargetWithNoSymlinkReportsError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSkillInfo: %v", err)
 	}
-	if len(info.Targets) != 2 {
-		t.Fatalf("expected 2 targets, got %d", len(info.Targets))
+	if len(info.Targets) != 2 || info.Targets[0] != "claude" || info.Targets[1] != "cursor" {
+		t.Fatalf("expected targets [claude cursor], got %v", info.Targets)
 	}
-	for _, ts := range info.Targets {
+	if len(info.TargetDetails) != 2 {
+		t.Fatalf("expected 2 target details, got %d", len(info.TargetDetails))
+	}
+	for _, ts := range info.TargetDetails {
 		if ts.OK {
 			t.Errorf("no symlinks were created; %s should not be OK", ts.Target)
 		}
 		if ts.Error == "" {
 			t.Errorf("expected error for %s", ts.Target)
 		}
+	}
+}
+
+// TestBuildSkillInfo_RefFieldNotBranch is the #123 regression. Pre-fix
+// the skillInfo struct exposed `Branch string \`json:"branch"\`` which
+// mislabelled tag installs ("Branch: v0.2.0") in text and diverged from
+// `qvr list --output json`'s `ref` field. We now use `Ref` everywhere —
+// matches the lockfile schema and stays kind-agnostic so semver tags
+// don't read as branches.
+func TestBuildSkillInfo_RefFieldNotBranch(t *testing.T) {
+	wt := writeFullSkill(t, "tagged")
+	project := t.TempDir()
+	linkSkillInto(t, project, ".claude/skills", "tagged", wt)
+
+	entry := &model.LockEntry{
+		Name:    "tagged",
+		Source:  "git@example.test:r.git",
+		Ref:     "v0.2.0", // tag, not a branch
+		Commit:  "abc1234",
+		Targets: []string{"claude"},
+	}
+	info, err := buildSkillInfo(entry, project, false)
+	if err != nil {
+		t.Fatalf("buildSkillInfo: %v", err)
+	}
+	if info.Ref != "v0.2.0" {
+		t.Errorf("info.Ref = %q, want %q", info.Ref, "v0.2.0")
+	}
+
+	// Render text mode and confirm we no longer print "Branch: v0.2.0".
+	resetPrinter(t)
+	renderInfoText(info)
+	outBuf, ok := printer.Out.(interface{ String() string })
+	if !ok {
+		t.Fatalf("printer.Out is not a stringer; got %T", printer.Out)
+	}
+	got := outBuf.String()
+	if strings.Contains(got, "Branch:") {
+		t.Errorf("text output still uses Branch: label for a tagged install:\n%s", got)
+	}
+	if !strings.Contains(got, "Ref:") || !strings.Contains(got, "v0.2.0") {
+		t.Errorf("text output missing Ref: row for tagged install:\n%s", got)
+	}
+}
+
+// TestBuildSkillInfo_EditModeTargetIsCanonicalDir is the #117 follow-up
+// regression on the info surface. For edit-mode entries (qvr init /
+// qvr edit) the canonical target dir IS a real directory — the eject
+// dir itself — not a symlink at the shared worktree. info used to run
+// VerifyTarget on it, which expects a symlink, so every ejected
+// canonical reported as
+//
+//	✗ claude  symlink path already exists and is not a symlink
+//
+// in text and `targetDetails[0].ok = false` in JSON. The fix mirrors
+// the ejected-check path doctor already uses (cmd/doctor.go
+// checkSymlink → VerifyDirContainsSkill).
+func TestBuildSkillInfo_EditModeTargetIsCanonicalDir(t *testing.T) {
+	project := t.TempDir()
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: edit-mode info\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	entry := &model.LockEntry{
+		Name:     "demo",
+		Mode:     model.ModeEdit,
+		EditPath: editRel,
+		Ref:      "main",
+		Targets:  []string{"claude"},
+	}
+	info, err := buildSkillInfo(entry, project, false)
+	if err != nil {
+		t.Fatalf("buildSkillInfo: %v", err)
+	}
+	if len(info.TargetDetails) != 1 {
+		t.Fatalf("expected 1 target detail, got %d", len(info.TargetDetails))
+	}
+	td := info.TargetDetails[0]
+	if !td.OK {
+		t.Errorf("edit-mode canonical target detail OK=false (#117 follow-up): %+v", td)
+	}
+	if td.Error != "" {
+		t.Errorf("edit-mode canonical target detail unexpected error: %q (#117 follow-up — info should mirror doctor's ejected check, not VerifyTarget)", td.Error)
+	}
+}
+
+// TestRenderInfoText_EditModeSourceLabel is the #117 follow-up
+// regression for the info text surface. Pre-fix `Source:` rendered the
+// raw entry.Source value, so a `qvr edit`-ejected entry painted as
+// `Source: https://github.com/foo/bar.git` — same misleading column
+// as list before mode took precedence. Now `Source: edit` and the
+// upstream URL moves to a dedicated `Upstream:` row so the provenance
+// stays on the card without pretending the URL is still the source of
+// truth.
+func TestRenderInfoText_EditModeSourceLabel(t *testing.T) {
+	resetPrinter(t)
+	info := &skillInfo{
+		Name:           "code-review",
+		Registry:       "raks",
+		Ref:            "v0.2.0",
+		Commit:         "cf452e1b58135e55b3f9295fcf1e7c94c69ad6ee",
+		Mode:           "edit",
+		EditPath:       ".claude/skills/code-review",
+		Source:         "https://github.com/raks097/quiver_playground.git",
+		SourceUpstream: "https://github.com/raks097/quiver_playground.git",
+	}
+	renderInfoText(info)
+	outBuf, ok := printer.Out.(interface{ String() string })
+	if !ok {
+		t.Fatalf("printer.Out is not a stringer; got %T", printer.Out)
+	}
+	got := outBuf.String()
+
+	if strings.Contains(got, "Source:      https://github.com/raks097/quiver_playground.git") {
+		t.Errorf("info text still shows upstream URL in Source row for edit-mode entry — issue #117 follow-up:\n%s", got)
+	}
+	if !strings.Contains(got, "Source:      edit") {
+		t.Errorf("info text missing 'Source: edit' row for edit-mode entry:\n%s", got)
+	}
+	if !strings.Contains(got, "EditPath:    .claude/skills/code-review") {
+		t.Errorf("info text missing EditPath row for edit-mode entry:\n%s", got)
+	}
+	if !strings.Contains(got, "Upstream:    https://github.com/raks097/quiver_playground.git") {
+		t.Errorf("info text missing Upstream row preserving the original URL:\n%s", got)
+	}
+}
+
+// TestSkillInfoJSONShape_MatchesListSchema is the #116 regression.
+// Pre-fix info emitted snake_case (`subtree_hash`, `allowed_tools`,
+// `link_target`, `commit_drift`) and a `targets: [{target,path,ok}]`
+// shape, while `qvr list --output json` emitted camelCase + a plain
+// `targets: ["claude"]` array. The fix aligns the field names and
+// shape so a list→info walker can use one parser.
+func TestSkillInfoJSONShape_MatchesListSchema(t *testing.T) {
+	entry := &model.LockEntry{
+		Name:           "demo",
+		Registry:       "raks",
+		Source:         "git@github.com:raks097/demo.git",
+		SourceUpstream: "git@github.com:raks097/demo.git",
+		Path:           "skills/demo",
+		Ref:            "v0.2.0",
+		Commit:         "abc1234567890abcdef1234567890abcdef12345",
+		InstallCommit:  "abc1234567890abcdef1234567890abcdef12345",
+		SubtreeHash:    "sha256:deadbeef",
+		Mode:           "",
+		Targets:        []string{"claude"},
+		InstalledAt:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+	info, err := buildSkillInfo(entry, t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("buildSkillInfo: %v", err)
+	}
+	b, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(b)
+
+	// camelCase keys we want, snake_case keys we don't.
+	wantKeys := []string{
+		`"subtreeHash"`, `"sourceUpstream"`, `"installCommit"`,
+		`"installedAt"`, `"ref"`,
+	}
+	for _, k := range wantKeys {
+		if !strings.Contains(body, k) {
+			t.Errorf("info JSON missing %s — list schema requires it (#116):\n%s", k, body)
+		}
+	}
+	for _, k := range []string{
+		`"subtree_hash"`, `"allowed_tools"`, `"link_target"`,
+		`"commit_drift"`, `"branch"`,
+	} {
+		if strings.Contains(body, k) {
+			t.Errorf("info JSON still emits legacy snake_case key %s — should be camelCase (#116):\n%s", k, body)
+		}
+	}
+
+	// Targets is the plain string array (matching list); per-target
+	// link status lives under targetDetails.
+	type minimal struct {
+		Targets       []string       `json:"targets"`
+		TargetDetails []targetStatus `json:"targetDetails"`
+	}
+	var got minimal
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Targets) != 1 || got.Targets[0] != "claude" {
+		t.Errorf("targets = %v, want [\"claude\"] (list schema)", got.Targets)
+	}
+	if len(got.TargetDetails) != 1 || got.TargetDetails[0].Target != "claude" {
+		t.Errorf("targetDetails = %+v, want one entry for claude", got.TargetDetails)
 	}
 }

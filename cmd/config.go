@@ -106,6 +106,11 @@ func init() {
 // knownConfigKeys lists the user-facing dot-separated keys in the order
 // `qvr config get` prints them. Kept here (not in internal/config) because
 // the stringly-typed surface only exists for the CLI.
+//
+// Ops keys are surfaced because `ops.enabled` is the telemetry switch —
+// pre-#124 it was hidden from `qvr config get` (text) but exposed in the
+// JSON form, a privacy/trust footgun where users couldn't see what their
+// install was doing without piping to jq.
 var knownConfigKeys = []string{
 	"default_target",
 	"default_registry",
@@ -115,6 +120,10 @@ var knownConfigKeys = []string{
 	"output.format",
 	"output.color",
 	"cache.index_ttl",
+	"ops.enabled",
+	"ops.db_path",
+	"ops.retention_days",
+	"ops.logging.level",
 }
 
 // suggestSubKeys returns the known dotted keys nested under prefix
@@ -156,6 +165,20 @@ func configRead(cfg *config.Config, key string) string {
 		return cfg.Output.Color
 	case "cache.index_ttl":
 		return cfg.Cache.IndexTTL
+	case "ops.enabled":
+		if cfg.Ops.Enabled {
+			return "true"
+		}
+		return "false"
+	case "ops.db_path":
+		return cfg.Ops.DBPath
+	case "ops.retention_days":
+		if cfg.Ops.RetentionDays > 0 {
+			return fmt.Sprintf("%d", cfg.Ops.RetentionDays)
+		}
+		return ""
+	case "ops.logging.level":
+		return cfg.Ops.Logging.Level
 	}
 	return ""
 }
@@ -198,6 +221,20 @@ func runConfigGet(cmd *cobra.Command, args []string) error {
 			v := configRead(cfg, k)
 			if v != "" {
 				fmt.Printf("%s = %s\n", k, v)
+			}
+		}
+		// Registries are a map (name → URL) — not a dotted key but
+		// load-bearing for "what is my install doing?", so render them
+		// inline. Pre-#124 they only appeared in --output json, so
+		// users had no way to see them from the text view.
+		if len(cfg.Registries) > 0 {
+			names := make([]string, 0, len(cfg.Registries))
+			for n := range cfg.Registries {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				fmt.Printf("registries.%s = %s\n", n, cfg.Registries[n].URL)
 			}
 		}
 		return nil

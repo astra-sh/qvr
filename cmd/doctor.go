@@ -259,6 +259,18 @@ func runDoctorChecks(lock *model.LockFile, cfg *config.Config, projectRoot strin
 func checkWorktree(e *model.LockEntry) doctorCheck {
 	worktreePath := skill.EntryWorktreePath(e)
 	c := doctorCheck{Type: "worktree", Skill: e.Name, Path: worktreePath}
+	// Edit-mode entries (`qvr edit`, `qvr init`) live at EditPath, not
+	// in the shared worktree cache. The shared lane is intentionally
+	// absent for these, so the worktree check would always fire as
+	// red even though the install is healthy. Skip and pass — the
+	// edit dir's integrity is covered by `ejected` / `commit-integrity`.
+	// Issue #117. Mirror the way commit-integrity already short-circuits
+	// when there's nothing to check.
+	if e.IsEdit() {
+		c.OK = true
+		c.Message = "edit-mode entry; shared worktree skipped"
+		return c
+	}
 	if worktreePath == "" {
 		c.Message = "lock entry has no derivable worktree path"
 		return c

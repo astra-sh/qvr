@@ -33,7 +33,7 @@ func seedAliasWorktreeForEject(t *testing.T, alias, canonical, registryName stri
 		Name:          alias,
 		Canonical:     canonical,
 		Registry:      registryName,
-		Source:        "git@example.com:" + registryName + ".git",
+		Source:        initEmptyBareWithHEAD(t, registryName, "main"),
 		Ref:           "main",
 		Commit:        fakeSHA,
 		InstallCommit: fakeSHA,

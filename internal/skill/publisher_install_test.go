@@ -40,6 +40,7 @@ func ejectedFixture(t *testing.T, name string) (*model.LockEntry, string, string
 // dispatcher picked the right URL and branch.
 func TestPublishInstalled_DryRun_ReportsRemote(t *testing.T) {
 	entry, projectRoot, _ := ejectedFixture(t, "demo")
+	expectedRemote := entry.SourceUpstream // ejectedFixture has already promoted Source → SourceUpstream
 
 	p := skill.NewPublisher(git.NewGoGitClient())
 	res, err := p.PublishInstalled(context.Background(), skill.PublishInstalledRequest{
@@ -54,8 +55,8 @@ func TestPublishInstalled_DryRun_ReportsRemote(t *testing.T) {
 	if !res.DryRun {
 		t.Errorf("DryRun = false, want true")
 	}
-	if res.Remote != "git@example.com:raks.git" {
-		t.Errorf("Remote = %q, want git@example.com:raks.git", res.Remote)
+	if res.Remote != expectedRemote {
+		t.Errorf("Remote = %q, want %q", res.Remote, expectedRemote)
 	}
 	if res.Tag != "v0.1.0" {
 		t.Errorf("Tag = %q, want v0.1.0", res.Tag)

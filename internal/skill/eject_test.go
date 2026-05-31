@@ -35,7 +35,7 @@ func seedSharedWorktreeForEject(t *testing.T, name, registryName string) *model.
 	return &model.LockEntry{
 		Name:          name,
 		Registry:      registryName,
-		Source:        "git@example.com:" + registryName + ".git",
+		Source:        initEmptyBareWithHEAD(t, registryName, "main"),
 		Ref:           "main",
 		Commit:        fakeSHA,
 		InstallCommit: fakeSHA,
@@ -49,6 +49,7 @@ func seedSharedWorktreeForEject(t *testing.T, name, registryName string) *model.
 // history is initialised inside the new dir.
 func TestEjectToTarget_SingleTarget(t *testing.T) {
 	entry := seedSharedWorktreeForEject(t, "demo", "raks")
+	originalSource := entry.Source
 	projectRoot := t.TempDir()
 
 	result, err := skill.EjectToTarget(skill.EjectRequest{
@@ -100,8 +101,8 @@ func TestEjectToTarget_SingleTarget(t *testing.T) {
 	if entry.EditPath != ".claude/skills/demo" {
 		t.Errorf("entry.EditPath = %q, want %q", entry.EditPath, ".claude/skills/demo")
 	}
-	if entry.SourceUpstream != "git@example.com:raks.git" {
-		t.Errorf("entry.SourceUpstream = %q, want original Source", entry.SourceUpstream)
+	if entry.SourceUpstream != originalSource {
+		t.Errorf("entry.SourceUpstream = %q, want original Source %q", entry.SourceUpstream, originalSource)
 	}
 	if !entry.IsEdit() {
 		t.Errorf("entry.IsEdit() = false, want true")

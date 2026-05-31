@@ -484,3 +484,45 @@ func TestDoctorChecks_LinkInstallSkipped(t *testing.T) {
 		t.Fatalf("project should exist: %v", err)
 	}
 }
+
+// TestDoctorChecks_EditModeSkipsWorktree is the #117 regression. Pre-fix
+// mode:edit entries (created by `qvr init` or `qvr edit`) failed the
+// worktree check because their shared-lane path doesn't exist on disk
+// — the eject dir IS the install. doctor printed
+//
+//	✗ worktree demo — lock entry has no derivable worktree path
+//
+// alongside the passing ejected/commit-integrity checks and exited 1
+// after a totally clean `qvr init`. The fix short-circuits the
+// worktree check for edit-mode entries (same shape as
+// commit-integrity's `no commit recorded; skipped`).
+func TestDoctorChecks_EditModeSkipsWorktree(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	project := t.TempDir()
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: edit mode doctor check\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	// Symlink the canonical target dir to itself so the symlink check passes
+	// (project layout: target dir == edit dir for the canonical).
+	// (Nothing extra to do — the canonical target IS the edit dir on disk.)
+	lock := model.NewLockFile(filepath.Join(project, model.LockFileName))
+	lock.Put(&model.LockEntry{
+		Name:     "demo",
+		Mode:     model.ModeEdit,
+		EditPath: editRel,
+		Ref:      "main",
+		Targets:  []string{"claude"},
+	})
+
+	checks := runDoctorChecks(lock, config.Default(), project)
+	wt := findCheck(t, checks, "worktree", "demo")
+	if !wt.OK {
+		t.Errorf("worktree check should pass for edit-mode entry; got %+v", wt)
+	}
+}

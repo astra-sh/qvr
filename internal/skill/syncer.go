@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -75,6 +76,18 @@ func (s *Syncer) Status(entry *model.LockEntry, projectRoot string) (*SyncStatus
 	}
 	repo, err := gogit.PlainOpen(repoPath)
 	if err != nil {
+		// Edit-mode entries scaffolded via `qvr init` have no .git/ until
+		// the user runs `git init` themselves — the directory IS the
+		// skill, no git history required. Pre-#117 we surfaced this as
+		// state=broken which made the most basic init→status flow look
+		// like an integrity failure. Now we report "edit" so the user
+		// sees the mode rather than a phantom defect.
+		if entry.IsEdit() && repoPath != "" {
+			if _, statErr := os.Stat(repoPath); statErr == nil {
+				st.Message = "edit"
+				return st, nil
+			}
+		}
 		st.Broken = true
 		st.Message = fmt.Sprintf("worktree unreadable: %v", err)
 		return st, nil

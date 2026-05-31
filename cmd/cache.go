@@ -58,6 +58,16 @@ var cacheCmd = &cobra.Command{
   qvr cache list             show reachable + orphan worktrees with sizes
   qvr cache prune --dry-run  show what prune would remove
   qvr cache prune            delete orphan worktrees`,
+	// Mirror lockCmd's "unknown subcommand" handling so `qvr cache clean`
+	// (a typo / muscle-memory from npm/cargo) exits non-zero instead of
+	// printing help with exit 0 — same shape as `qvr lock <typo>`.
+	// Issue #120.
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) > 0 {
+			return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+		}
+		return cmd.Help()
+	},
 }
 
 var (
@@ -111,11 +121,23 @@ type CacheListOutput struct {
 }
 
 // CachePruneOutput is the JSON envelope for `qvr cache prune`.
+//
+// Removed/FreedBytes populate on a real prune; WouldRemove/WouldFree
+// populate on --dry-run (issue #122). Pre-fix the dry-run path reused
+// the `removed`/`freedBytes` names, so a scriptable consumer reading
+// `removed` after a dry-run would think the prune ran — a PagerDuty
+// footgun under pressure. The field-name split is the on-disk contract.
 type CachePruneOutput struct {
-	Removed         []string `json:"removed"`
-	ForgottenProjs  []string `json:"forgottenProjects,omitempty"`
-	FreedBytes      int64    `json:"freedBytes"`
-	DryRun          bool     `json:"dryRun"`
+	Removed        []string `json:"removed,omitempty"`
+	WouldRemove    []string `json:"wouldRemove,omitempty"`
+	ForgottenProjs []string `json:"forgottenProjects,omitempty"`
+	FreedBytes     int64    `json:"freedBytes,omitempty"`
+	WouldFree      int64    `json:"wouldFree,omitempty"`
+	DryRun         bool     `json:"dryRun"`
+	// MissingProjects covers project lock files that vanished — surfaced
+	// in both list and prune output. List used to print these only as
+	// trailing `! …` warnings in text and as a top-level JSON field;
+	// prune merges them into the count via ForgottenProjs after the run.
 	MissingProjects []string `json:"missingProjects,omitempty"`
 	Errors          []string `json:"errors,omitempty"`
 }
@@ -145,14 +167,25 @@ func runCacheList(cmd *cobra.Command, args []string) error {
 	}
 	rows := make([][]string, 0, len(entries))
 	for _, e := range entries {
+		// Pre-#122 reachable/ORPHAN mixed case in the same column.
+		// Both lowercase so the column reads cleanly.
 		state := "reachable"
 		if !e.Reachable {
-			state = "ORPHAN"
+			state = "orphan"
 		}
 		rows = append(rows, []string{state, humanBytes(e.SizeBytes), shortenCachePath(e.Path)})
 	}
 	printer.Table([]string{"STATE", "SIZE", "PATH"}, rows)
-	printer.Info(fmt.Sprintf("Total: %s (%s orphan)", humanBytes(out.TotalBytes), humanBytes(out.OrphanBytes)))
+	// Fold vanished-project count into the summary line so text users
+	// see the same signal JSON consumers get via missingProjects (issue
+	// #122). Trailing per-project `! …` warnings still print so users
+	// can act on the specific paths.
+	summary := fmt.Sprintf("Total: %s (%s orphan", humanBytes(out.TotalBytes), humanBytes(out.OrphanBytes))
+	if len(missing) > 0 {
+		summary += fmt.Sprintf(", %d vanished project(s)", len(missing))
+	}
+	summary += ")"
+	printer.Info(summary)
 	for _, miss := range missing {
 		printer.Warning(fmt.Sprintf("project lock vanished: %s (run `qvr cache prune` to forget)", miss))
 	}
@@ -206,13 +239,15 @@ func runCachePrune(cmd *cobra.Command, args []string) error {
 	}
 
 	for _, e := range orphans {
-		// In dry-run we record the would-remove without touching disk.
-		// In real-run we only count Removed + FreedBytes when the delete
-		// actually succeeded — otherwise FreedBytes would lie and CI
-		// scripts couldn't tell whether their pruning attempt worked.
+		// In dry-run we record the would-remove without touching disk —
+		// under WouldRemove/WouldFree so a consumer can't confuse it with
+		// a real deletion (issue #122). In real-run we only count
+		// Removed + FreedBytes when the delete actually succeeded —
+		// otherwise FreedBytes would lie and CI scripts couldn't tell
+		// whether their pruning attempt worked.
 		if cachePruneDryRun {
-			out.Removed = append(out.Removed, e.Path)
-			out.FreedBytes += e.SizeBytes
+			out.WouldRemove = append(out.WouldRemove, e.Path)
+			out.WouldFree += e.SizeBytes
 			continue
 		}
 		if err := os.RemoveAll(e.Path); err != nil {
@@ -241,18 +276,24 @@ func runCachePrune(cmd *cobra.Command, args []string) error {
 		}
 		return nil
 	}
-	if len(out.Removed) == 0 {
+	// Text rendering. Pull the active list (Removed for real-run,
+	// WouldRemove for dry-run) since #122 splits the fields.
+	activeList := out.Removed
+	activeBytes := out.FreedBytes
+	verb := "Removed"
+	if cachePruneDryRun {
+		activeList = out.WouldRemove
+		activeBytes = out.WouldFree
+		verb = "Would remove"
+	}
+	if len(activeList) == 0 {
 		printer.Info("Nothing to prune.")
 	} else {
-		verb := "Removed"
-		if cachePruneDryRun {
-			verb = "Would remove"
-		}
-		for _, p := range out.Removed {
+		for _, p := range activeList {
 			printer.Info(fmt.Sprintf("%s %s", verb, shortenCachePath(p)))
 		}
 		printer.Success(fmt.Sprintf("%s %d worktree(s), freeing %s",
-			verb, len(out.Removed), humanBytes(out.FreedBytes)))
+			verb, len(activeList), humanBytes(activeBytes)))
 	}
 	if !cachePruneDryRun {
 		for _, m := range out.ForgottenProjs {

@@ -258,3 +258,91 @@ func TestRunCachePrune_ForgetsVanishedProjects(t *testing.T) {
 		t.Errorf("live project should still be recorded")
 	}
 }
+
+// TestCacheCmd_UnknownSubcommandErrors is the #120 regression: pre-fix
+// `qvr cache clean` (or any non-list/prune) silently printed the parent
+// help and exited 0, so a CI script with a typo would look like it
+// succeeded. The fix mirrors lockCmd's RunE so an unknown positional
+// returns an "unknown command" error.
+func TestCacheCmd_UnknownSubcommandErrors(t *testing.T) {
+	err := cacheCmd.RunE(cacheCmd, []string{"clean"})
+	if err == nil {
+		t.Fatal("cacheCmd.RunE returned nil on unknown subcommand 'clean'")
+	}
+	if !strings.Contains(err.Error(), "unknown command") {
+		t.Errorf("error = %v; want substring 'unknown command'", err)
+	}
+}
+
+// TestRunCachePrune_DryRunUsesWouldRemoveField is the #122 regression.
+// Pre-fix dry-run populated `Removed` and `FreedBytes` — the same names
+// the destructive run uses — so a scriptable consumer reading those
+// fields after a dry-run thought the prune ran. Now dry-run writes to
+// WouldRemove/WouldFree (with omitempty so the destructive fields stay
+// out of the JSON entirely).
+func TestRunCachePrune_DryRunUsesWouldRemoveField(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	orphan := fakeWorktree(t, "acme", "demo", "deadbee")
+	_ = fakeWorktree(t, "acme", "demo", "abc1234") // live worktree the lock points at
+	proj := filepath.Join(t.TempDir(), "proj")
+	_ = os.MkdirAll(proj, 0o755)
+	recordProjectWithLock(t, proj)
+
+	resetPrinter(t)
+	cachePruneDryRun = true
+	t.Cleanup(func() { cachePruneDryRun = false })
+
+	if err := runCachePrune(nil, nil); err != nil {
+		t.Fatalf("runCachePrune dry-run: %v", err)
+	}
+	// Sanity-check via stat that nothing was deleted (dry-run contract).
+	if _, err := os.Stat(orphan); err != nil {
+		t.Fatalf("dry-run deleted orphan: %v", err)
+	}
+
+	// Now drive the JSON-emitting path so we can inspect the field shape.
+	printer = &output.Printer{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}, Format: output.FormatJSON}
+	if err := runCachePrune(nil, nil); err != nil {
+		t.Fatalf("runCachePrune dry-run json: %v", err)
+	}
+	outBuf, ok := printer.Out.(*bytes.Buffer)
+	if !ok {
+		t.Fatalf("printer.Out is not a *bytes.Buffer; got %T", printer.Out)
+	}
+	body := outBuf.String()
+	if !strings.Contains(body, "\"wouldRemove\"") {
+		t.Errorf("dry-run JSON missing wouldRemove field — issue #122:\n%s", body)
+	}
+	if !strings.Contains(body, "\"wouldFree\"") {
+		t.Errorf("dry-run JSON missing wouldFree field — issue #122:\n%s", body)
+	}
+	if strings.Contains(body, "\"removed\"") {
+		t.Errorf("dry-run JSON should NOT emit 'removed' (omitempty + write to WouldRemove) — issue #122:\n%s", body)
+	}
+}
+
+// TestRunCacheList_LowercaseOrphan is the #122 regression for the
+// ORPHAN-vs-reachable case mismatch. Both row states should be
+// lowercase so the column reads cleanly.
+func TestRunCacheList_LowercaseOrphan(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	_ = fakeWorktree(t, "acme", "demo", "deadbee") // orphan
+
+	buf := &bytes.Buffer{}
+	prev := printer
+	printer = &output.Printer{Out: buf, Err: &bytes.Buffer{}, Format: output.FormatText}
+	t.Cleanup(func() { printer = prev })
+
+	if err := runCacheList(nil, nil); err != nil {
+		t.Fatalf("runCacheList: %v", err)
+	}
+	got := buf.String()
+	if strings.Contains(got, "ORPHAN") {
+		t.Errorf("cache list still uses uppercase ORPHAN — issue #122:\n%s", got)
+	}
+	if !strings.Contains(got, "orphan") {
+		t.Errorf("cache list missing lowercase orphan row:\n%s", got)
+	}
+}

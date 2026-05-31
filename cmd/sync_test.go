@@ -326,3 +326,125 @@ func TestAutoRegisterRegistriesFromLock_RealRunWritesConfig(t *testing.T) {
 		t.Errorf("persisted URL = %q, want git@github.com:raks097/skills.git", got.URL)
 	}
 }
+
+// TestRunSync_DriftFailsByDefault is the #118 regression. Pre-fix, sync
+// printed a `!` drift line and exited 0 unless --strict was passed. An
+// attacker who tampered ~/.quiver/worktrees/<sha>/ silently poisoned
+// every project that next ran `qvr sync` without --strict. The fix flips
+// the default — drift = error — and adds --allow-drift for the rare
+// local-debug case.
+//
+// We drive an edit-mode entry with a SubtreeHash that intentionally
+// doesn't match the on-disk content; VerifySingleEntry surfaces it as
+// drift and runSync now returns a non-nil error.
+func TestRunSync_DriftFailsByDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	project := t.TempDir()
+	t.Chdir(project)
+	withCapturingPrinter(t, "text")
+
+	t.Cleanup(func() {
+		syncGlobal = false
+		syncDryRun = false
+		syncKeepUntracked = false
+		syncNoScan = false
+		syncStrict = false
+		syncAllowDrift = false
+	})
+	syncNoScan = true
+
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: drift test\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	lockPath := filepath.Join(project, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:        "demo",
+		Mode:        model.ModeEdit,
+		EditPath:    editRel,
+		Source:      "https://example.invalid/demo.git",
+		Ref:         "main",
+		SubtreeHash: "sha256:not-the-real-hash", // forces VerifySingleEntry to report drift
+		Targets:     []string{"claude"},
+		InstalledAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	err := runSync(syncCmd, nil)
+	if err == nil {
+		t.Fatal("runSync returned nil on subtreeHash drift — issue #118 regression: drift should fail by default")
+	}
+	if !strings.Contains(err.Error(), "integrity check") {
+		t.Errorf("error = %v; want substring 'integrity check'", err)
+	}
+}
+
+// TestRunSync_AllowDriftDowngrades pins the opt-out: --allow-drift
+// keeps the pre-#118 warn-and-continue behaviour for the rare local
+// debug case (the user wants to inspect the drift, not fail CI).
+func TestRunSync_AllowDriftDowngrades(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	project := t.TempDir()
+	t.Chdir(project)
+	withCapturingPrinter(t, "text")
+
+	t.Cleanup(func() {
+		syncGlobal = false
+		syncDryRun = false
+		syncKeepUntracked = false
+		syncNoScan = false
+		syncStrict = false
+		syncAllowDrift = false
+	})
+	syncNoScan = true
+	syncAllowDrift = true
+
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: drift opt-out\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	lockPath := filepath.Join(project, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:        "demo",
+		Mode:        model.ModeEdit,
+		EditPath:    editRel,
+		Source:      "https://example.invalid/demo.git",
+		Ref:         "main",
+		SubtreeHash: "sha256:not-the-real-hash",
+		Targets:     []string{"claude"},
+		InstalledAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	if err := runSync(syncCmd, nil); err != nil {
+		t.Errorf("runSync with --allow-drift returned %v, want nil — opt-out should keep the warn-and-continue path", err)
+	}
+}

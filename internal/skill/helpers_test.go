@@ -343,3 +343,31 @@ func containsBytes(haystack []byte, needle string) bool {
 	}
 	return false
 }
+
+// initEmptyBareWithHEAD creates a fresh `git init --bare` repo under
+// t.TempDir() and pins its HEAD symref to refs/heads/<branch>. Used by
+// the eject/publish fixtures to give entries a reachable Source URL —
+// before this helper the fixtures hard-coded `git@example.com:<reg>.git`
+// and every dry-run publish hung for ~150s on an ls-remote SSH timeout
+// to a host that doesn't run a git server, bringing the internal/skill
+// package's test wall-time to ~5 minutes. With a local bare:
+//   - ls-remote returns immediately (no refs → fall through).
+//   - the local-bare HEAD reader (issue #113 fix) picks up `branch` so
+//     dry-run reports the correct target without the network probe.
+//
+// gogit's PlainInit defaults to "master"; the explicit symref overwrite
+// mirrors what a system with `init.defaultBranch = main` produces.
+func initEmptyBareWithHEAD(t *testing.T, registryName, branch string) string {
+	t.Helper()
+	bare := filepath.Join(t.TempDir(), registryName+".git")
+	repo, err := gogit.PlainInit(bare, true)
+	if err != nil {
+		t.Fatalf("init bare fixture %s: %v", registryName, err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(
+		plumbing.HEAD, plumbing.NewBranchReferenceName(branch),
+	)); err != nil {
+		t.Fatalf("pin HEAD → %s on bare fixture %s: %v", branch, registryName, err)
+	}
+	return bare
+}

@@ -85,7 +85,23 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	// the same invalid-name error that other malformed --as values produce.
 	// Issue #103.
 	if cmd.Flags().Changed("as") && addAs == "" {
-		return fmt.Errorf("invalid --as value %q: must be 1-64 chars, lowercase alphanumeric + hyphens, no leading/trailing or consecutive hyphens", addAs)
+		err := fmt.Errorf("invalid --as value %q: must be 1-64 chars, lowercase alphanumeric + hyphens, no leading/trailing or consecutive hyphens", addAs)
+		// Issue #121: route through the same printer/envelope path the
+		// rest of add uses. Pre-fix `--as ""` returned the bare error,
+		// so text mode rendered `Error: …` (Execute's default envelope)
+		// while every other add failure rendered `✗ add …: …`. JSON mode
+		// emitted `{"error": "..."}` here vs the legacy
+		// `{"installed": [], "error": "..."}` elsewhere — two distinct
+		// shapes from the same command.
+		if printer.Format == output.FormatJSON {
+			payload := buildAddJSONEnvelope(nil, err)
+			if jerr := printer.JSON(payload); jerr != nil {
+				return jerr
+			}
+			return errJSONHandled
+		}
+		printer.Error(fmt.Sprintf("add: %v", err))
+		return errTextHandled
 	}
 	targets := addTargets
 	if len(targets) == 0 {
@@ -236,20 +252,21 @@ func runAdd(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// addJSONEnvelope is the stable shape emitted by `qvr add --output json`. The
-// installed array is always present (never null) so consumers can safely call
-// `.installed[]` without branching on the empty case. error is populated only
-// when at least one input failed to install — matches the {"error": ...}
-// contract every other command uses on its failure path (bug #54).
+// addJSONEnvelope is the stable shape emitted by `qvr add --output json`.
+//
+// Issue #121: pre-fix the envelope always emitted `installed: []` even on a
+// total-failure run, while every other command (read, list, edit, …) emitted
+// just `{"error": "..."}`. A consumer walking the CLI couldn't write one error
+// handler — it had to branch on the per-command shape. Add now follows the
+// universal rule: the `installed` array is only present when at least one
+// install attempt produced a result (success or partial-success); pure-error
+// runs emit `{"error": "..."}` like the rest of the CLI.
 type addJSONEnvelope struct {
-	Installed []*skill.InstallResult `json:"installed"`
+	Installed []*skill.InstallResult `json:"installed,omitempty"`
 	Error     string                 `json:"error,omitempty"`
 }
 
 func buildAddJSONEnvelope(results []*skill.InstallResult, err error) addJSONEnvelope {
-	if results == nil {
-		results = []*skill.InstallResult{}
-	}
 	env := addJSONEnvelope{Installed: results}
 	if err != nil {
 		env.Error = err.Error()

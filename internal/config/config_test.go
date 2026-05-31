@@ -68,9 +68,32 @@ func TestLoad_NoFile(t *testing.T) {
 }
 
 func TestDir_Override(t *testing.T) {
+	t.Setenv("QVR_HOME", "")
 	t.Setenv("QUIVER_HOME", "/custom/path")
 	if config.Dir() != "/custom/path" {
 		t.Errorf("Dir() = %q, want /custom/path", config.Dir())
+	}
+}
+
+// TestDir_QVRHome covers issue #119: users guess `QVR_HOME` first because
+// the binary is named `qvr` and every other env (QVR_MAX_FILE_BYTES, …)
+// already uses the QVR_ prefix. Pre-fix QVR_HOME was silently ignored.
+func TestDir_QVRHome(t *testing.T) {
+	t.Setenv("QUIVER_HOME", "")
+	t.Setenv("QVR_HOME", "/custom/qvr")
+	if got := config.Dir(); got != "/custom/qvr" {
+		t.Errorf("Dir() = %q, want /custom/qvr", got)
+	}
+}
+
+// TestDir_QVRHomeWinsOverQuiverHome pins the precedence: when both are
+// set, the newer QVR_-prefixed name takes priority so doc/release notes
+// can lean on it as the canonical name.
+func TestDir_QVRHomeWinsOverQuiverHome(t *testing.T) {
+	t.Setenv("QUIVER_HOME", "/legacy")
+	t.Setenv("QVR_HOME", "/preferred")
+	if got := config.Dir(); got != "/preferred" {
+		t.Errorf("Dir() = %q, want /preferred (QVR_HOME should win)", got)
 	}
 }
 

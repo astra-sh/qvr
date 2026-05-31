@@ -25,6 +25,7 @@ var (
 	syncKeepUntracked bool
 	syncNoScan        bool
 	syncStrict        bool
+	syncAllowDrift    bool
 )
 
 var syncCmd = &cobra.Command{
@@ -58,8 +59,14 @@ func init() {
 		"warn about orphan managed symlinks instead of removing them")
 	syncCmd.Flags().BoolVar(&syncNoScan, "no-scan", false,
 		"skip the per-skill security scan that normally surfaces issues found in restored worktrees")
+	// --strict is now the default and kept as a no-op alias for backward
+	// compatibility with CI scripts that already pass it. Hidden from the
+	// help text to discourage new usage. Issue #118.
 	syncCmd.Flags().BoolVar(&syncStrict, "strict", false,
-		"fail (non-zero exit) when any restored worktree's content hash diverges from the lock's recorded subtreeHash; default is to warn and continue")
+		"deprecated: drift now fails by default (kept for back-compat)")
+	_ = syncCmd.Flags().MarkHidden("strict")
+	syncCmd.Flags().BoolVar(&syncAllowDrift, "allow-drift", false,
+		"downgrade subtreeHash drift from an error to a warning (rare local-debug case; CI should never set this)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -222,8 +229,13 @@ func runSync(cmd *cobra.Command, args []string) error {
 	if len(result.Installed)+len(result.SymlinksFixed)+len(result.Removed) == 0 && len(result.Errors) == 0 && len(atOrAboveThreshold) == 0 && len(driftReports) == 0 {
 		printer.Success("Already in sync.")
 	}
-	if syncStrict && len(driftReports) > 0 {
-		return fmt.Errorf("sync --strict: %d entr(y/ies) failed integrity check", len(driftReports))
+	// Drift defaults to a non-zero exit (issue #118). Pre-fix, drift only
+	// failed under --strict, so a CI script running `qvr sync` could never
+	// catch a tampered cached worktree without explicit opt-in. uv-style:
+	// sync is always correct — drift either heals or fails, never persists
+	// silently. --allow-drift is the rare escape hatch for local debug.
+	if len(driftReports) > 0 && !syncAllowDrift {
+		return fmt.Errorf("sync: %d entr(y/ies) failed integrity check (pass --allow-drift to downgrade to a warning)", len(driftReports))
 	}
 	// Reconciler-collected per-entry failures (install, symlink, checkout)
 	// are printed individually above via printer.Error. Without this guard,
