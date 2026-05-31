@@ -246,9 +246,9 @@ func TestBuildSkillInfo_TargetWithNoSymlinkReportsError(t *testing.T) {
 }
 
 // TestBuildSkillInfo_RefFieldNotBranch is the #123 regression. Pre-fix
-// the skillInfo struct exposed `Branch string \`json:"branch"\`` which
-// mislabelled tag installs ("Branch: v0.2.0") in text and diverged from
-// `qvr list --output json`'s `ref` field. We now use `Ref` everywhere —
+// the skillInfo struct exposed a Branch field with json tag "branch",
+// which mislabelled tag installs ("Branch: v0.2.0") in text and diverged
+// from qvr list --output json's ref field. We now use Ref everywhere —
 // matches the lockfile schema and stays kind-agnostic so semver tags
 // don't read as branches.
 func TestBuildSkillInfo_RefFieldNotBranch(t *testing.T) {
