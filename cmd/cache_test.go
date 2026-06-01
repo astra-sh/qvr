@@ -260,14 +260,15 @@ func TestRunCachePrune_ForgetsVanishedProjects(t *testing.T) {
 }
 
 // TestCacheCmd_UnknownSubcommandErrors is the #120 regression: pre-fix
-// `qvr cache clean` (or any non-list/prune) silently printed the parent
+// `qvr cache <typo>` (any non-list/prune/clean) silently printed the parent
 // help and exited 0, so a CI script with a typo would look like it
 // succeeded. The fix mirrors lockCmd's RunE so an unknown positional
-// returns an "unknown command" error.
+// returns an "unknown command" error. (`clean` is now a real verb, so the
+// probe uses an unmistakably-unknown token.)
 func TestCacheCmd_UnknownSubcommandErrors(t *testing.T) {
-	err := cacheCmd.RunE(cacheCmd, []string{"clean"})
+	err := cacheCmd.RunE(cacheCmd, []string{"bogus"})
 	if err == nil {
-		t.Fatal("cacheCmd.RunE returned nil on unknown subcommand 'clean'")
+		t.Fatal("cacheCmd.RunE returned nil on unknown subcommand 'bogus'")
 	}
 	if !strings.Contains(err.Error(), "unknown command") {
 		t.Errorf("error = %v; want substring 'unknown command'", err)
@@ -319,6 +320,178 @@ func TestRunCachePrune_DryRunUsesWouldRemoveField(t *testing.T) {
 	}
 	if strings.Contains(body, "\"removed\"") {
 		t.Errorf("dry-run JSON should NOT emit 'removed' (omitempty + write to WouldRemove) — issue #122:\n%s", body)
+	}
+}
+
+// resetCacheCleanFlags restores the package-global clean flags after a test
+// mutates them, so cases don't leak state into each other.
+func resetCacheCleanFlags(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		cacheCleanDryRun = false
+		cacheCleanYes = false
+		cacheCleanRegistries = false
+	})
+}
+
+// TestRunCacheClean_DryRunListsAllAndDeletesNothing pins clean's dry-run
+// contract: it enumerates BOTH reachable and orphan worktrees (unlike prune)
+// and touches nothing on disk.
+func TestRunCacheClean_DryRunListsAllAndDeletesNothing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+
+	live := fakeWorktree(t, "acme", "demo", "abc1234")
+	orphan := fakeWorktree(t, "acme", "demo", "deadbee")
+	proj := filepath.Join(t.TempDir(), "proj")
+	_ = os.MkdirAll(proj, 0o755)
+	recordProjectWithLock(t, proj)
+
+	resetPrinter(t)
+	resetCacheCleanFlags(t)
+	cacheCleanDryRun = true
+
+	if err := runCacheClean(nil, nil); err != nil {
+		t.Fatalf("runCacheClean dry-run: %v", err)
+	}
+	// Both the reachable and the orphan worktree must survive a dry-run.
+	if _, err := os.Stat(live); err != nil {
+		t.Errorf("dry-run deleted reachable worktree: %v", err)
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Errorf("dry-run deleted orphan worktree: %v", err)
+	}
+}
+
+// TestRunCacheClean_DryRunUsesWouldRemoveField mirrors the #122 field-split
+// contract for clean: dry-run populates wouldRemove/wouldFree, never
+// removed/freedBytes, so a consumer can't mistake a preview for a real wipe.
+func TestRunCacheClean_DryRunUsesWouldRemoveField(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	_ = fakeWorktree(t, "acme", "demo", "deadbee")
+
+	resetPrinter(t) // registers restoration of the global printer
+	resetCacheCleanFlags(t)
+	cacheCleanDryRun = true
+
+	printer = &output.Printer{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}, Format: output.FormatJSON}
+	if err := runCacheClean(nil, nil); err != nil {
+		t.Fatalf("runCacheClean dry-run json: %v", err)
+	}
+	outBuf, ok := printer.Out.(*bytes.Buffer)
+	if !ok {
+		t.Fatalf("printer.Out is not a *bytes.Buffer; got %T", printer.Out)
+	}
+	body := outBuf.String()
+	if !strings.Contains(body, "\"wouldRemove\"") || !strings.Contains(body, "\"wouldFree\"") {
+		t.Errorf("dry-run JSON missing wouldRemove/wouldFree:\n%s", body)
+	}
+	if strings.Contains(body, "\"removed\"") {
+		t.Errorf("dry-run JSON must not emit 'removed':\n%s", body)
+	}
+}
+
+// TestRunCacheClean_WipesReachableAndOrphan is the core difference from prune:
+// clean removes EVERY worktree, including the ones a live lock points at, plus
+// the index cache. Bare registry clones stay put by default.
+func TestRunCacheClean_WipesReachableAndOrphan(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+
+	live := fakeWorktree(t, "acme", "demo", "abc1234")
+	orphan := fakeWorktree(t, "acme", "demo", "deadbee")
+	proj := filepath.Join(t.TempDir(), "proj")
+	_ = os.MkdirAll(proj, 0o755)
+	recordProjectWithLock(t, proj)
+
+	// Seed an index cache and a bare-clone dir to assert clean's default scope.
+	idx := registry.CacheDir()
+	_ = os.MkdirAll(idx, 0o755)
+	_ = os.WriteFile(filepath.Join(idx, "acme.json"), []byte("{}"), 0o644)
+	registriesDir := filepath.Join(home, "registries")
+	_ = os.MkdirAll(registriesDir, 0o755)
+	_ = os.WriteFile(filepath.Join(registriesDir, "marker"), []byte("x"), 0o644)
+
+	resetPrinter(t)
+	resetCacheCleanFlags(t)
+	cacheCleanYes = true // non-TTY consent
+
+	if err := runCacheClean(nil, nil); err != nil {
+		t.Fatalf("runCacheClean: %v", err)
+	}
+	for _, p := range []string{live, orphan, idx} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("expected %s gone, stat err=%v", p, err)
+		}
+	}
+	// Registries survive without --registries.
+	if _, err := os.Stat(registriesDir); err != nil {
+		t.Errorf("bare registries should survive a default clean: %v", err)
+	}
+}
+
+// TestRunCacheClean_RegistriesFlagAlsoDropsBareClones asserts --registries
+// extends the wipe to ~/.quiver/registries/.
+func TestRunCacheClean_RegistriesFlagAlsoDropsBareClones(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	_ = fakeWorktree(t, "acme", "demo", "deadbee")
+	registriesDir := filepath.Join(home, "registries")
+	_ = os.MkdirAll(registriesDir, 0o755)
+	_ = os.WriteFile(filepath.Join(registriesDir, "marker"), []byte("x"), 0o644)
+
+	resetPrinter(t)
+	resetCacheCleanFlags(t)
+	cacheCleanYes = true
+	cacheCleanRegistries = true
+
+	if err := runCacheClean(nil, nil); err != nil {
+		t.Fatalf("runCacheClean --registries: %v", err)
+	}
+	if _, err := os.Stat(registriesDir); !os.IsNotExist(err) {
+		t.Errorf("--registries should remove bare clones, stat err=%v", err)
+	}
+}
+
+// TestRunCacheClean_NonInteractiveRefusesWithoutYes guards the destructive
+// gate: off a TTY and without --yes, clean refuses and deletes nothing.
+func TestRunCacheClean_NonInteractiveRefusesWithoutYes(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	live := fakeWorktree(t, "acme", "demo", "abc1234")
+
+	resetPrinter(t)
+	resetCacheCleanFlags(t)
+	prevTTY := stdinIsTTYFn
+	stdinIsTTYFn = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTYFn = prevTTY })
+
+	err := runCacheClean(nil, nil)
+	if err == nil {
+		t.Fatal("expected non-interactive refusal without --yes, got nil")
+	}
+	if !strings.Contains(err.Error(), "--yes") {
+		t.Errorf("error should hint at --yes, got %v", err)
+	}
+	if _, statErr := os.Stat(live); statErr != nil {
+		t.Errorf("worktree deleted despite refusal: %v", statErr)
+	}
+}
+
+// TestRunCacheClean_JSONRefusalIsNonZero pins that under --output json the
+// missing-consent path is still a hard error (not a body with exit 0).
+func TestRunCacheClean_JSONRefusalIsNonZero(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	_ = fakeWorktree(t, "acme", "demo", "deadbee")
+
+	resetPrinter(t) // registers restoration of the global printer
+	resetCacheCleanFlags(t)
+	printer = &output.Printer{Out: &bytes.Buffer{}, Err: &bytes.Buffer{}, Format: output.FormatJSON}
+
+	if err := runCacheClean(nil, nil); err == nil {
+		t.Fatal("expected JSON-mode refusal without --yes, got nil")
 	}
 }
 

@@ -78,7 +78,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		printer.Info("No installed skills.")
 		return nil
 	}
-	headers := []string{"SKILL", "REGISTRY", "VERSION", "TARGETS", "SOURCE", "STATUS"}
+	headers := []string{"SKILL", "REGISTRY", "VERSION", "TARGETS", "SOURCE", "STATUS", "SIGNED"}
 	if listAll {
 		headers = append([]string{"SCOPE"}, headers...)
 	}
@@ -112,7 +112,7 @@ func runList(cmd *cobra.Command, args []string) error {
 			status = "disabled"
 		}
 		row := []string{
-			r.Name, reg, r.Ref, strings.Join(r.Targets, ","), source, status,
+			r.Name, reg, r.Ref, strings.Join(r.Targets, ","), source, status, signedCol(recordedSigStatus(r.LockEntry)),
 		}
 		if listAll {
 			row = append([]string{r.Scope}, row...)

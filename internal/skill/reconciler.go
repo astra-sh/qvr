@@ -132,11 +132,22 @@ func (r *Reconciler) restoreFromLock(lock *model.LockFile, projectRoot string, g
 			if entry.Ref != "" {
 				ref = entry.Name + "@" + entry.Ref
 			}
+			// uv reproducibility contract: restore the lock's recorded commit,
+			// not whatever the ref label resolves to now. A teammate cloning
+			// the project and running `qvr sync` gets the locked commit even if
+			// upstream "main" advanced — only `qvr update` re-resolves. Pin to
+			// the same SHA EntryWorktreePath keys on so the restored dir lands
+			// where the symlink pass expects it.
+			pin := entry.InstallCommit
+			if pin == "" {
+				pin = entry.Commit
+			}
 			if _, err := r.Installer.Install(InstallRequest{
 				Skill:       ref,
 				Targets:     entry.Targets,
 				Global:      global,
 				ProjectRoot: projectRoot,
+				PinCommit:   pin,
 			}); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("install %s: %v", entry.Name, err))
 				continue

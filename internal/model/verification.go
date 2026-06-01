@@ -13,6 +13,7 @@ package model
 type VerificationRecord struct {
 	Scan        *ScanRef        `json:"scan,omitempty"`
 	Eval        *EvalRef        `json:"eval,omitempty"`
+	Provenance  *ProvenanceRef  `json:"provenance,omitempty"`
 	Signature   *SignatureBlock `json:"signature,omitempty"`
 	Attestation *ArtifactRef    `json:"attestation,omitempty"`
 	SkillCard   *ArtifactRef    `json:"skillCard,omitempty"`
@@ -25,7 +26,8 @@ func (v *VerificationRecord) IsEmpty() bool {
 	if v == nil {
 		return true
 	}
-	return v.Scan == nil && v.Eval == nil && v.Signature == nil && v.Attestation == nil && v.SkillCard == nil
+	return v.Scan == nil && v.Eval == nil && v.Provenance == nil &&
+		v.Signature == nil && v.Attestation == nil && v.SkillCard == nil
 }
 
 // ArtifactRef points at a JSON or YAML artifact alongside the skill,
@@ -63,6 +65,31 @@ type EvalRef struct {
 	SuiteSHA       string             `json:"suiteSHA"`
 	Scores         map[string]float64 `json:"scores,omitempty"`
 	Passed         bool               `json:"passed"`
+}
+
+// Git-native provenance signature statuses. v1 trust is "uv for agent
+// skills": provenance is optional metadata derived from `git verify-tag` /
+// `git verify-commit`, never a qvr-native signing format. SignatureStatusNone
+// is the common case (most skill repos are unsigned) and never blocks an
+// install; SignatureStatusInvalid is the one status that blocks, because a
+// present-but-broken signature signals tampering.
+const (
+	SignatureStatusVerified = "verified" // git verified a good signature
+	SignatureStatusNone     = "none"     // no signature present on tag/commit
+	SignatureStatusInvalid  = "invalid"  // signature present but failed verification
+)
+
+// ProvenanceRef records optional, git-native provenance for an installed
+// skill: whether the resolved ref carried a verifiable Git signature, and
+// who signed it. It is informational — install is gated only when
+// SignatureStatus == SignatureStatusInvalid. This is the v1 trust surface;
+// the cryptographic Signature/Attestation slots stay reserved for a future
+// signing track.
+type ProvenanceRef struct {
+	Provider        string `json:"provider"`         // "git"
+	Tag             string `json:"tag,omitempty"`    // the ref verified, when a tag
+	SignatureStatus string `json:"signatureStatus"`  // verified | none | invalid
+	Signer          string `json:"signer,omitempty"` // signer identity reported by git
 }
 
 // SignatureBlock captures everything needed to re-verify a signature

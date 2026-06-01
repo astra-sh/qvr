@@ -27,6 +27,10 @@ type outdatedRow struct {
 	LatestTag string `json:"latest_tag,omitempty"`
 	State     string `json:"state"`
 	Reason    string `json:"reason,omitempty"`
+	// Signature is the recorded git-native provenance status (verified |
+	// none | invalid). Lets a reader tell "behind + none" (a newer version
+	// is available but unsigned) from "behind + verified" at a glance.
+	Signature string `json:"signature,omitempty"`
 }
 
 const (
@@ -109,7 +113,7 @@ func runOutdated(cmd *cobra.Command, args []string) error {
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(rows)
 	}
-	headers := []string{"SKILL", "BRANCH", "LOCAL", "REMOTE", "STATE"}
+	headers := []string{"SKILL", "BRANCH", "LOCAL", "REMOTE", "STATE", "SIGNED"}
 	if outdatedAll {
 		headers = append([]string{"SCOPE"}, headers...)
 	}
@@ -121,7 +125,7 @@ func runOutdated(cmd *cobra.Command, args []string) error {
 		if r.LatestTag != "" {
 			remoteCol = r.LatestTag
 		}
-		row := []string{r.Name, r.Branch, shortSHA(r.Local), remoteCol, r.State}
+		row := []string{r.Name, r.Branch, shortSHA(r.Local), remoteCol, r.State, signedCol(r.Signature)}
 		if outdatedAll {
 			row = append([]string{r.Scope}, row...)
 		}
@@ -184,10 +188,11 @@ func remoteURLFor(e *model.LockEntry, cfg *config.Config) (string, error) {
 // any network or filesystem.
 func computeOutdated(entry *model.LockEntry, remote remoteResult) outdatedRow {
 	row := outdatedRow{
-		Name:     entry.Name,
-		Registry: entry.Registry,
-		Branch:   entry.Ref,
-		Local:    entry.Commit,
+		Name:      entry.Name,
+		Registry:  entry.Registry,
+		Branch:    entry.Ref,
+		Local:     entry.Commit,
+		Signature: recordedSigStatus(entry),
 	}
 	if entry.IsLink() {
 		row.State = outStateLink

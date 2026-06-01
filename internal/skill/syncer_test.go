@@ -38,7 +38,8 @@ func TestStatus_Dirty(t *testing.T) {
 	h.addRegistry(t, "acme", remote)
 	entry := installCodeReview(t, h, remote)
 
-	// Modify a file in the worktree.
+	// Modify a file in the worktree (install is frozen; unlock first like edit).
+	makeWorktreeEditable(t, skill.EntryWorktreePath(entry))
 	skillFile := filepath.Join(skill.EntryWorktreePath(entry), entry.Path, "SKILL.md")
 	data, _ := os.ReadFile(skillFile)
 	_ = os.WriteFile(skillFile, append(data, []byte("\n# edit\n")...), 0o644)
@@ -89,7 +90,8 @@ func TestPush_CommitsAndPushes(t *testing.T) {
 	h.addRegistry(t, "acme", remote)
 	entry := installCodeReview(t, h, remote)
 
-	// Modify a file in the worktree.
+	// Modify a file in the worktree (install is frozen; unlock first like edit).
+	makeWorktreeEditable(t, skill.EntryWorktreePath(entry))
 	skillFile := filepath.Join(skill.EntryWorktreePath(entry), entry.Path, "SKILL.md")
 	orig, _ := os.ReadFile(skillFile)
 	_ = os.WriteFile(skillFile, append(orig, []byte("\n# pushed edit\n")...), 0o644)
@@ -212,6 +214,7 @@ func TestPull_Divergence(t *testing.T) {
 	}
 
 	// Local commits in the original worktree WITHOUT pulling first → diverge.
+	makeWorktreeEditable(t, skill.EntryWorktreePath(entry))
 	localFile := filepath.Join(skill.EntryWorktreePath(entry), entry.Path, "SKILL.md")
 	_ = os.WriteFile(localFile, []byte("local-only"), 0o644)
 	// Push may fail due to non-FF; that's fine — either outcome still leaves

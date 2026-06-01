@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	gogit "github.com/go-git/go-git/v5"
@@ -265,6 +266,14 @@ func (s *Syncer) Pull(ctx context.Context, entry *model.LockEntry) (string, erro
 			shortHash(localRef.Hash().String()), shortHash(remoteRef.Hash().String()))
 	}
 
+	// The installed subtree is frozen read-only for immutability. A
+	// fast-forward rewrites working-tree files, so unlock it, advance, then
+	// re-freeze at the new content — the shared install stays immutable
+	// between operations.
+	subtree := filepath.Join(EntryWorktreePath(entry), entry.Path)
+	setSubtreeWritable(subtree)
+	defer setSubtreeReadOnly(subtree)
+
 	// Fast-forward: move branch ref, then check out to update working tree.
 	if err := repo.Storer.SetReference(plumbing.NewHashReference(
 		plumbing.NewBranchReferenceName(branch), remoteRef.Hash(),
@@ -298,6 +307,10 @@ func (s *Syncer) CreateEditBranch(ctx context.Context, entry *model.LockEntry, n
 	if entry.IsLink() {
 		return nil, "", errors.New("cannot edit a link install — modify the source directly")
 	}
+	// Entering edit mode: unlock the frozen install so the worktree can be
+	// branched and modified in place. Left writable — this is now a working
+	// copy under active edit.
+	setSubtreeWritable(filepath.Join(EntryWorktreePath(entry), entry.Path))
 
 	var warning string
 	fromOriginTip := false

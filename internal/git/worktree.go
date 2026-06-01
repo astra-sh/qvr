@@ -65,12 +65,22 @@ func (w *GoGitWorktree) Add(bareRepoPath, worktreePath, ref string) error {
 
 	upstreamURL := readBareUpstreamURL(bareRepoPath)
 
-	// Clone from the bare path as a local repo.
-	_, err := gogit.PlainClone(worktreePath, false, &gogit.CloneOptions{
-		URL: bareRepoPath,
-	})
-	if err != nil {
-		return fmt.Errorf("clone worktree: %w", err)
+	// Clone from the bare path as a local repo, hardlinking the bare's object
+	// files (`git clone --local`) instead of copying them. Git objects are
+	// content-addressed and immutable — never modified in place, only added or
+	// removed — so hardlinking is safe: the worktree and the bare share the
+	// same object blobs on disk at zero extra cost, and identical skill content
+	// across different commits is stored once. Unlike `--shared` (alternates),
+	// hardlinked objects are normal files go-git reads directly. Falls back to
+	// a full go-git copy clone if system git is unavailable or on a different
+	// filesystem (git then copies; still correct, just not deduped).
+	if err := localHardlinkClone(bareRepoPath, worktreePath); err != nil {
+		_ = os.RemoveAll(worktreePath)
+		if _, gerr := gogit.PlainClone(worktreePath, false, &gogit.CloneOptions{
+			URL: bareRepoPath,
+		}); gerr != nil {
+			return fmt.Errorf("clone worktree: %w", gerr)
+		}
 	}
 
 	wtRepo, err := gogit.PlainOpen(worktreePath)
@@ -95,6 +105,16 @@ func (w *GoGitWorktree) Add(bareRepoPath, worktreePath, ref string) error {
 		}
 	}
 	return nil
+}
+
+// localHardlinkClone clones the bare repo into dest as a working repo, with
+// object files hardlinked from the bare (`git clone --local`, the default for
+// local-path sources) rather than copied. dest must not already exist. Used by
+// Add to deduplicate the registry object database across worktrees while
+// keeping the objects as ordinary files go-git can read.
+func localHardlinkClone(bare, dest string) error {
+	_, err := runGit(context.Background(), "clone", "--local", bare, dest)
+	return err
 }
 
 // Remove deletes a worktree directory.

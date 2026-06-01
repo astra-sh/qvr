@@ -1,13 +1,55 @@
 package skill
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 
 	"github.com/raks097/quiver/internal/canonical"
+	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/registry"
 )
+
+// CheckGitProvenance derives optional, git-native provenance for an install:
+// whether the resolved ref carries a verifiable Git signature, and who signed
+// it. It prefers a signed annotated tag (the requested ref) and falls back to
+// the commit-level signature. Returns nil when nothing could be checked
+// (e.g. git couldn't read the repo) so the caller records no misleading
+// "none". A returned ProvenanceRef with SignatureStatus == invalid is the
+// only outcome an install should treat as fatal.
+//
+// repoPath is the bare/working repo to verify against; ref is the requested
+// version label; commit is the resolved SHA used for the commit-level
+// fallback.
+func CheckGitProvenance(repoPath, ref, commit string) *model.ProvenanceRef {
+	ctx := context.Background()
+	// Prefer the requested ref as a signed annotated tag.
+	if status, signer, err := git.VerifyTagSignature(ctx, repoPath, ref); err == nil {
+		if status == git.SigVerified || status == git.SigInvalid {
+			return &model.ProvenanceRef{
+				Provider:        "git",
+				Tag:             ref,
+				SignatureStatus: status,
+				Signer:          signer,
+			}
+		}
+	}
+	// Fall back to the commit-level signature.
+	target := commit
+	if target == "" {
+		target = ref
+	}
+	status, signer, err := git.VerifyCommitSignature(ctx, repoPath, target)
+	if err != nil {
+		return nil
+	}
+	return &model.ProvenanceRef{
+		Provider:        "git",
+		SignatureStatus: status,
+		Signer:          signer,
+	}
+}
 
 // ComputeSubtreeHash returns the canonical content hash of a skill subtree
 // rooted at worktreePath/subpath. This is the load-bearing integrity value
@@ -19,6 +61,19 @@ func ComputeSubtreeHash(worktreePath, subpath string) (string, error) {
 		return "", fmt.Errorf("canonical hash: %w", err)
 	}
 	return id.SubtreeHash, nil
+}
+
+// ComputeSubtreeIdentity returns the full canonical identity of a skill
+// subtree — the load-bearing SubtreeHash plus the native git TreeSHA and
+// HEAD commit. Installer uses this to record both LockEntry.SubtreeHash
+// (the integrity anchor) and LockEntry.TreeOID (the informational
+// git-native identity) from a single tree walk.
+func ComputeSubtreeIdentity(worktreePath, subpath string) (*canonical.SubtreeIdentity, error) {
+	id, err := canonical.HashSubtree(worktreePath, subpath)
+	if err != nil {
+		return nil, fmt.Errorf("canonical hash: %w", err)
+	}
+	return id, nil
 }
 
 // EntryWorktreePath returns the on-disk worktree path for a lock entry by

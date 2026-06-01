@@ -45,6 +45,7 @@ func runPull(cmd *cobra.Command, args []string) error {
 		loopErr    error
 		latestLock *model.LockFile
 		nothing    bool
+		refused    int
 	)
 	lockErr := model.WithLock(lockPath, func() error {
 		lock, err := model.ReadLockFile(lockPath)
@@ -71,14 +72,22 @@ func runPull(cmd *cobra.Command, args []string) error {
 			}
 			hash, err := syncer.Pull(cmd.Context(), entry)
 			if err != nil {
+				// A diverged or tag-pinned entry is a refusal: the requested pull
+				// did not happen. Both are diagnostics (→ stderr, never stdout —
+				// stdout stays clean for the JSON payload / `jq`) and both flip
+				// the exit code non-zero so a script notices. We still `continue`
+				// rather than `break` so the remaining named skills get pulled and
+				// no in-progress edits are lost (AC-LIFE-3 / AC-LIFE-4, #129).
 				if errors.Is(err, skill.ErrDivergence) {
 					printer.Warning(fmt.Sprintf("%s: %v", name, err))
 					results = append(results, map[string]string{"name": name, "status": "conflict", "message": err.Error()})
+					refused++
 					continue
 				}
 				if errors.Is(err, skill.ErrPinnedToTag) {
-					printer.Info(fmt.Sprintf("%s: %v", name, err))
+					printer.Warning(fmt.Sprintf("%s: %v", name, err))
 					results = append(results, map[string]string{"name": name, "status": "skipped", "message": err.Error()})
+					refused++
 					continue
 				}
 				loopErr = fmt.Errorf("pull %s: %w", name, err)
@@ -114,7 +123,21 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return loopErr
 	}
 	if printer.Format == output.FormatJSON {
-		return printer.JSON(results)
+		if err := printer.JSON(results); err != nil {
+			return err
+		}
+		// The payload already encodes each refusal's status/message; exit
+		// non-zero without a second envelope so the stream stays one JSON doc.
+		if refused > 0 {
+			return errJSONHandled
+		}
+		return nil
+	}
+	// Refusals were already printed to stderr per skill; flip the exit code
+	// without re-printing (errTextHandled) so a tag-pinned / diverged pull
+	// fails loudly instead of exiting 0 (#129).
+	if refused > 0 {
+		return errTextHandled
 	}
 	return nil
 }

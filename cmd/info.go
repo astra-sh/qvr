@@ -72,6 +72,7 @@ type skillInfo struct {
 	Source         string `json:"source,omitempty"`
 	SourceUpstream string `json:"sourceUpstream,omitempty"`
 	SubtreeHash    string `json:"subtreeHash,omitempty"`
+	TreeOID        string `json:"treeOID,omitempty"`
 	// Lockfile-side fields previously absent from info but present on
 	// list. Surfaced here so list→info walkers don't have to read the
 	// raw lockfile to recover them. Issue #116.
@@ -150,6 +151,7 @@ func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*s
 		Source:         entry.Source,
 		SourceUpstream: entry.SourceUpstream,
 		SubtreeHash:    entry.SubtreeHash,
+		TreeOID:        entry.TreeOID,
 		Mode:           entry.Mode,
 		EditPath:       entry.EditPath,
 		Path:           entry.Path,
@@ -354,6 +356,9 @@ func renderVerificationSection(w io.Writer, v *model.VerificationRecord) {
 			v.Scan.Decision, v.Scan.ScannerVersion,
 			v.Scan.Counts.Critical, v.Scan.Counts.High,
 			v.Scan.Counts.Medium, v.Scan.Counts.Low, v.Scan.Counts.Info)
+	}
+	if v.Provenance != nil {
+		fmt.Fprintf(w, "  Provenance:  %s\n", provenanceLine(v.Provenance))
 	}
 	if v.Signature != nil {
 		fmt.Fprintf(w, "  Signature:   %s (%s)\n", v.Signature.Path, v.Signature.Algorithm)

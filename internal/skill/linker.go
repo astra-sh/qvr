@@ -62,26 +62,32 @@ func CreateSymlink(linkPath, skillDir string) error {
 		return fmt.Errorf("create parent dir: %w", err)
 	}
 
-	// If a symlink already exists, check what it points at. Replace if wrong,
-	// keep if right. This makes re-installs idempotent.
+	// If a symlink already exists, check what it points at. A correct symlink
+	// is a no-op (idempotent re-install). A non-symlink errors out to protect
+	// user content. A wrong target falls through to the atomic replace below.
 	if existing, err := os.Lstat(linkPath); err == nil {
 		if existing.Mode()&os.ModeSymlink == 0 {
 			return fmt.Errorf("%w: %s", ErrSymlinkExists, linkPath)
 		}
-		current, err := os.Readlink(linkPath)
-		if err != nil {
-			return fmt.Errorf("read existing symlink: %w", err)
-		}
-		if current == absSkillDir {
+		if current, rerr := os.Readlink(linkPath); rerr == nil && current == absSkillDir {
 			return nil
-		}
-		if err := os.Remove(linkPath); err != nil {
-			return fmt.Errorf("replace existing symlink: %w", err)
 		}
 	}
 
-	if err := os.Symlink(absSkillDir, linkPath); err != nil {
+	// Create the symlink atomically: write it under a temp name in the same
+	// directory, then rename over the destination. os.Rename of a symlink
+	// over an existing symlink is atomic on POSIX, so a concurrent reader (a
+	// coding agent following .claude/skills/<x> while `qvr update` repoints
+	// it at a new immutable snapshot) never observes a missing link. The old
+	// remove-then-symlink left a brief window where the link was absent.
+	tmpLink := fmt.Sprintf("%s.qvrtmp.%d", linkPath, os.Getpid())
+	_ = os.Remove(tmpLink)
+	if err := os.Symlink(absSkillDir, tmpLink); err != nil {
 		return fmt.Errorf("create symlink: %w", err)
+	}
+	if err := os.Rename(tmpLink, linkPath); err != nil {
+		_ = os.Remove(tmpLink)
+		return fmt.Errorf("install symlink: %w", err)
 	}
 	return nil
 }

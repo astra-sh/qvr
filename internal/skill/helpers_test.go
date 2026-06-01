@@ -126,6 +126,84 @@ func seedRemote(t *testing.T, skills map[string]string, branches ...string) stri
 	return remote
 }
 
+// seedRemoteWithExecScript creates a bare remote seeded on main with a single
+// skill that ships an executable script (committed at git mode 100755)
+// alongside its SKILL.md. Returns the bare repo path. Used to regression-test
+// issue #135: a skill with an exec file must round-trip through install →
+// freeze → verify without spurious subtreeHash drift.
+func seedRemoteWithExecScript(t *testing.T, name, skillBody, scriptName, scriptBody string) string {
+	t.Helper()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if _, err := gogit.PlainInit(remote, true); err != nil {
+		t.Fatalf("init remote: %v", err)
+	}
+
+	seed := t.TempDir()
+	sr, err := gogit.PlainInit(seed, false)
+	if err != nil {
+		t.Fatalf("init seed: %v", err)
+	}
+	if _, err := sr.CreateRemote(&gogitcfg.RemoteConfig{
+		Name: "origin",
+		URLs: []string{remote},
+	}); err != nil {
+		t.Fatalf("create remote: %v", err)
+	}
+	wt, err := sr.Worktree()
+	if err != nil {
+		t.Fatalf("worktree: %v", err)
+	}
+
+	skillDir := filepath.Join(seed, "skills", name)
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillBody), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	// 0o755 → go-git records the blob at git mode 100755, the exec-bit case
+	// that #135 dropped on the read-only materialisation.
+	if err := os.WriteFile(filepath.Join(skillDir, scriptName), []byte(scriptBody), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if _, err := wt.Add(filepath.Join("skills", name, "SKILL.md")); err != nil {
+		t.Fatalf("add SKILL.md: %v", err)
+	}
+	if _, err := wt.Add(filepath.Join("skills", name, scriptName)); err != nil {
+		t.Fatalf("add script: %v", err)
+	}
+	if _, err := wt.Commit("init", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	head, err := sr.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if err := sr.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"), head.Hash(),
+	)); err != nil {
+		t.Fatalf("set main: %v", err)
+	}
+	if err := sr.Push(&gogit.PushOptions{
+		RemoteName: "origin",
+		RefSpecs:   []gogitcfg.RefSpec{"refs/heads/main:refs/heads/main"},
+	}); err != nil {
+		t.Fatalf("push seed: %v", err)
+	}
+	rr, err := gogit.PlainOpen(remote)
+	if err != nil {
+		t.Fatalf("open remote: %v", err)
+	}
+	if err := rr.Storer.SetReference(plumbing.NewSymbolicReference(
+		plumbing.HEAD, plumbing.NewBranchReferenceName("main"),
+	)); err != nil {
+		t.Fatalf("set remote HEAD: %v", err)
+	}
+	return remote
+}
+
 // seedRemoteWithTags creates a bare remote seeded with the given skills on
 // main, plus a tag at HEAD for every entry in tags. Returns the bare repo
 // path. The tags are lightweight refs at the same commit — sufficient for
@@ -265,6 +343,35 @@ func installCodeReview(t *testing.T, h *installerTestHarness, remote string, bra
 
 func newSyncer() *skill.Syncer {
 	return skill.NewSyncer(git.NewGoGitWorktree(), git.NewGoGitClient())
+}
+
+// makeWorktreeEditable restores write permissions on a worktree subtree so a
+// test can simulate a user modifying an installed skill. Installs are frozen
+// read-only ("uv for agent skills": immutable at rest); in real use `qvr edit`
+// performs this transition by ejecting a writable copy. These unit tests mutate
+// the shared worktree directly, so they unlock it first — mirroring edit mode.
+func makeWorktreeEditable(t *testing.T, root string) {
+	t.Helper()
+	err := filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			_ = os.Chmod(p, 0o755)
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		_ = os.Chmod(p, 0o644)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("make worktree editable: %v", err)
+	}
 }
 
 // makeSkill builds an in-memory Skill struct for validator tests.

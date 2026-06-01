@@ -69,6 +69,40 @@ func TestHashSubtree_singleFile(t *testing.T) {
 	}
 }
 
+// TestHashSubtreeAtCommit_matchesHEAD pins the contract `qvr lock` relies on:
+// hashing a commit explicitly (from objects, no checkout) yields the exact same
+// SubtreeIdentity as HashSubtree resolving the same commit via HEAD.
+func TestHashSubtreeAtCommit_matchesHEAD(t *testing.T) {
+	repo := buildRepo(t, map[string]string{
+		"skills/foo/SKILL.md":       "---\nname: foo\n---\nbody\n",
+		"skills/foo/scripts/run.sh": "#!/bin/sh\necho hi\n",
+	})
+	viaHead, err := canonical.HashSubtree(repo, "skills/foo")
+	if err != nil {
+		t.Fatalf("HashSubtree: %v", err)
+	}
+	viaCommit, err := canonical.HashSubtreeAtCommit(repo, viaHead.CommitSHA, "skills/foo")
+	if err != nil {
+		t.Fatalf("HashSubtreeAtCommit: %v", err)
+	}
+	if viaHead.SubtreeHash != viaCommit.SubtreeHash {
+		t.Errorf("SubtreeHash mismatch:\n  head=%s\n  commit=%s", viaHead.SubtreeHash, viaCommit.SubtreeHash)
+	}
+	if viaHead.TreeSHA != viaCommit.TreeSHA {
+		t.Errorf("TreeSHA mismatch: head=%s commit=%s", viaHead.TreeSHA, viaCommit.TreeSHA)
+	}
+	if viaCommit.CommitSHA != viaHead.CommitSHA {
+		t.Errorf("CommitSHA mismatch: head=%s commit=%s", viaHead.CommitSHA, viaCommit.CommitSHA)
+	}
+}
+
+func TestHashSubtreeAtCommit_unknownCommitErrors(t *testing.T) {
+	repo := buildRepo(t, map[string]string{"skills/foo/SKILL.md": "---\nname: foo\n---\nx\n"})
+	if _, err := canonical.HashSubtreeAtCommit(repo, "0000000000000000000000000000000000000000", "skills/foo"); err == nil {
+		t.Fatal("expected error for unknown commit, got nil")
+	}
+}
+
 func TestHashSubtree_deterministic(t *testing.T) {
 	files := map[string]string{
 		"skills/foo/SKILL.md":          "---\nname: foo\n---\nbody\n",

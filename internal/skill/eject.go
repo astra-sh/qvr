@@ -134,6 +134,11 @@ func EjectToTarget(req EjectRequest) (*EjectResult, error) {
 		_ = os.RemoveAll(stagingDir)
 		return nil, fmt.Errorf("copy skill tree: %w", err)
 	}
+	// The shared worktree is frozen read-only and copyDir preserves source
+	// modes, so the freshly-copied edit tree would be read-only. Restore write
+	// bits: this copy is the editable working dir, and initEjectRepo is about
+	// to `git init` and write into it. This is the immutable→editable hinge.
+	setSubtreeWritable(stagingDir)
 	if err := initEjectRepo(stagingDir, e, req.Author, req.AuthorEmail); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return nil, fmt.Errorf("init edit repo: %w", err)

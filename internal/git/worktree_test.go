@@ -74,6 +74,45 @@ func TestWorktree_Add_AlreadyExists(t *testing.T) {
 	}
 }
 
+// TestWorktree_Add_HardlinksObjectsForDedup verifies content dedup: Add clones
+// with `git clone --local`, which hardlinks the bare's object files into the
+// worktree instead of copying them — so a worktree object shares an inode with
+// the bare (os.SameFile), and identical content across worktrees costs no extra
+// disk. Skips (rather than fails) when no hardlink is found, since dedup is a
+// best-effort optimization that needs same-filesystem hardlink support.
+func TestWorktree_Add_HardlinksObjectsForDedup(t *testing.T) {
+	remote := setupBareRegistry(t, map[string]string{"code-review": "# code-review\n"})
+	bare := bareCloneFor(t, remote)
+
+	wtPath := filepath.Join(t.TempDir(), "wt")
+	w := git.NewGoGitWorktree()
+	if err := w.Add(bare, wtPath, "main"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	bareObjects := filepath.Join(bare, "objects")
+	wtObjects := filepath.Join(wtPath, ".git", "objects")
+	shared := false
+	_ = filepath.Walk(bareObjects, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, rerr := filepath.Rel(bareObjects, p)
+		if rerr != nil {
+			return nil
+		}
+		wtInfo, werr := os.Stat(filepath.Join(wtObjects, rel))
+		if werr == nil && os.SameFile(info, wtInfo) {
+			shared = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	if !shared {
+		t.Skip("no hardlinked object found — filesystem may not support same-FS hardlinks; dedup is best-effort")
+	}
+}
+
 func TestWorktree_Add_MissingBare(t *testing.T) {
 	w := git.NewGoGitWorktree()
 	err := w.Add(filepath.Join(t.TempDir(), "nope.git"), filepath.Join(t.TempDir(), "wt"), "main")

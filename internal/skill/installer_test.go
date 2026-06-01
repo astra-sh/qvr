@@ -383,6 +383,7 @@ description: local dev skill
 		Skills map[string]struct {
 			Source string `json:"source"`
 			Ref    string `json:"ref"`
+			Mode   string `json:"mode"`
 		} `json:"skills"`
 	}
 	if err := json.Unmarshal(data, &lf); err != nil {
@@ -398,6 +399,12 @@ description: local dev skill
 	}
 	if entry.Ref != "local" {
 		t.Errorf("lock entry ref = %q, want local", entry.Ref)
+	}
+	// #133 / AC-LIFE-9: a link install must serialise mode:"link" so the lock
+	// is self-describing; IsLink() also keys off Ref=="local", but the §4
+	// schema requires the explicit field.
+	if entry.Mode != model.ModeLink {
+		t.Errorf("lock entry mode = %q, want %q", entry.Mode, model.ModeLink)
 	}
 }
 
@@ -431,6 +438,36 @@ description: local dev skill
 	}
 	if !strings.Contains(err.Error(), "must match directory name") {
 		t.Errorf("error = %q, want mention of directory-name mismatch", err.Error())
+	}
+}
+
+// TestInstall_FrozenNoLock_RequiresReadableLock is the #132 / AC-FROZEN-2
+// guard: `--frozen` with no lock file at all must fail with the contract
+// string "requires a readable lock file", not the downstream "skill not
+// present in lock file" (which only applies when a lock exists but lacks the
+// entry). ReadLockFile treats a missing file as an empty lock, so without the
+// explicit existence check the frozen path slid into the wrong error.
+func TestInstall_FrozenNoLock_RequiresReadableLock(t *testing.T) {
+	h := newHarness(t)
+	lockPath := filepath.Join(h.project, model.LockFileName)
+	if _, err := os.Stat(lockPath); err == nil {
+		t.Fatalf("precondition: lock file already exists at %s", lockPath)
+	}
+
+	_, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "demo@main",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+		Frozen:      true,
+	})
+	if err == nil {
+		t.Fatal("expected --frozen with no lock to error")
+	}
+	if !strings.Contains(err.Error(), "--frozen requires a readable lock file") {
+		t.Errorf("error = %q, want it to contain %q", err.Error(), "--frozen requires a readable lock file")
+	}
+	if strings.Contains(err.Error(), "not present in lock file") {
+		t.Errorf("error leaked the wrong contract string (skill-not-present): %q", err.Error())
 	}
 }
 

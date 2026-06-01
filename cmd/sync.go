@@ -26,6 +26,9 @@ var (
 	syncNoScan        bool
 	syncStrict        bool
 	syncAllowDrift    bool
+	syncLocked        bool
+	syncFrozen        bool
+	syncCheck         bool
 )
 
 var syncCmd = &cobra.Command{
@@ -67,15 +70,42 @@ func init() {
 	_ = syncCmd.Flags().MarkHidden("strict")
 	syncCmd.Flags().BoolVar(&syncAllowDrift, "allow-drift", false,
 		"downgrade subtreeHash drift from an error to a warning (rare local-debug case; CI should never set this)")
+	syncCmd.Flags().BoolVar(&syncLocked, "locked", false,
+		"CI assertion: restore worktrees but make NO changes — exit non-zero if a sync would modify qvr.lock (stale/incomplete lock) or if any skill drifted")
+	syncCmd.Flags().BoolVar(&syncFrozen, "frozen", false,
+		"restore strictly from the lock as-is: never resolve or rewrite qvr.lock, and tolerate a stale lock rather than failing (like uv sync --frozen)")
+	syncCmd.Flags().BoolVar(&syncCheck, "check", false,
+		"read-only CI assertion: report whether the project is in sync and exit non-zero if not, without writing anything (not even transiently)")
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
+	// --locked / --frozen / --check are three distinct CI/restore modes; mixing
+	// them is a contradiction (assert-unchanged vs tolerate-stale vs read-only).
+	// Reject up front so a script can't silently get one mode's behaviour while
+	// believing it asked for another.
+	if n := boolCount(syncLocked, syncFrozen, syncCheck); n > 1 {
+		return fmt.Errorf("--locked, --frozen, and --check are mutually exclusive; pass at most one")
+	}
+
 	projectRoot, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), syncGlobal)
+
+	// --locked is a CI assertion: a sync must not modify qvr.lock. Snapshot the
+	// committed bytes up front; after reconcile we compare and fail (restoring
+	// the snapshot) if anything would have changed. Auto-register and scan
+	// persistence are suppressed under --locked so the only thing that can
+	// rewrite the lock is the reconciler restoring a genuinely stale entry.
+	// Both --locked and --frozen guarantee qvr.lock bytes don't change: --locked
+	// fails if they would, --frozen silently restores the snapshot and carries
+	// on. Snapshot up front so we can compare/restore after reconcile.
+	var lockedPrior []byte
+	if syncLocked || syncFrozen {
+		lockedPrior, _ = os.ReadFile(lockPath)
+	}
 
 	var (
 		result             *skill.ReconcileResult
@@ -101,15 +131,20 @@ func runSync(cmd *cobra.Command, args []string) error {
 		// the user gets the full picture of pending state changes, but
 		// we never call config.Save — dry-run's contract is no
 		// filesystem mutations.
-		autoRegisterRegistriesFromLock(lock, syncDryRun)
+		// Under --locked/--frozen/--check, run auto-register in dry-run so it
+		// never persists config — those modes forbid (or freeze) side effects.
+		autoRegisterRegistriesFromLock(lock, syncDryRun || syncLocked || syncFrozen || syncCheck)
 
 		gc := git.NewGoGitClient()
 		wt := git.NewGoGitWorktree()
 		installer := skill.NewInstaller(newRegistryManager(gc), wt, gc)
 		reconciler := skill.NewReconciler(installer)
 
+		// --check is read-only: run the reconcile in dry-run so it reports what
+		// WOULD change (restores, symlinks, orphans) without mutating disk or
+		// the lock. The would-change lists then drive --check's exit code.
 		r, err := reconciler.Reconcile(lock, projectRoot, config.Dir(), skill.ReconcileOptions{
-			DryRun:        syncDryRun,
+			DryRun:        syncDryRun || syncCheck,
 			KeepUntracked: syncKeepUntracked,
 		})
 		if err != nil {
@@ -132,18 +167,24 @@ func runSync(cmd *cobra.Command, args []string) error {
 		// inside WithLock so concurrent qvr commands see a consistent
 		// snapshot.
 		if !syncDryRun {
-			cfg, cerr := config.Load()
-			if cerr == nil {
-				// Snapshot the lock's current on-disk bytes so we can
-				// skip the write when reconcile + scan changed nothing
-				// (issue #79: sync should be idempotent — no rewrite on
-				// no-state-change reruns). Snapshot taken before the scan
-				// pass because that's the last in-memory mutation source.
-				priorBytes, _ := os.ReadFile(lockPath)
-				atOrAboveThreshold = scanRestoredSkillsAfterSync(cmd.Context(), lock, cfg, projectRoot)
-				if needsLockWrite(lock, priorBytes) {
-					if werr := lock.Write(); werr != nil {
-						return fmt.Errorf("persist scan results: %w", werr)
+			// Under --locked/--frozen/--check we skip the rescan + scan-result
+			// persist: those modes forbid (or freeze) mutating qvr.lock, and
+			// rescanning would rewrite verification.scan. Drift verification
+			// below still runs for all of them.
+			if !syncLocked && !syncFrozen && !syncCheck {
+				cfg, cerr := config.Load()
+				if cerr == nil {
+					// Snapshot the lock's current on-disk bytes so we can
+					// skip the write when reconcile + scan changed nothing
+					// (issue #79: sync should be idempotent — no rewrite on
+					// no-state-change reruns). Snapshot taken before the scan
+					// pass because that's the last in-memory mutation source.
+					priorBytes, _ := os.ReadFile(lockPath)
+					atOrAboveThreshold = scanRestoredSkillsAfterSync(cmd.Context(), lock, cfg, projectRoot)
+					if needsLockWrite(lock, priorBytes) {
+						if werr := lock.Write(); werr != nil {
+							return fmt.Errorf("persist scan results: %w", werr)
+						}
 					}
 				}
 			}
@@ -173,17 +214,69 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return lockErr
 	}
 
-	registry.TouchProject(lockPath)
+	// --locked / --frozen lock-byte guarantee: the reconciler may have rewritten
+	// qvr.lock while restoring a stale entry. If the on-disk lock now differs
+	// from what was committed, restore the committed bytes (keep CI's tree
+	// clean). --locked then FAILS — a byte-identical lock means a real sync
+	// would have been a no-op, which is what it asserts. --frozen does NOT fail:
+	// it intentionally tolerates a stale lock, having just restored worktrees
+	// from it without updating it.
+	if syncLocked || syncFrozen {
+		finalBytes, _ := os.ReadFile(lockPath)
+		if !bytes.Equal(lockedPrior, finalBytes) {
+			if len(lockedPrior) > 0 {
+				_ = os.WriteFile(lockPath, lockedPrior, 0o644)
+			}
+			if syncLocked {
+				return fmt.Errorf("sync --locked: qvr.lock is out of date — a sync would modify it; run `qvr sync` (or `qvr lock upgrade`) and commit the result")
+			}
+		}
+	}
+
+	// --check is read-only: skip the projects.json bookkeeping touch and the
+	// AGENTS.md refresh (both write to disk) so the assertion has zero side
+	// effects, even the benign ones.
+	if !syncCheck {
+		registry.TouchProject(lockPath)
+	}
 
 	// Refresh AGENTS.md if the user has opted in (file already present). The
 	// reconciler may have changed which skills are visible, so the doc cache
 	// can otherwise lie until the next manual `qvr docs`.
-	if !syncGlobal && !syncDryRun && latestLock != nil {
+	if !syncGlobal && !syncDryRun && !syncCheck && latestLock != nil {
 		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
+	// --check verdict: anything a real sync would change — a worktree to
+	// restore, a symlink to (re)create, an orphan to remove, drift, or a
+	// reconcile error — means the project is NOT in sync with qvr.lock. The
+	// reconcile ran in dry-run, so these are all "would" findings and nothing
+	// was mutated; we only translate them into a non-zero exit.
+	checkFailed := syncCheck && (len(result.Installed) > 0 || len(result.SymlinksFixed) > 0 ||
+		len(result.Removed) > 0 || len(driftReports) > 0 || len(result.Errors) > 0)
+
 	if printer.Format == output.FormatJSON {
-		return printer.JSON(result)
+		if err := printer.JSON(result); err != nil {
+			return err
+		}
+		// JSON mode must honor the same exit-code contract as text mode: drift
+		// (issue #65/#118) and per-entry reconcile failures (#94) flip the exit
+		// non-zero. Before this, the JSON branch returned right after emitting
+		// the payload, so `qvr sync --output json` exited 0 even on drift or a
+		// failed restore (#125). errJSONHandled exits 1 without a second
+		// envelope so the stream stays one JSON document.
+		if checkFailed {
+			return errJSONHandled
+		}
+		// --frozen tolerates drift (it restores from the lock as-is and never
+		// fails on staleness); --locked still escalates it.
+		if len(driftReports) > 0 && !syncFrozen && (!syncAllowDrift || syncLocked) {
+			return errJSONHandled
+		}
+		if len(result.Errors) > 0 {
+			return errJSONHandled
+		}
+		return nil
 	}
 
 	for _, name := range result.Installed {
@@ -227,14 +320,25 @@ func runSync(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(result.Installed)+len(result.SymlinksFixed)+len(result.Removed) == 0 && len(result.Errors) == 0 && len(atOrAboveThreshold) == 0 && len(driftReports) == 0 {
-		printer.Success("Already in sync.")
+		if syncCheck {
+			printer.Success("In sync with qvr.lock.")
+		} else {
+			printer.Success("Already in sync.")
+		}
+	}
+	// --check verdict (read-only): any would-change finding fails the assertion.
+	// The individual would-install / would-create / drift lines already printed
+	// above; this is the single non-zero exit a CI gate keys on.
+	if checkFailed {
+		return fmt.Errorf("sync --check: project is not in sync with qvr.lock — run `qvr sync` and commit the result")
 	}
 	// Drift defaults to a non-zero exit (issue #118). Pre-fix, drift only
 	// failed under --strict, so a CI script running `qvr sync` could never
 	// catch a tampered cached worktree without explicit opt-in. uv-style:
 	// sync is always correct — drift either heals or fails, never persists
 	// silently. --allow-drift is the rare escape hatch for local debug.
-	if len(driftReports) > 0 && !syncAllowDrift {
+	// --frozen tolerates drift (restore-from-lock, never fail on staleness).
+	if len(driftReports) > 0 && !syncFrozen && (!syncAllowDrift || syncLocked) {
 		return fmt.Errorf("sync: %d entr(y/ies) failed integrity check (pass --allow-drift to downgrade to a warning)", len(driftReports))
 	}
 	// Reconciler-collected per-entry failures (install, symlink, checkout)
@@ -252,10 +356,22 @@ func runSync(cmd *cobra.Command, args []string) error {
 	// 100 MB+) so a single stray worktree doesn't nag every run.
 	// OSS-readiness finding: ~49 orphans (~200 MB) had accumulated
 	// across normal use without any prompt to clean.
-	if !syncDryRun {
+	if !syncDryRun && !syncCheck {
 		printOrphanHintIfBig()
 	}
 	return nil
+}
+
+// boolCount returns how many of the given flags are true. Used to enforce
+// mutual exclusivity of the --locked / --frozen / --check sync modes.
+func boolCount(flags ...bool) int {
+	n := 0
+	for _, f := range flags {
+		if f {
+			n++
+		}
+	}
+	return n
 }
 
 // printOrphanHintIfBig walks the shared worktree cache and emits a

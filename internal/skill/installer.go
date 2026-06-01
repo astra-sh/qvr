@@ -24,6 +24,10 @@ var (
 	// Distinct from ErrSkillNotFound so cmd/add.go can render per-registry
 	// version hints instead of a generic "register one" message (issue #101).
 	ErrAmbiguousRef = errors.New("ref not found in any registry that provides the skill")
+	// ErrInvalidSignature means the resolved ref carried a present-but-bad
+	// git signature (BAD signature). The only provenance status that gates an
+	// install — absent or unverifiable signatures never block.
+	ErrInvalidSignature = errors.New("invalid git signature on resolved ref")
 )
 
 // InstallRequest describes a desired install.
@@ -39,6 +43,13 @@ type InstallRequest struct {
 	// hash must match the recorded VerificationRecord.SubtreeHash. Drift or
 	// missing entries are hard errors.
 	Frozen bool
+	// PinCommit materializes the worktree at this exact commit SHA instead of
+	// re-resolving the ref label. The uv reproducibility contract: `qvr sync`
+	// restores the lock's recorded commit even when the ref (e.g. "main") has
+	// advanced upstream — only `qvr update` re-resolves. The human ref label
+	// (the @<ref> in Skill) is still recorded as entry.Ref. Empty for ordinary
+	// `qvr add`, which resolves the ref to today's tip.
+	PinCommit string
 	// Registry restricts skill resolution to the named registry. Empty
 	// means "search every configured registry" (the default `qvr add`
 	// behavior). Set by `qvr add --registry <name>` so users can pick
@@ -146,15 +157,29 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		if lp == "" {
 			lp = model.DefaultLockPath(req.ProjectRoot, quiverHome(), req.Global)
 		}
-		if existingLock, lerr := model.ReadLockFile(lp); lerr == nil {
-			if existing, gerr := existingLock.Get(name); gerr == nil {
-				if req.As == "" && existing.Canonical != "" {
-					req.As = name
-					name = existing.Canonical
-				}
-				if req.Registry == "" && existing.Registry != "" {
-					req.Registry = existing.Registry
-				}
+		// --frozen is lock-authoritative, so a missing/unreadable lock is a
+		// hard error BEFORE we resolve anything. Checked here (not just at the
+		// drift gate below) so the user gets the contract string "requires a
+		// readable lock file" regardless of whether the skill name happens to
+		// resolve in a registry. ReadLockFile returns an empty lock — not an
+		// error — for a non-existent file (that's the expected pre-first-install
+		// state), so we stat explicitly to tell "no lock at all" (this error)
+		// apart from "lock exists but lacks the entry" (the "skill not present"
+		// error at the drift gate). AC-FROZEN-2 / #132.
+		if _, statErr := os.Stat(lp); statErr != nil {
+			return nil, fmt.Errorf("--frozen requires a readable lock file: %w", statErr)
+		}
+		existingLock, lerr := model.ReadLockFile(lp)
+		if lerr != nil {
+			return nil, fmt.Errorf("--frozen requires a readable lock file: %w", lerr)
+		}
+		if existing, gerr := existingLock.Get(name); gerr == nil {
+			if req.As == "" && existing.Canonical != "" {
+				req.As = name
+				name = existing.Canonical
+			}
+			if req.Registry == "" && existing.Registry != "" {
+				req.Registry = existing.Registry
 			}
 		}
 	}
@@ -239,6 +264,16 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		resolvedSHA = version
 	}
 
+	// checkoutRef is what the worktree actually checks out. Normally the ref
+	// label; under PinCommit (qvr sync restore) it's the lock's recorded
+	// commit, so a restore is reproducible even when the ref advanced
+	// upstream. entry.Ref stays the human label either way.
+	checkoutRef := version
+	if req.PinCommit != "" {
+		checkoutRef = req.PinCommit
+		resolvedSHA = req.PinCommit
+	}
+
 	// Staging path → final path. Worktree creation can fail mid-way (e.g., bad
 	// ref), and we don't want a half-populated directory masquerading as an
 	// installed skill. Stage in a sibling dir and rename at the end.
@@ -251,7 +286,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		// across multiple agent targets (install once, add cursor target, rerun
 		// install).
 	} else {
-		if err := in.Worktree.Add(loc.RepoPath, stagingPath, version); err != nil {
+		if err := in.Worktree.Add(loc.RepoPath, stagingPath, checkoutRef); err != nil {
 			_ = os.RemoveAll(stagingPath)
 			return nil, fmt.Errorf("create worktree: %w", err)
 		}
@@ -284,6 +319,25 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	if _, err := os.Stat(filepath.Join(skillDir, "SKILL.md")); err != nil {
 		return nil, fmt.Errorf("skill path missing after checkout: %w", err)
 	}
+
+	// Optional git-native provenance (the v1 trust surface). Verify a signed
+	// tag/commit if one is present. An invalid — present-but-bad — signature
+	// blocks the install before any symlink or lock side effects, because it
+	// signals tampering. Absent or unverifiable signatures are recorded as
+	// metadata, never gated. Computed once here and reused for the lock entry.
+	provenance := CheckGitProvenance(loc.RepoPath, version, resolvedSHA)
+	if provenance != nil && provenance.SignatureStatus == model.SignatureStatusInvalid {
+		return nil, fmt.Errorf("%w: %s@%s carries an invalid git signature on %q — refusing to install",
+			ErrInvalidSignature, name, registry.ShortSHA(resolvedSHA), version)
+	}
+
+	// Freeze the verified bytes: write-protect the installed skill subtree so
+	// what an agent reads through the symlink stays identical to what was
+	// scanned and verified. This is a shared consume install — modifying it
+	// requires `qvr edit`, which ejects a writable project-local copy. The
+	// shared worktree is keyed by SHA and shared across projects; freezing it
+	// also prevents one project's edit from silently mutating another's.
+	setSubtreeReadOnly(skillDir)
 
 	// Create symlinks for every target. If any fails, roll back previously
 	// created symlinks for this install to leave the filesystem consistent.
@@ -327,12 +381,24 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 			priorVerification = existing.Verification
 		}
 	}
-	subtreeHash, hashErr := ComputeSubtreeHash(finalPath, loc.Entry.Path)
-	if hashErr != nil {
-		// Hashing failure shouldn't block the install — we still want the
-		// worktree and symlinks on disk so the user can use the skill. Leave
-		// SubtreeHash empty; doctor/verify will flag the missing seal.
-		subtreeHash = ""
+	var subtreeHash, treeOID string
+	if id, hashErr := ComputeSubtreeIdentity(finalPath, loc.Entry.Path); hashErr == nil {
+		subtreeHash = id.SubtreeHash
+		treeOID = id.TreeSHA
+	}
+	// else: hashing failure shouldn't block the install — we still want the
+	// worktree and symlinks on disk so the user can use the skill. Leave
+	// SubtreeHash/TreeOID empty; doctor/verify will flag the missing seal.
+
+	// Merge the freshly-computed provenance into the verification record,
+	// preserving any prior signal (e.g. a scan attestation) carried over from
+	// a same-commit no-op re-add.
+	verification := priorVerification
+	if provenance != nil {
+		if verification == nil {
+			verification = &model.VerificationRecord{}
+		}
+		verification.Provenance = provenance
 	}
 
 	entry := &model.LockEntry{
@@ -344,8 +410,9 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		Commit:        commit,
 		InstallCommit: commit,
 		SubtreeHash:   subtreeHash,
+		TreeOID:       treeOID,
 		Targets:       targets,
-		Verification:  priorVerification,
+		Verification:  verification,
 	}
 	// Record the canonical (registry-side) skill name when the user
 	// installed under an alias, so `qvr list` / `qvr upgrade` can map
@@ -720,6 +787,7 @@ func (in *Installer) Link(localPath string, req InstallRequest) (*InstallResult,
 		Name:        name,
 		Source:      abs,
 		Ref:         "local",
+		Mode:        model.ModeLink,
 		SubtreeHash: linkSubtreeHash,
 		Targets:     req.Targets,
 		InstalledAt: time.Now().UTC(),

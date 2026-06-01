@@ -41,7 +41,9 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("lock get: %v", err)
 	}
 
-	// 2. Modify via symlink (simulates an agent editing the skill).
+	// 2. Modify via symlink (simulates an agent editing the skill). The install
+	// is frozen read-only; unlock it first, mirroring what `qvr edit` does.
+	makeWorktreeEditable(t, skill.EntryWorktreePath(entry))
 	linkPath := filepath.Join(h.project, ".claude/skills/code-review", "SKILL.md")
 	original, err := os.ReadFile(linkPath)
 	if err != nil {

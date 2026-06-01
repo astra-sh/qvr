@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
@@ -57,6 +58,31 @@ func HashSubtree(worktreePath, subpath string) (*SubtreeIdentity, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load commit %s: %w", head.Hash(), err)
 	}
+	return hashSubtreeFromCommit(commit, subpath)
+}
+
+// HashSubtreeAtCommit is HashSubtree pinned to an explicit commit instead of
+// HEAD. It hashes the subtree straight from git objects, so it works against a
+// bare clone (no working tree, HEAD on the registry default branch) for any
+// commit reachable in that repo. `qvr lock` uses it to re-pin and re-hash an
+// entry without checking out a worktree — the digest is identical to what a
+// checkout of the same commit would produce, since both walk the same tree.
+func HashSubtreeAtCommit(repoPath, commitHash, subpath string) (*SubtreeIdentity, error) {
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("open repo: %w", err)
+	}
+	commit, err := repo.CommitObject(plumbing.NewHash(commitHash))
+	if err != nil {
+		return nil, fmt.Errorf("load commit %s: %w", commitHash, err)
+	}
+	return hashSubtreeFromCommit(commit, subpath)
+}
+
+// hashSubtreeFromCommit is the shared tail of HashSubtree / HashSubtreeAtCommit:
+// resolve the subtree at `subpath` within the commit's tree and hash it with
+// the frozen algorithm documented on HashSubtree.
+func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdentity, error) {
 	rootTree, err := commit.Tree()
 	if err != nil {
 		return nil, fmt.Errorf("load tree: %w", err)
@@ -116,7 +142,7 @@ func HashSubtree(worktreePath, subpath string) (*SubtreeIdentity, error) {
 	return &SubtreeIdentity{
 		SubtreeHash: "sha256:" + hex.EncodeToString(h.Sum(nil)),
 		TreeSHA:     subTree.Hash.String(),
-		CommitSHA:   head.Hash().String(),
+		CommitSHA:   commit.Hash.String(),
 	}, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -178,6 +179,105 @@ func runGit(ctx context.Context, args ...string) ([]byte, error) {
 		return stdout.Bytes(), fmt.Errorf("%s", redactCreds(msg))
 	}
 	return stdout.Bytes(), nil
+}
+
+// Git-native signature verification statuses. These mirror the model-level
+// constants (model.SignatureStatus*) but keep the git package free of a
+// model import — the values are identical, so the command/installer layer
+// assigns them straight through.
+const (
+	SigVerified = "verified" // git reported a good signature
+	SigNone     = "none"     // no signature present (or unverifiable: missing key)
+	SigInvalid  = "invalid"  // a signature is present but failed verification
+)
+
+// signerPatterns extract a best-effort signer identity from git/gpg/ssh
+// verification output. GPG: `Good signature from "Name <email>"`. SSH:
+// `Good "git" signature for principal@example.com`.
+var signerPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`Good signature from "([^"]+)"`),
+	regexp.MustCompile(`Good "[^"]*" signature for (\S+)`),
+}
+
+// VerifyTagSignature runs `git verify-tag <tag>` in the repo at repoPath and
+// classifies the result. Returns (SigVerified, signer, nil) on a good
+// signature, (SigInvalid, "", nil) when a signature is present but bad
+// (tampering), and (SigNone, "", nil) when no verifiable signature exists
+// (unsigned, lightweight tag, or signature by a key we don't hold). The
+// error return is reserved for operational failures (git missing). This is
+// the optional, git-native provenance surface — only SigInvalid should gate
+// an install.
+func VerifyTagSignature(ctx context.Context, repoPath, tag string) (status, signer string, err error) {
+	return verifyGitSignature(ctx, repoPath, "verify-tag", tag)
+}
+
+// VerifyCommitSignature runs `git verify-commit <ref>` in the repo at
+// repoPath. Semantics match VerifyTagSignature — used as a fallback when the
+// resolved ref is a branch/commit rather than an annotated tag.
+func VerifyCommitSignature(ctx context.Context, repoPath, ref string) (status, signer string, err error) {
+	return verifyGitSignature(ctx, repoPath, "verify-commit", ref)
+}
+
+func verifyGitSignature(ctx context.Context, repoPath, verb, ref string) (status, signer string, err error) {
+	if err := ensureGit(); err != nil {
+		return SigNone, "", err
+	}
+	// git writes both the human "Good signature ..." line (which we parse for
+	// the signer) and the failure reasons to stderr; classification keys off
+	// those strings since git has no stable machine-readable exit code that
+	// separates "tampered" from "can't check".
+	cmd := gitCommand(ctx, "-C", repoPath, verb, ref)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	runErr := cmd.Run()
+	out := stderr.String()
+
+	if runErr == nil {
+		return SigVerified, extractSigner(out), nil
+	}
+
+	// A cryptographically valid SSH signature whose signer we don't hold in
+	// allowed-signers prints the "Good \"git\" signature ..." line and THEN a
+	// trust error ("No principal matched."). That is not tampering — the
+	// signature checks out, we just can't attribute it — so it's "none" (the
+	// spec's "missing key" bucket), never a block. Checked before the
+	// bad-signature markers because a corrupt blob ALSO emits "No principal
+	// matched", but without the preceding good-signature line.
+	if strings.Contains(out, "No principal matched") && strings.Contains(out, "Good \"") {
+		return SigNone, "", nil
+	}
+
+	// A present-but-bad signature is the one status that signals tampering and
+	// blocks an install. Markers across signing backends:
+	//   - GPG content mismatch:        "BAD signature"
+	//   - SSH content tamper:          "Signature verification failed: incorrect signature"
+	//   - SSH corrupt signature blob:  "Could not verify signature." (+ parse noise)
+	if strings.Contains(out, "BAD signature") ||
+		strings.Contains(out, "incorrect signature") ||
+		strings.Contains(out, "Could not verify signature") {
+		return SigInvalid, "", nil
+	}
+
+	// Everything else — no signature, lightweight tag, missing public key
+	// (GPG "Can't check signature: No public key"), or the signing backend
+	// (gpg/ssh-keygen) is absent — is "none": not proven bad, so it must not
+	// block an install.
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) {
+		return SigNone, "", nil
+	}
+	// Non-exit failure (couldn't launch git, repo unreadable): surface it so
+	// callers can distinguish "no signature" from "couldn't check".
+	return SigNone, "", fmt.Errorf("%s: %s", verb, redactCreds(strings.TrimSpace(out)))
+}
+
+func extractSigner(out string) string {
+	for _, re := range signerPatterns {
+		if m := re.FindStringSubmatch(out); len(m) == 2 {
+			return strings.TrimSpace(m[1])
+		}
+	}
+	return ""
 }
 
 // IsAncestor reports whether ancestorSHA is an ancestor of (or equal to)

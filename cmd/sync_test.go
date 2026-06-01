@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -228,6 +229,147 @@ func TestRunSync_NoOpRerun_StdoutIsSingleLine(t *testing.T) {
 	want := "✓ Already in sync.\n"
 	if got != want {
 		t.Errorf("no-op sync stdout = %q, want %q — issue #79: a steady-state rerun should emit one line, nothing else", got, want)
+	}
+}
+
+// TestRunSync_Locked is the CI-contract guard for `qvr sync --locked`: an
+// in-sync project passes (exit 0, lock untouched), and a stale lock (drift
+// from recorded content) fails non-zero without mutating qvr.lock.
+func TestRunSync_Locked(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	project := t.TempDir()
+	t.Chdir(project)
+
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: locked test\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	subtreeHash, err := canonical.HashSubtreeFromDisk(editAbs)
+	if err != nil {
+		t.Fatalf("hash subtree: %v", err)
+	}
+
+	lockPath := filepath.Join(project, model.LockFileName)
+	writeLock := func(hash string) {
+		lock := model.NewLockFile(lockPath)
+		lock.Put(&model.LockEntry{
+			Name:        "demo",
+			Mode:        model.ModeEdit,
+			EditPath:    editRel,
+			Source:      "https://example.com/demo.git",
+			Ref:         "main",
+			SubtreeHash: hash,
+			Targets:     []string{"claude"},
+			InstalledAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		})
+		if err := lock.Write(); err != nil {
+			t.Fatalf("write lock: %v", err)
+		}
+	}
+
+	t.Cleanup(func() {
+		syncGlobal, syncDryRun, syncKeepUntracked = false, false, false
+		syncNoScan, syncStrict, syncAllowDrift, syncLocked = false, false, false, false
+	})
+	syncGlobal, syncDryRun, syncNoScan = false, false, true
+
+	// In sync → --locked passes and leaves qvr.lock byte-identical.
+	writeLock(subtreeHash)
+	before, _ := os.ReadFile(lockPath)
+	syncLocked = true
+	withCapturingPrinter(t, "text")
+	if err := runSync(syncCmd, nil); err != nil {
+		t.Fatalf("sync --locked on an in-sync project failed: %v", err)
+	}
+	after, _ := os.ReadFile(lockPath)
+	if !bytes.Equal(before, after) {
+		t.Error("sync --locked rewrote qvr.lock on an in-sync project")
+	}
+
+	// Stale lock (recorded hash no longer matches on-disk content) → fail,
+	// and the committed lock bytes are left untouched.
+	writeLock("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+	stale, _ := os.ReadFile(lockPath)
+	withCapturingPrinter(t, "text")
+	if err := runSync(syncCmd, nil); err == nil {
+		t.Error("sync --locked passed on a drifted lock; want non-zero exit")
+	}
+	restored, _ := os.ReadFile(lockPath)
+	if !bytes.Equal(stale, restored) {
+		t.Error("sync --locked mutated qvr.lock on failure; CI working tree should stay clean")
+	}
+}
+
+// TestRunSync_JSONDrift_ExitsNonZero is the #125 guard: `qvr sync --output
+// json` must honor the same exit-code contract as text mode. Drift fails the
+// command by default, but the JSON branch used to return right after emitting
+// the payload, so `--output json` exited 0 on a drifted lock — a CI script
+// piping to `jq` saw success. The fix returns errJSONHandled (exit 1) after
+// the payload, keeping stdout a single valid JSON document.
+func TestRunSync_JSONDrift_ExitsNonZero(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	project := t.TempDir()
+	t.Chdir(project)
+
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: json drift test\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	lockPath := filepath.Join(project, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:        "demo",
+		Mode:        model.ModeEdit,
+		EditPath:    editRel,
+		Source:      "https://example.com/demo.git",
+		Ref:         "main",
+		SubtreeHash: "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+		Targets:     []string{"claude"},
+		InstalledAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	t.Cleanup(func() {
+		syncGlobal, syncDryRun, syncKeepUntracked = false, false, false
+		syncNoScan, syncStrict, syncAllowDrift, syncLocked = false, false, false, false
+	})
+	syncGlobal, syncDryRun, syncKeepUntracked = false, false, false
+	syncNoScan, syncStrict, syncAllowDrift, syncLocked = true, false, false, false
+
+	stdout := withCapturingPrinter(t, "json")
+	err := runSync(syncCmd, nil)
+	if err == nil {
+		t.Fatal("sync --output json returned nil on a drifted lock; want non-zero exit (#125)")
+	}
+	if !errors.Is(err, errJSONHandled) {
+		t.Errorf("sync --output json drift error = %v, want errJSONHandled", err)
+	}
+	// stdout must still be a single well-formed JSON document (no diagnostic
+	// lines mixed in) so a downstream `jq` doesn't choke.
+	var payload any
+	if jerr := json.Unmarshal(stdout.Bytes(), &payload); jerr != nil {
+		t.Errorf("stdout is not valid JSON: %v\n%s", jerr, stdout.String())
 	}
 }
 

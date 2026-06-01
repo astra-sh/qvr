@@ -8,28 +8,38 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/raks097/quiver/internal/canonical"
 	"github.com/raks097/quiver/internal/config"
+	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
+	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
 
 var lockCmd = &cobra.Command{
 	Use:   "lock",
-	Short: "Inspect and maintain qvr.lock",
-	Long: `Manage the on-disk lock file. Subcommands re-hash installed skills and
-detect drift from the recorded supply-chain provenance, or migrate older
-lockfiles to the current schema.`,
-	// Without a RunE, cobra silently exits 0 on `qvr lock <typo>` after
-	// printing help — a typo like `lock verfiy` looks like success in CI.
-	// Mirror the top-level "unknown command" shape so the exit code matches.
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
-		}
-		return cmd.Help()
-	},
+	Short: "Re-resolve qvr.lock (and inspect/maintain it via subcommands)",
+	Long: `With no subcommand, re-resolve the lock: for every registry-backed entry,
+fetch its source and re-pin the recorded commit to the current tip of the
+pinned ref, rewriting qvr.lock WITHOUT touching installs (no worktrees are
+checked out, no symlinks change). This is the standalone re-resolve verb
+(mirrors ` + "`uv lock`" + `); run ` + "`qvr sync`" + ` afterwards to materialise the
+re-pinned commits.
+
+Skills have no transitive dependencies yet, so "re-resolve" means "re-pin each
+ref to its latest commit," not dependency solving. Re-pinned entries have their
+content hash invalidated and are restored + re-hashed by the next ` + "`qvr sync`" + `.
+
+  -P, --package <name>   re-pin only this skill
+      --dry-run          report what would change without writing
+      --global           operate on the user-global lock
+
+Subcommands re-hash installed skills and detect drift from the recorded
+supply-chain provenance (` + "`verify`" + `), or backfill missing provenance
+(` + "`upgrade`" + `).`,
+	RunE: runLock,
 }
 
 var (
@@ -40,6 +50,10 @@ var (
 
 	lockUpgradeDryRun bool
 	lockUpgradeGlobal bool
+
+	lockResolvePackage string
+	lockResolveDryRun  bool
+	lockResolveGlobal  bool
 )
 
 var lockVerifyCmd = &cobra.Command{
@@ -84,8 +98,224 @@ func init() {
 	lockUpgradeCmd.Flags().BoolVar(&lockUpgradeGlobal, "global", false,
 		"operate on the user-global lock file instead of the project lock")
 
+	lockCmd.Flags().StringVarP(&lockResolvePackage, "package", "P", "",
+		"re-pin only this skill (like uv lock -P pkg)")
+	lockCmd.Flags().BoolVar(&lockResolveDryRun, "dry-run", false,
+		"report which entries would be re-pinned without writing the lock")
+	lockCmd.Flags().BoolVar(&lockResolveGlobal, "global", false,
+		"operate on the user-global lock file instead of the project lock")
+
 	lockCmd.AddCommand(lockVerifyCmd, lockUpgradeCmd)
 	rootCmd.AddCommand(lockCmd)
+}
+
+// LockResolveEntryResult is one row of `qvr lock` (standalone re-resolve).
+type LockResolveEntryResult struct {
+	Name string `json:"name"`
+	Ref  string `json:"ref,omitempty"`
+	// Status vocabulary mirrors `qvr lock upgrade`'s verbs:
+	//   "repinned"    — wrote a new commit to the entry
+	//   "would-repin" — --dry-run says we'd re-pin
+	//   "unchanged"   — ref already at its tip commit
+	//   "skipped"     — link/edit/standalone entry with no registry upstream
+	//   "failed"      — couldn't resolve the ref (e.g. registry not fetched)
+	Status    string `json:"status"`
+	OldCommit string `json:"oldCommit,omitempty"`
+	NewCommit string `json:"newCommit,omitempty"`
+	Message   string `json:"message,omitempty"`
+}
+
+// LockResolveOutput is the top-level shape `qvr lock` emits in JSON mode.
+type LockResolveOutput struct {
+	LockVersion int                      `json:"lockVersion"`
+	Entries     []LockResolveEntryResult `json:"entries"`
+	DryRun      bool                     `json:"dryRun"`
+}
+
+func runLock(cmd *cobra.Command, args []string) error {
+	// A positional arg here is a mistyped subcommand (e.g. `qvr lock verfiy`):
+	// preserve the #120 "unknown command" non-zero exit rather than silently
+	// re-resolving. Real re-resolve takes no positionals — `-P` is a flag.
+	if len(args) > 0 {
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	}
+	projectRoot, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve cwd: %w", err)
+	}
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), lockResolveGlobal)
+
+	var out *LockResolveOutput
+	lockErr := model.WithLock(lockPath, func() error {
+		o, err := lockResolveInternal(cmd.Context(), lockPath)
+		if err != nil {
+			return err
+		}
+		out = o
+		return nil
+	})
+	if lockErr != nil {
+		return lockErr
+	}
+
+	failed := 0
+	repinned := 0
+	for _, e := range out.Entries {
+		switch e.Status {
+		case "failed":
+			failed++
+		case "repinned":
+			repinned++
+		}
+	}
+
+	if printer.Format == output.FormatJSON {
+		if err := printer.JSON(out); err != nil {
+			return err
+		}
+		if failed > 0 {
+			// Body carries the per-entry failure; suppress the duplicate
+			// top-level envelope so stdout stays a single JSON document.
+			return errJSONHandled
+		}
+		return nil
+	}
+
+	if len(out.Entries) == 0 {
+		printer.Info("No installed skills.")
+		return nil
+	}
+	for _, e := range out.Entries {
+		switch e.Status {
+		case "repinned":
+			printer.Success(fmt.Sprintf("%s: re-pinned %s %s → %s", e.Name, e.Ref, e.OldCommit, e.NewCommit))
+		case "would-repin":
+			printer.Info(fmt.Sprintf("%s: would re-pin %s %s → %s", e.Name, e.Ref, e.OldCommit, e.NewCommit))
+		case "unchanged":
+			printer.Info(fmt.Sprintf("%s: unchanged (%s @ %s)", e.Name, e.Ref, e.OldCommit))
+		case "skipped":
+			printer.Info(fmt.Sprintf("%s: skipped — %s", e.Name, e.Message))
+		case "failed":
+			printer.Error(fmt.Sprintf("%s: failed — %s", e.Name, e.Message))
+		}
+	}
+	if repinned > 0 && !lockResolveDryRun {
+		printer.Info("Run `qvr sync` to materialise the re-pinned commits.")
+	}
+	if failed > 0 {
+		// Per-entry errors already printed above; errTextHandled exits 1
+		// without duplicating them into a trailing `Error: …` envelope.
+		return errTextHandled
+	}
+	return nil
+}
+
+// lockResolveInternal is the read-modify-write loop for `qvr lock`, extracted
+// so it runs inside WithLock. It fetches each referenced registry once, then
+// re-pins every (or just --package) registry-backed entry's commit to the
+// current tip of its ref. Worktrees and symlinks are left untouched — the
+// re-pin only rewrites lock metadata and invalidates the content hash, which
+// the next `qvr sync` restores and recomputes.
+func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutput, error) {
+	lock, err := model.ReadLockFile(lockPath)
+	if err != nil {
+		return nil, fmt.Errorf("read lock: %w", err)
+	}
+
+	// Register missing registries from the lock so RegistryPath/Update can find
+	// their bare clones (self-healing, same as `qvr sync`). Dry-run never
+	// persists config.
+	autoRegisterRegistriesFromLock(lock, lockResolveDryRun)
+
+	gc := git.NewGoGitClient()
+	mgr := newRegistryManager(gc)
+
+	out := &LockResolveOutput{
+		LockVersion: lock.Version,
+		Entries:     []LockResolveEntryResult{}, // always [], never null
+		DryRun:      lockResolveDryRun,
+	}
+
+	entries := lock.Entries()
+	if lockResolvePackage != "" {
+		e, err := lock.Get(lockResolvePackage)
+		if err != nil {
+			return nil, err
+		}
+		entries = []*model.LockEntry{e}
+	}
+
+	// Fetch each distinct registry once. Fetching is cache warming, not a
+	// project mutation, so it runs even under --dry-run to give an accurate
+	// preview of upstream re-pins. Network failure is non-fatal: resolve
+	// against the cached clone (offline-friendly, same posture as `qvr upgrade`).
+	fetched := map[string]bool{}
+	changed := false
+	for _, entry := range entries {
+		row := LockResolveEntryResult{Name: entry.Name, Ref: entry.Ref}
+		switch {
+		case entry.IsLink():
+			row.Status = "skipped"
+			row.Message = "link install — no upstream to re-resolve"
+		case entry.IsEdit():
+			row.Status = "skipped"
+			row.Message = "edit install — re-pin via `qvr publish`/`qvr edit`, not `qvr lock`"
+		case entry.Registry == "":
+			row.Status = "skipped"
+			row.Message = "no registry upstream to re-resolve"
+		default:
+			if !fetched[entry.Registry] {
+				if _, uerr := mgr.Update(ctx, entry.Registry); uerr != nil {
+					printer.Warning(fmt.Sprintf("lock: refresh %s failed (%v); resolving against cached clone", entry.Registry, uerr))
+				}
+				fetched[entry.Registry] = true
+			}
+			newCommit, rerr := gc.ResolveRef(registry.RegistryPath(entry.Registry), entry.Ref)
+			if rerr != nil {
+				row.Status = "failed"
+				row.Message = rerr.Error()
+				break
+			}
+			row.OldCommit = registry.ShortSHA(entry.Commit)
+			row.NewCommit = registry.ShortSHA(newCommit)
+			if newCommit == entry.Commit {
+				row.Status = "unchanged"
+				break
+			}
+			if lockResolveDryRun {
+				row.Status = "would-repin"
+				break
+			}
+			// Re-pin: rewrite the commit + cache key and recompute the content
+			// hash straight from the bare clone's git objects — no worktree
+			// checkout, no symlink change. The digest is identical to what a
+			// checkout of newCommit would produce, so the lock stays verifiable
+			// immediately and the next `qvr sync` materialises a worktree that
+			// matches. If hashing fails (unreadable subtree), invalidate the
+			// fields so sync recomputes them on restore rather than leaving a
+			// stale hash.
+			entry.Commit = newCommit
+			entry.InstallCommit = registry.ShortSHA(newCommit)
+			if id, herr := canonical.HashSubtreeAtCommit(registry.RegistryPath(entry.Registry), newCommit, entry.Path); herr == nil {
+				entry.SubtreeHash = id.SubtreeHash
+				entry.TreeOID = id.TreeSHA
+			} else {
+				entry.SubtreeHash = ""
+				entry.TreeOID = ""
+			}
+			changed = true
+			row.Status = "repinned"
+		}
+		out.Entries = append(out.Entries, row)
+	}
+
+	if changed && !lockResolveDryRun {
+		if err := lock.Write(); err != nil {
+			return nil, fmt.Errorf("write lock: %w", err)
+		}
+		out.LockVersion = model.LockFileVersion
+	}
+	return out, nil
 }
 
 // VerifySummary aggregates per-status counts for the JSON output.

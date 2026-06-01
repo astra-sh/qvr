@@ -105,6 +105,14 @@ type LockEntry struct {
 	// recomputation from disk.
 	SubtreeHash string `json:"subtreeHash"`
 
+	// TreeOID is the native git tree object ID of the installed subtree
+	// (e.g. `git rev-parse <commit>:<path>`). Informational only — the
+	// load-bearing integrity anchor is SubtreeHash, which normalises line
+	// endings and works for non-git editable installs. TreeOID is recorded
+	// for uv-style git-native identity and future content dedup. Empty for
+	// link installs and entries whose hash computation failed.
+	TreeOID string `json:"treeOID,omitempty"`
+
 	// SourceUpstream records the original upstream URL when an entry has
 	// moved off its first source — set by `qvr edit` (mirrors Source at
 	// eject time) and preserved through `qvr publish --fork --migrate`

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/output"
 	"github.com/raks097/quiver/internal/registry"
 	"github.com/spf13/cobra"
@@ -57,11 +58,11 @@ var cacheCmd = &cobra.Command{
 
   qvr cache list             show reachable + orphan worktrees with sizes
   qvr cache prune --dry-run  show what prune would remove
-  qvr cache prune            delete orphan worktrees`,
-	// Mirror lockCmd's "unknown subcommand" handling so `qvr cache clean`
-	// (a typo / muscle-memory from npm/cargo) exits non-zero instead of
-	// printing help with exit 0 — same shape as `qvr lock <typo>`.
-	// Issue #120.
+  qvr cache prune            delete orphan worktrees
+  qvr cache clean            wipe ALL worktrees (then re-run qvr sync)`,
+	// Mirror lockCmd's "unknown subcommand" handling so a typo'd subcommand
+	// (e.g. muscle-memory from npm/cargo) exits non-zero instead of printing
+	// help with exit 0 — same shape as `qvr lock <typo>`. Issue #120.
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) > 0 {
 			return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
@@ -73,6 +74,10 @@ var cacheCmd = &cobra.Command{
 var (
 	cachePruneDryRun bool
 	cachePruneYes    bool
+
+	cacheCleanDryRun     bool
+	cacheCleanYes        bool
+	cacheCleanRegistries bool
 )
 
 var cacheListCmd = &cobra.Command{
@@ -93,13 +98,40 @@ Use --dry-run to see the targets without deleting anything.`,
 	RunE: runCachePrune,
 }
 
+var cacheCleanCmd = &cobra.Command{
+	Use:   "clean",
+	Short: "Wipe the entire worktree cache (reachable and orphan alike)",
+	Long: `Remove every worktree under ~/.quiver/worktrees/ — both orphans and the
+ones your installed skills currently point at — plus the registry index cache
+at ~/.quiver/cache/index/. This is the "re-resolve from scratch" verb (mirrors
+` + "`uv cache clean`" + `); unlike ` + "`qvr cache prune`" + `, which only deletes orphans.
+
+Bare registry clones (~/.quiver/registries/) are kept by default — they are the
+network-expensive artifact, and a subsequent ` + "`qvr sync`" + ` rebuilds every
+worktree from them with zero network. Pass --registries to drop those too for a
+full wipe.
+
+After a clean the agent symlinks dangle until you run ` + "`qvr sync`" + `, which
+restores every worktree the lock references.
+
+Use --dry-run to preview. The wipe needs --yes when stdin isn't a TTY (CI).`,
+	RunE: runCacheClean,
+}
+
 func init() {
 	cachePruneCmd.Flags().BoolVar(&cachePruneDryRun, "dry-run", false,
 		"report what would be removed without touching disk")
 	cachePruneCmd.Flags().BoolVar(&cachePruneYes, "yes", false,
 		"confirm the destructive prune non-interactively (required for non-TTY callers — issue #110)")
+	cacheCleanCmd.Flags().BoolVar(&cacheCleanDryRun, "dry-run", false,
+		"report what would be removed without touching disk")
+	cacheCleanCmd.Flags().BoolVar(&cacheCleanYes, "yes", false,
+		"confirm the destructive wipe non-interactively (required for non-TTY callers)")
+	cacheCleanCmd.Flags().BoolVar(&cacheCleanRegistries, "registries", false,
+		"also remove the bare registry clones (~/.quiver/registries/) — forces a re-clone on next sync")
 	cacheCmd.AddCommand(cacheListCmd)
 	cacheCmd.AddCommand(cachePruneCmd)
+	cacheCmd.AddCommand(cacheCleanCmd)
 	rootCmd.AddCommand(cacheCmd)
 }
 
@@ -140,6 +172,20 @@ type CachePruneOutput struct {
 	// prune merges them into the count via ForgottenProjs after the run.
 	MissingProjects []string `json:"missingProjects,omitempty"`
 	Errors          []string `json:"errors,omitempty"`
+}
+
+// CacheCleanOutput is the JSON envelope for `qvr cache clean`. It mirrors
+// CachePruneOutput's Removed/WouldRemove split (issue #122) so a dry-run can
+// never be mistaken for a real wipe by a scriptable consumer. IncludedRegistries
+// records whether the bare clones were dropped too (--registries).
+type CacheCleanOutput struct {
+	Removed            []string `json:"removed,omitempty"`
+	WouldRemove        []string `json:"wouldRemove,omitempty"`
+	FreedBytes         int64    `json:"freedBytes,omitempty"`
+	WouldFree          int64    `json:"wouldFree,omitempty"`
+	DryRun             bool     `json:"dryRun"`
+	IncludedRegistries bool     `json:"includedRegistries"`
+	Errors             []string `json:"errors,omitempty"`
 }
 
 func runCacheList(cmd *cobra.Command, args []string) error {
@@ -307,6 +353,179 @@ func runCachePrune(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("cache prune: %d removal(s) failed", len(out.Errors))
 	}
 	return nil
+}
+
+// cleanTarget is one directory the wipe will remove, paired with its on-disk
+// size so we can report freed bytes accurately before and after deletion.
+type cleanTarget struct {
+	path  string
+	label string // shortened path for display / the Removed list
+	bytes int64
+}
+
+func runCacheClean(cmd *cobra.Command, args []string) error {
+	_ = cmd
+	_ = args
+	out := CacheCleanOutput{
+		DryRun:             cacheCleanDryRun,
+		IncludedRegistries: cacheCleanRegistries,
+	}
+
+	// Enumerate every worktree leaf (reachable AND orphan — unlike prune) so
+	// freed-byte accounting and the itemized Removed list are accurate. A
+	// reachability read failure is non-fatal here: clean removes everything
+	// regardless of reachability, so we fall back to a direct walk.
+	entries, _, err := collectCacheEntries()
+	if err != nil {
+		// Reachability failed; size the worktrees root directly so the wipe
+		// can still proceed (clean doesn't care which entries are reachable).
+		if size, derr := dirSize(registry.WorktreesRoot()); derr == nil {
+			entries = []CacheEntry{{Path: registry.WorktreesRoot(), SizeBytes: size}}
+		}
+	}
+
+	var targets []cleanTarget
+	for _, e := range entries {
+		targets = append(targets, cleanTarget{path: e.Path, label: shortenCachePath(e.Path), bytes: e.SizeBytes})
+	}
+	// The registry index cache is always part of a clean — it's pure derived
+	// state, rebuilt on the next registry refresh.
+	if idx := registry.CacheDir(); dirExists(idx) {
+		size, _ := dirSize(idx)
+		targets = append(targets, cleanTarget{path: idx, label: "cache/index", bytes: size})
+	}
+	var registriesRoot string
+	if cacheCleanRegistries {
+		registriesRoot = filepath.Join(config.Dir(), "registries")
+		if dirExists(registriesRoot) {
+			size, _ := dirSize(registriesRoot)
+			targets = append(targets, cleanTarget{path: registriesRoot, label: "registries", bytes: size})
+		}
+	}
+
+	var totalBytes int64
+	for _, t := range targets {
+		totalBytes += t.bytes
+	}
+
+	// Confirmation gate, identical in spirit to prune (issue #110): --yes is
+	// affirmative consent; on a TTY without it we prompt; off a TTY or under
+	// --output json we refuse. Dry-run bypasses since nothing deletes. clean
+	// is *more* destructive than prune — it removes reachable worktrees too,
+	// so the prompt spells that out.
+	if !cacheCleanDryRun && len(targets) > 0 && !cacheCleanYes {
+		if printer.Format != output.FormatJSON {
+			printer.Info(fmt.Sprintf("Would wipe the entire cache (%d item(s), freeing %s), including worktrees your installed skills point at:",
+				len(targets), humanBytes(totalBytes)))
+			for _, t := range targets {
+				printer.Info(fmt.Sprintf("  - %s (%s)", t.label, humanBytes(t.bytes)))
+			}
+			printer.Info("Run `qvr sync` afterwards to restore installed skills.")
+		}
+		if printer.Format == output.FormatJSON || !stdinIsTTY() {
+			return fmt.Errorf("refuse to wipe the cache without --yes; pass --yes to confirm or --dry-run to preview")
+		}
+		if !confirmYesNo("Proceed? [y/N] ") {
+			printer.Info("Aborted.")
+			return nil
+		}
+	}
+
+	// Remove the three roots in one shot each (not per-leaf): a clean is a
+	// total wipe, so RemoveAll on the parent also sweeps up any stray non-leaf
+	// files. We attribute the enumerated worktree leaves to the worktrees-root
+	// removal so the Removed list stays itemized and freed-byte accounting is
+	// per-target. Index/registries report as single synthetic entries.
+	removeRoot := func(root string, items []cleanTarget) {
+		if root == "" {
+			return
+		}
+		if cacheCleanDryRun {
+			for _, it := range items {
+				out.WouldRemove = append(out.WouldRemove, it.label)
+				out.WouldFree += it.bytes
+			}
+			return
+		}
+		if err := os.RemoveAll(root); err != nil {
+			out.Errors = append(out.Errors, fmt.Sprintf("remove %s: %v", shortenCachePath(root), err))
+			return
+		}
+		for _, it := range items {
+			out.Removed = append(out.Removed, it.label)
+			out.FreedBytes += it.bytes
+		}
+	}
+
+	// Partition targets by which root they belong to so each RemoveAll
+	// attributes the right items (and only counts them on success).
+	var worktreeItems, idxItems, regItems []cleanTarget
+	for _, t := range targets {
+		switch t.label {
+		case "cache/index":
+			idxItems = append(idxItems, t)
+		case "registries":
+			regItems = append(regItems, t)
+		default:
+			worktreeItems = append(worktreeItems, t)
+		}
+	}
+	if len(worktreeItems) > 0 {
+		removeRoot(registry.WorktreesRoot(), worktreeItems)
+	}
+	if len(idxItems) > 0 {
+		removeRoot(registry.CacheDir(), idxItems)
+	}
+	if len(regItems) > 0 {
+		removeRoot(registriesRoot, regItems)
+	}
+
+	if printer.Format == output.FormatJSON {
+		if jerr := printer.JSON(out); jerr != nil {
+			return jerr
+		}
+		if len(out.Errors) > 0 {
+			// Body already carries the error list; suppress Execute()'s
+			// {"error": "..."} envelope so stdout stays one JSON doc while
+			// the exit code still signals failure.
+			return errJSONHandled
+		}
+		return nil
+	}
+
+	// Text rendering — Removed for a real wipe, WouldRemove for dry-run.
+	activeList := out.Removed
+	activeBytes := out.FreedBytes
+	verb := "Removed"
+	if cacheCleanDryRun {
+		activeList = out.WouldRemove
+		activeBytes = out.WouldFree
+		verb = "Would remove"
+	}
+	if len(activeList) == 0 {
+		printer.Info("Cache already empty.")
+	} else {
+		for _, p := range activeList {
+			printer.Info(fmt.Sprintf("%s %s", verb, p))
+		}
+		printer.Success(fmt.Sprintf("%s %d item(s), freeing %s", verb, len(activeList), humanBytes(activeBytes)))
+		if !cacheCleanDryRun {
+			printer.Info("Run `qvr sync` to restore installed skills.")
+		}
+	}
+	for _, e := range out.Errors {
+		printer.Error(e)
+	}
+	if len(out.Errors) > 0 {
+		return fmt.Errorf("cache clean: %d removal(s) failed", len(out.Errors))
+	}
+	return nil
+}
+
+// dirExists reports whether path exists and is a directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // collectCacheEntries walks the worktrees root and joins each leaf against the
