@@ -1,6 +1,8 @@
 package ops
 
 import (
+	"time"
+
 	"github.com/raks097/quiver/internal/config"
 )
 
@@ -17,6 +19,14 @@ const (
 // weekly-review workflows, short enough that the DB doesn't balloon on
 // a dev machine.
 const DefaultRetentionDays = 90
+
+// DefaultSkilllessSweep is the age past which a session that never
+// referenced a skill is reaped by the backstop sweep. Skill-less sessions
+// are normally pruned the moment they emit a clean session-end event; this
+// only catches the orphans that never do (a crashed or force-killed agent).
+// 24h is conservative enough that a still-active, not-yet-skill session is
+// never reaped out from under a live agent.
+const DefaultSkilllessSweep = 24 * time.Hour
 
 // Default values for the logging truncation caps. Applied when the
 // user hasn't set a value (zero) AND ApplyDefaults has been called.
@@ -52,6 +62,16 @@ func ApplyDefaults(cfg *config.Config) {
 	if cfg.Ops.Logging.ContextMaxChars == 0 {
 		cfg.Ops.Logging.ContextMaxChars = DefaultContextMaxChars
 	}
+}
+
+// PruneSkilllessSessions reports whether a session that ends without ever
+// referencing an installed skill should be discarded at its end (and swept
+// when orphaned). The default is false — retain everything; the audit trail
+// is capture-first. Opt in via `ops.prune_skill_less_sessions: true` (or run
+// `qvr audit gc` for a one-off sweep) when only skill-attributed sessions
+// matter. See issue #138.
+func PruneSkilllessSessions(cfg *config.Config) bool {
+	return cfg != nil && cfg.Ops.PruneSkilllessSessions
 }
 
 // AgentLoggingLevel returns the effective logging level for the given

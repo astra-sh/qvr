@@ -324,7 +324,7 @@ func TestListSessions_FiltersAndLimits(t *testing.T) {
 	}
 	// Range picks up only the 3 most recent.
 	since := now.Add(-2*time.Hour - time.Minute)
-	got, err := s.ListSessions(ctx, &since, nil, 10)
+	got, err := s.ListSessions(ctx, &since, nil, "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestListSessions_FiltersAndLimits(t *testing.T) {
 		t.Errorf("expected 3 sessions in range; got %d", len(got))
 	}
 	// Limit respected.
-	gotLimited, _ := s.ListSessions(ctx, nil, nil, 2)
+	gotLimited, _ := s.ListSessions(ctx, nil, nil, "", 2)
 	if len(gotLimited) != 2 {
 		t.Errorf("limit 2 ignored; got %d", len(gotLimited))
 	}

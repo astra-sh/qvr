@@ -46,6 +46,15 @@ const (
 	ResultBlocked ResultStatus = "blocked"
 )
 
+// SkillPending is the sentinel skill_name an event carries while its
+// session has not yet referenced any skill. The funnel records events
+// provisionally under this name (skill_name is NOT NULL) and back-fills
+// them to a real skill once one is seen in the session; events whose
+// session ends skill-less keep the sentinel (and are pruned only when
+// ops.prune_skill_less_sessions is set). The parenthesised form can never
+// collide with a real skill name (lowercase alphanumeric + hyphens only).
+const SkillPending = "(pending)"
+
 // EventSchemaURL is the $schema marker embedded in every MarshalJSON
 // output. The canonical wire shape is the Go type `Event` below;
 // the URL points at the source file so external producers can pin
@@ -76,6 +85,13 @@ type Event struct {
 	SkillRegistry string `json:"skill_registry,omitempty"`
 	SkillCommit   string `json:"skill_commit,omitempty"`
 	SkillPath     string `json:"skill_path,omitempty"`
+
+	// SkillRef is the skill this event *explicitly invokes* — set by an
+	// adapter when the hook stream names a skill (e.g. Claude Code's
+	// `Skill` tool). Distinct from SkillName (the attributed owner the
+	// funnel decides). Transient: it drives session attribution and is
+	// not a stored column.
+	SkillRef string `json:"skill_ref,omitempty"`
 
 	ActionType   ActionType   `json:"action_type"`
 	ToolName     string       `json:"tool_name,omitempty"`

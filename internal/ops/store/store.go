@@ -44,8 +44,9 @@ type Store interface {
 	UpsertSession(ctx context.Context, s *ops.Session) error
 
 	// ListSessions returns sessions whose started_at falls in
-	// [since, until]. Nil bounds are ignored. Sorted descending.
-	ListSessions(ctx context.Context, since, until *time.Time, limit int) ([]*ops.Session, error)
+	// [since, until], optionally filtered to one agent (empty = all
+	// agents). Nil bounds are ignored. Sorted descending.
+	ListSessions(ctx context.Context, since, until *time.Time, agent string, limit int) ([]*ops.Session, error)
 
 	// UpsertSkillVersion records (registry, name, commit) with a
 	// first-seen timestamp. Subsequent upserts for the same triple
@@ -56,6 +57,25 @@ type Store interface {
 	// the count deleted. Sessions are not touched — they remain as
 	// summary records even after their events are purged.
 	DeleteEventsBefore(ctx context.Context, cutoff time.Time) (int64, error)
+
+	// BackfillSkill stamps a session's still-provisional events (those
+	// bearing ops.SkillPending) with a resolved skill name. Returns the
+	// number of rows updated.
+	BackfillSkill(ctx context.Context, sessionID uuid.UUID, skill string) (int64, error)
+
+	// DeleteSession removes a session and all of its events (used to
+	// discard a session that ended without referencing any skill).
+	// Returns the number of events deleted.
+	DeleteSession(ctx context.Context, id uuid.UUID) (int64, error)
+
+	// DeleteSkilllessSessions sweeps sessions that touched no skill and
+	// started before olderThan, plus their events. Returns the number of
+	// sessions deleted.
+	DeleteSkilllessSessions(ctx context.Context, olderThan time.Time) (int64, error)
+
+	// CountSessions returns the number of recorded sessions for an agent
+	// (empty agent = all agents).
+	CountSessions(ctx context.Context, agent string) (int64, error)
 
 	// AppendSelfAudit records an internal-state event (hook_error,
 	// unattributed_drop, purge, config_change). Returns nil on success

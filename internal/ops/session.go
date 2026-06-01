@@ -90,9 +90,12 @@ func (s *Session) RecordEvent(e *Event) {
 }
 
 // AddSkillTouched appends name if not already present. O(N) scan is
-// fine — sessions touch a handful of skills, not thousands.
+// fine — sessions touch a handful of skills, not thousands. The pending
+// sentinel is never a real skill, so it is ignored — otherwise a session's
+// provisional events would falsely mark it as skill-bearing and defeat
+// skill-less pruning.
 func (s *Session) AddSkillTouched(name string) {
-	if s == nil || name == "" {
+	if s == nil || name == "" || name == SkillPending {
 		return
 	}
 	for _, existing := range s.SkillsTouched {

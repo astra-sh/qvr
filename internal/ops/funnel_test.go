@@ -85,6 +85,56 @@ func (m *memStore) AppendSelfAudit(_ context.Context, entry *SelfAuditEntry) err
 	return nil
 }
 
+func (m *memStore) BackfillSkill(_ context.Context, sessionID uuid.UUID, skill string) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for _, e := range m.events {
+		if e.SessionID == sessionID && e.SkillName == SkillPending {
+			e.SkillName = skill
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (m *memStore) DeleteSession(_ context.Context, id uuid.UUID) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := m.events[:0:0]
+	var n int64
+	for _, e := range m.events {
+		if e.SessionID == id {
+			n++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	m.events = kept
+	delete(m.sessions, id)
+	return n, nil
+}
+
+func (m *memStore) DeleteSkilllessSessions(_ context.Context, olderThan time.Time) (int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var n int64
+	for id, s := range m.sessions {
+		if len(s.SkillsTouched) == 0 && s.StartedAt.Before(olderThan) {
+			delete(m.sessions, id)
+			kept := m.events[:0:0]
+			for _, e := range m.events {
+				if e.SessionID != id {
+					kept = append(kept, e)
+				}
+			}
+			m.events = kept
+			n++
+		}
+	}
+	return n, nil
+}
+
 // --- Test helpers ---
 
 // funnelHarness wires a complete funnel around a memStore and a
@@ -289,11 +339,11 @@ func TestFunnel_ParseError_RecordsSelfAudit(t *testing.T) {
 	}
 }
 
-// --- Unattributed drop ---
+// --- Unattributed event is recorded provisionally, never dropped ---
 
-func TestFunnel_Unattributed_RecordsDrop(t *testing.T) {
+func TestFunnel_Unattributed_RecordsPending(t *testing.T) {
 	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
-	// Path outside any worktree.
+	// Path outside any worktree — no skill reference.
 	raw := mustJSON(t, map[string]any{
 		"agent_name":       "claude",
 		"agent_session_id": "s",
@@ -305,14 +355,204 @@ func TestFunnel_Unattributed_RecordsDrop(t *testing.T) {
 	}
 	h.store.mu.Lock()
 	defer h.store.mu.Unlock()
+	if len(h.store.events) != 1 {
+		t.Fatalf("expected the event to be recorded (not dropped); got %d", len(h.store.events))
+	}
+	if got := h.store.events[0].SkillName; got != SkillPending {
+		t.Errorf("SkillName=%q want %q", got, SkillPending)
+	}
+	if len(h.store.selfAudits) != 0 {
+		t.Errorf("expected no self_audits (no more drops); got %d", len(h.store.selfAudits))
+	}
+}
+
+// --- Mid-session skill invocation back-fills the whole trace ---
+
+func TestFunnel_SkillRef_AttributesAndBackfills(t *testing.T) {
+	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
+
+	// 1) An ordinary event before any skill — recorded as pending.
+	pre := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "sess-1",
+		"action_type":      "command_exec",
+		"payload":          map[string]any{"command": "echo before"},
+	})
+	if err := h.funnel.Ingest(context.Background(), "x", pre); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2) A skill tool-call names the active skill (SkillRef set directly).
+	skill := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "sess-1",
+		"action_type":      "tool_use",
+		"tool_name":        "Skill",
+		"skill_ref":        "foo",
+	})
+	if err := h.funnel.Ingest(context.Background(), "x", skill); err != nil {
+		t.Fatal(err)
+	}
+
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.events) != 2 {
+		t.Fatalf("expected 2 events; got %d", len(h.store.events))
+	}
+	for _, e := range h.store.events {
+		if e.SkillName != "foo" {
+			t.Errorf("event %s SkillName=%q want foo (whole trace attributed)", e.ActionType, e.SkillName)
+		}
+	}
+	if len(h.store.sessions) != 1 {
+		t.Fatalf("expected 1 session; got %d", len(h.store.sessions))
+	}
+	for _, s := range h.store.sessions {
+		if len(s.SkillsTouched) != 1 || s.SkillsTouched[0] != "foo" {
+			t.Errorf("SkillsTouched=%v want [foo]", s.SkillsTouched)
+		}
+	}
+}
+
+// --- A session can touch multiple skills ---
+
+func TestFunnel_MultipleSkills_AllInSkillsTouched(t *testing.T) {
+	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"}, &model.LockEntry{Name: "bar"})
+	for _, name := range []string{"foo", "bar"} {
+		raw := mustJSON(t, map[string]any{
+			"agent_name":       "claude",
+			"agent_session_id": "multi",
+			"action_type":      "tool_use",
+			"tool_name":        "Skill",
+			"skill_ref":        name,
+		})
+		if err := h.funnel.Ingest(context.Background(), "x", raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.sessions) != 1 {
+		t.Fatalf("expected 1 session; got %d", len(h.store.sessions))
+	}
+	for _, s := range h.store.sessions {
+		if len(s.SkillsTouched) != 2 {
+			t.Errorf("SkillsTouched=%v want both foo and bar", s.SkillsTouched)
+		}
+	}
+}
+
+// --- Skill-less session is discarded at its end only when opted in ---
+
+func TestFunnel_SessionEnd_SkillLess_Pruned(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ops.PruneSkilllessSessions = true // opt in to the old noise-reduction behaviour
+	h := newFunnelHarness(t, cfg, &model.LockEntry{Name: "foo"})
+	// An ordinary (pending) event, then a session end with no skill.
+	pre := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "ghost",
+		"action_type":      "command_exec",
+		"payload":          map[string]any{"command": "echo hi"},
+	})
+	end := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "ghost",
+		"action_type":      "session_end",
+	})
+	if err := h.funnel.Ingest(context.Background(), "x", pre); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.funnel.Ingest(context.Background(), "SessionEnd", end); err != nil {
+		t.Fatal(err)
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
 	if len(h.store.events) != 0 {
-		t.Errorf("expected no events; got %d", len(h.store.events))
+		t.Errorf("expected skill-less session's events to be pruned; got %d", len(h.store.events))
 	}
-	if len(h.store.selfAudits) != 1 {
-		t.Fatalf("expected 1 self_audit; got %d", len(h.store.selfAudits))
+	if len(h.store.sessions) != 0 {
+		t.Errorf("expected skill-less session to be pruned; got %d", len(h.store.sessions))
 	}
-	if h.store.selfAudits[0].Action != SelfAuditUnattributedDrop {
-		t.Errorf("expected unattributed_drop; got %q", h.store.selfAudits[0].Action)
+}
+
+// --- Skill-less session is retained at its end by default (issue #138) ---
+//
+// A real `codex exec "echo hi"` fires SessionStart→…→Stop without ever
+// touching an installed skill. The default must capture it, not delete the
+// whole trace at Stop (which previously netted zero rows + exit 0 and was
+// misread as a Codex sandbox swallowing the write).
+func TestFunnel_SessionEnd_SkillLess_RetainedByDefault(t *testing.T) {
+	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
+	pre := mustJSON(t, map[string]any{
+		"agent_name":       "codex",
+		"agent_session_id": "live",
+		"action_type":      "command_exec",
+		"payload":          map[string]any{"command": "echo hi"},
+	})
+	end := mustJSON(t, map[string]any{
+		"agent_name":       "codex",
+		"agent_session_id": "live",
+		"action_type":      "session_end",
+	})
+	if err := h.funnel.Ingest(context.Background(), "PreToolUse", pre); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.funnel.Ingest(context.Background(), "Stop", end); err != nil {
+		t.Fatal(err)
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.sessions) != 1 {
+		t.Fatalf("expected the skill-less session to be retained; got %d sessions", len(h.store.sessions))
+	}
+	// Both the pre-event and the terminal Stop event survive, under pending.
+	if len(h.store.events) != 2 {
+		t.Fatalf("expected both events retained; got %d", len(h.store.events))
+	}
+	for _, e := range h.store.events {
+		if e.SkillName != SkillPending {
+			t.Errorf("expected events under %q; got %q", SkillPending, e.SkillName)
+		}
+	}
+	for _, s := range h.store.sessions {
+		if s.EndedAt == nil {
+			t.Errorf("expected EndedAt set on the retained skill-less session")
+		}
+	}
+}
+
+// --- Skill-bearing session survives its end ---
+
+func TestFunnel_SessionEnd_WithSkill_Retained(t *testing.T) {
+	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
+	skill := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "keep",
+		"action_type":      "tool_use",
+		"tool_name":        "Skill",
+		"skill_ref":        "foo",
+	})
+	end := mustJSON(t, map[string]any{
+		"agent_name":       "claude",
+		"agent_session_id": "keep",
+		"action_type":      "session_end",
+	})
+	if err := h.funnel.Ingest(context.Background(), "x", skill); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.funnel.Ingest(context.Background(), "SessionEnd", end); err != nil {
+		t.Fatal(err)
+	}
+	h.store.mu.Lock()
+	defer h.store.mu.Unlock()
+	if len(h.store.sessions) != 1 {
+		t.Fatalf("expected the skill-bearing session to be retained; got %d", len(h.store.sessions))
+	}
+	for _, s := range h.store.sessions {
+		if s.EndedAt == nil {
+			t.Errorf("expected EndedAt set on retained session")
+		}
 	}
 }
 
@@ -545,7 +785,8 @@ func TestFunnel_ConcurrentIngests(t *testing.T) {
 
 type stubResolver struct{}
 
-func (stubResolver) Attribute(*Event) (Attribution, bool) { return Attribution{}, false }
+func (stubResolver) Attribute(*Event) (Attribution, bool)    { return Attribution{}, false }
+func (stubResolver) AttributeByName(name string) Attribution { return Attribution{Name: name} }
 
 type stubChecker struct{}
 

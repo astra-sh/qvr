@@ -30,6 +30,12 @@ type Resolver interface {
 	// path set. ok is false when no path matches any installed skill
 	// AND no session-fallback attribution is available.
 	Attribute(e *Event) (Attribution, bool)
+
+	// AttributeByName builds an Attribution for an explicitly-named skill
+	// (e.g. surfaced by a Skill tool-call), enriching it with registry /
+	// commit from the lockfile when the skill is installed. Falls back to
+	// a name-only Attribution when the skill is not in any lockfile.
+	AttributeByName(name string) Attribution
 }
 
 // target holds a single lockfile entry with its directory canonicalised
@@ -174,6 +180,22 @@ func (r *lockResolver) Attribute(e *Event) (Attribution, bool) {
 	}
 
 	return Attribution{}, false
+}
+
+// AttributeByName implements Resolver.
+func (r *lockResolver) AttributeByName(name string) Attribution {
+	if r != nil && name != "" {
+		for _, t := range r.targets {
+			if t.entry != nil && t.entry.Name == name {
+				return Attribution{
+					Name:     name,
+					Registry: t.entry.Registry,
+					Commit:   t.entry.Commit,
+				}
+			}
+		}
+	}
+	return Attribution{Name: name}
 }
 
 // attributePath matches one path against every target. The first match

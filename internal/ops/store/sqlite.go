@@ -281,7 +281,7 @@ func (s *sqliteStore) GetSession(ctx context.Context, id uuid.UUID) (*ops.Sessio
 	return sess, nil
 }
 
-func (s *sqliteStore) ListSessions(ctx context.Context, since, until *time.Time, limit int) ([]*ops.Session, error) {
+func (s *sqliteStore) ListSessions(ctx context.Context, since, until *time.Time, agent string, limit int) ([]*ops.Session, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -294,6 +294,10 @@ func (s *sqliteStore) ListSessions(ctx context.Context, since, until *time.Time,
 	if until != nil {
 		clauses = append(clauses, "started_at <= ?")
 		args = append(args, until.UTC())
+	}
+	if agent != "" {
+		clauses = append(clauses, "agent_name = ?")
+		args = append(args, agent)
 	}
 	where := ""
 	if len(clauses) > 0 {
@@ -366,6 +370,89 @@ func (s *sqliteStore) DeleteEventsBefore(ctx context.Context, cutoff time.Time) 
 		return 0, fmt.Errorf("store: delete events: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// BackfillSkill stamps every still-provisional event in a session with the
+// resolved skill name, so the whole trace carries the attribution even
+// though the skill was only discovered partway through the stream. Only
+// rows still bearing the pending sentinel are touched — a real attribution
+// already on a row is never overwritten. Returns the number of rows updated.
+func (s *sqliteStore) BackfillSkill(ctx context.Context, sessionID uuid.UUID, skill string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE audit_events SET skill_name = ? WHERE session_id = ? AND skill_name = ?`,
+		skill, sessionID.String(), ops.SkillPending,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: backfill skill: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// DeleteSession removes a session and all of its events. Used to discard a
+// session that ended without ever referencing a skill. Returns the number
+// of events deleted.
+func (s *sqliteStore) DeleteSession(ctx context.Context, id uuid.UUID) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM audit_events WHERE session_id = ?`, id.String(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete session events: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE id = ?`, id.String(),
+	); err != nil {
+		return n, fmt.Errorf("store: delete session: %w", err)
+	}
+	return n, nil
+}
+
+// skilllessPredicate matches sessions that never referenced a skill —
+// skills_touched is NULL or an empty JSON array.
+const skilllessPredicate = `(skills_touched IS NULL OR skills_touched = '' OR skills_touched = '[]')`
+
+// DeleteSkilllessSessions sweeps sessions that touched no skill and whose
+// start time is older than the cutoff (so a still-active session mid-stream
+// is never reaped before it has had the chance to invoke a skill), along
+// with their events. This is the backstop for sessions that never emit a
+// clean SessionEnd. Returns the number of sessions deleted.
+func (s *sqliteStore) DeleteSkilllessSessions(ctx context.Context, olderThan time.Time) (int64, error) {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM audit_events WHERE session_id IN (
+		   SELECT id FROM sessions WHERE `+skilllessPredicate+` AND started_at < ?)`,
+		olderThan.UTC(),
+	); err != nil {
+		return 0, fmt.Errorf("store: sweep skill-less events: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE `+skilllessPredicate+` AND started_at < ?`,
+		olderThan.UTC(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("store: sweep skill-less sessions: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// CountSessions returns the number of recorded sessions for an agent (all
+// stored sessions are skill-bearing once pruning is in effect). An empty
+// agent counts across all agents.
+func (s *sqliteStore) CountSessions(ctx context.Context, agent string) (int64, error) {
+	var n int64
+	var err error
+	if agent == "" {
+		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&n)
+	} else {
+		err = s.db.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM sessions WHERE agent_name = ?`, agent,
+		).Scan(&n)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("store: count sessions: %w", err)
+	}
 	return n, nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/raks097/quiver/internal/config"
@@ -59,8 +60,20 @@ func runHook(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
 	}
+	// Empty stdin used to be treated as a silent success (return nil), which
+	// made capture a no-op while every status surface still reported the hook
+	// VALID. Codex CLI in `codex exec` mode is the real-world trigger: it
+	// fires the hook command but does not pipe the JSON payload to its stdin,
+	// so qvr is invoked for a genuine event with nothing on stdin. Don't drop
+	// it. Warn on stderr (hooks discard stderr in normal operation, so this
+	// only shows on a hand-run) and hand the empty payload to the adapter:
+	// codex synthesises a minimal event keyed off the hook type on argv;
+	// stricter adapters surface a parse error via self_audit. Either way the
+	// broken trail is no longer invisible.
 	if len(raw) == 0 {
-		return nil
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"qvr _hook: %s %s received empty stdin (agent fired the hook but delivered no payload)\n",
+			agent, hookType)
 	}
 
 	// Open the store; run migrations if this is the first _hook call
@@ -88,6 +101,10 @@ func runHook(cmd *cobra.Command, args []string) error {
 		Resolver: resolver,
 		Privacy:  checker,
 		Store:    storeSessionAdapter{s},
+		// Surface drops/provisional records on stderr so a broken trail is
+		// no longer silent (#137). Hooks discard stderr in normal operation,
+		// so this only shows when _hook is run by hand.
+		Notify: func(msg string) { fmt.Fprintf(cmd.ErrOrStderr(), "qvr _hook: %s\n", msg) },
 	})
 	if err != nil {
 		return err
@@ -128,6 +145,18 @@ func (a storeSessionAdapter) GetSession(ctx context.Context, id uuid.UUID) (*ops
 
 func (a storeSessionAdapter) UpsertSession(ctx context.Context, s *ops.Session) error {
 	return a.inner.UpsertSession(ctx, s)
+}
+
+func (a storeSessionAdapter) BackfillSkill(ctx context.Context, sessionID uuid.UUID, skill string) (int64, error) {
+	return a.inner.BackfillSkill(ctx, sessionID, skill)
+}
+
+func (a storeSessionAdapter) DeleteSession(ctx context.Context, id uuid.UUID) (int64, error) {
+	return a.inner.DeleteSession(ctx, id)
+}
+
+func (a storeSessionAdapter) DeleteSkilllessSessions(ctx context.Context, olderThan time.Time) (int64, error) {
+	return a.inner.DeleteSkilllessSessions(ctx, olderThan)
 }
 
 func (a storeSessionAdapter) AppendSelfAudit(ctx context.Context, entry *ops.SelfAuditEntry) error {

@@ -386,18 +386,24 @@ Shipping today:
 - **Supply chain** — `scan` + scan gates on add/sync/publish, lock
   Verification blocks, `lock verify --frozen/--strict/--repair`,
   configurable severity thresholds
+- **The uv loop** — reproducible resolve → lock → install. Installs are frozen
+  immutable (`qvr edit` ejects a writable copy); `qvr sync` restores the
+  *locked commit*, not whatever HEAD moved to (`--locked` for CI). Optional
+  git-native provenance (`git verify-tag`/`verify-commit`) surfaced via
+  `qvr provenance` and a `SIGNED` column — invalid signatures block, absent is
+  fine. `qvr tree`, `qvr export`/`import` for portability.
 - **Cache** — `cache list`/`cache prune` with `projects.json` reachability
-  tracking and orphan-cleanup hints
+  tracking and orphan-cleanup hints; object dedup via hardlinked worktrees
 
 Planned:
 
 - `qvr add --local` vendor mode (materialize real files into the project),
   plus a `qvr publish` flow that round-trips vendored edits back upstream.
-- v0.9 — trust layer (`qvr sign`, attestations, per-registry `quiver.trust.yaml`),
-  two-stage scanner (`qvr scan --deep`, SBOM), `qvr inventory`, `qvr audit`,
-  and the embedded React dashboard (`qvr ui`).
 - v1.0 — prebuilt multi-platform binaries via Homebrew / `go install` /
-  curl installer, `qvr doctor`, shell completions.
+  curl installer, `qvr doctor`, shell completions, and faster parallel
+  fetch/install.
+- post-1.0 — two-stage scanner (`qvr scan --deep`, SBOM), `qvr inventory` /
+  `qvr audit`, and the embedded React dashboard (`qvr ui`).
 
 Team workflows are deliberately delegated to git + your git host (GitHub
 Teams, branch protection, CODEOWNERS); see

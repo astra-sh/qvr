@@ -66,6 +66,16 @@ type OpsConfig struct {
 	Logging       OpsLoggingConfig          `yaml:"logging,omitempty" json:"logging,omitempty"`
 	Privacy       OpsPrivacyConfig          `yaml:"privacy,omitempty" json:"privacy,omitempty"`
 	Agents        map[string]OpsAgentConfig `yaml:"agents,omitempty" json:"agents,omitempty"`
+
+	// PruneSkilllessSessions, when true, discards a session (and its events)
+	// the moment it ends without ever referencing an installed skill — the
+	// old noise-reduction behaviour. It defaults to false: an audit trail is
+	// capture-first, so a session that runs `echo hi` with no skill is still
+	// recorded (under the pending sentinel) rather than deleted at its end.
+	// Deleting completed sessions silently defeated the security-attribution
+	// purpose and made every skill-less agent run (e.g. a plain `codex exec`)
+	// look like total capture failure — see issue #138.
+	PruneSkilllessSessions bool `yaml:"prune_skill_less_sessions,omitempty" json:"prune_skill_less_sessions,omitempty"`
 }
 
 // OpsLoggingConfig tunes how much of an event's content survives the

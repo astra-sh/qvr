@@ -196,7 +196,7 @@ func TestHook_InvalidJSON_RecordsHookError(t *testing.T) {
 	}
 }
 
-func TestHook_UnattributedPath_DropsNotErrors(t *testing.T) {
+func TestHook_UnattributedPath_RecordsPending(t *testing.T) {
 	_, readEvents := isolatedHome(t, true)
 	raw, _ := json.Marshal(map[string]any{
 		"agent_name":       "claude",
@@ -207,18 +207,70 @@ func TestHook_UnattributedPath_DropsNotErrors(t *testing.T) {
 	if _, _, err := runHookCmd(t, raw, "generic", "PostToolUse"); err != nil {
 		t.Errorf("unexpected err: %v", err)
 	}
-	if got := readEvents(); len(got) != 0 {
-		t.Errorf("expected 0 events (unattributed); got %d", len(got))
+	// The event is no longer dropped — it is recorded provisionally under
+	// the pending sentinel until its session references a skill (or is
+	// pruned at session end).
+	got := readEvents()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 provisional event; got %d", len(got))
+	}
+	if got[0].SkillName != ops.SkillPending {
+		t.Errorf("SkillName=%q want %q", got[0].SkillName, ops.SkillPending)
 	}
 }
 
-func TestHook_EmptyStdin_NoOp(t *testing.T) {
+// Empty stdin must never fail the agent's hook pipeline, but it must also
+// never be a silent no-op. For the generic adapter (strict canonical JSON)
+// an empty payload can't be turned into a real event, so we surface it as a
+// visible self_audit row plus a stderr diagnostic — not a silent drop.
+func TestHook_EmptyStdin_NotSilent(t *testing.T) {
 	_, readEvents := isolatedHome(t, true)
-	if _, _, err := runHookCmd(t, []byte(""), "generic", "PostToolUse"); err != nil {
+	_, stderr, err := runHookCmd(t, []byte(""), "generic", "PostToolUse")
+	if err != nil {
 		t.Errorf("expected nil error for empty stdin; got %v", err)
 	}
+	if !strings.Contains(stderr, "empty stdin") {
+		t.Errorf("expected stderr to flag empty stdin; got %q", stderr)
+	}
+	// Generic can't synthesise an event from nothing, so no event is stored —
+	// but the drop is now recorded in self_audit instead of vanishing.
 	if got := readEvents(); len(got) != 0 {
-		t.Errorf("expected 0 events for empty stdin; got %d", len(got))
+		t.Errorf("expected 0 events for empty stdin (generic); got %d", len(got))
+	}
+	s, err := store.Open(context.Background(), store.OpenOptions{Path: filepath.Join(os.Getenv("QUIVER_HOME"), "skillops.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	stats, _ := s.Stats(context.Background())
+	if stats.SelfAuditCount != 1 {
+		t.Errorf("expected 1 self_audit row recording the empty-payload drop; got %d", stats.SelfAuditCount)
+	}
+}
+
+// Codex CLI in `codex exec` mode fires its hooks but does not pipe the JSON
+// payload to stdin, so qvr is invoked for a genuine event with empty stdin.
+// The codex adapter must still record a minimal event (keyed off the hook
+// type on argv) rather than dropping the trail — otherwise audit is a
+// complete no-op for Codex while every surface reports the hook VALID.
+func TestHook_EmptyStdin_Codex_RecordsMinimalEvent(t *testing.T) {
+	_, readEvents := isolatedHome(t, true)
+	_, stderr, err := runHookCmd(t, []byte(""), "codex", "PostToolUse")
+	if err != nil {
+		t.Fatalf("expected nil error for empty codex stdin; got %v", err)
+	}
+	if !strings.Contains(stderr, "empty stdin") {
+		t.Errorf("expected stderr to flag empty stdin; got %q", stderr)
+	}
+	got := readEvents()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 provisional event from empty codex stdin; got %d", len(got))
+	}
+	if got[0].AgentName != "codex" {
+		t.Errorf("AgentName=%q want codex", got[0].AgentName)
+	}
+	if got[0].SkillName != ops.SkillPending {
+		t.Errorf("SkillName=%q want %q", got[0].SkillName, ops.SkillPending)
 	}
 }
 
