@@ -1,17 +1,15 @@
-// Package copilot is the first-party SkillOps adapter for GitHub Copilot
-// CLI. It implements ops.Adapter and ops.HookInstaller over a standalone
-// hook file at ~/.copilot/hooks/quiver.json (Copilot loads every *.json in
-// its hooks dir, so Quiver owns its own file outright).
+// Package copilot is the first-party SkillOps hook installer for GitHub Copilot
+// CLI. It implements ops.HookInstaller over a standalone hook file at
+// ~/.copilot/hooks/quiver.json (Copilot loads every *.json in its hooks dir, so
+// Quiver owns its own file outright).
 //
-// New adapter — no Gryph precedent. Modelled on the GitHub Copilot CLI hooks
-// docs. Observe-only: the hook never emits a permissionDecision, so auditing
-// can never block the user's tools (Copilot hooks run synchronously and CAN
-// block; the funnel writes only to the store, never to stdout).
+// Modelled on the GitHub Copilot CLI hooks docs. Observe-only: the hook never
+// emits a permissionDecision, so auditing can never block the user's tools
+// (Copilot hooks run synchronously and CAN block; capture writes only to the
+// store, never to stdout).
 package copilot
 
 import (
-	"context"
-
 	"github.com/raks097/quiver/internal/ops"
 )
 
@@ -20,15 +18,11 @@ const AgentName = "copilot"
 
 const displayName = "GitHub Copilot CLI"
 
-// Adapter implements ops.Adapter and ops.HookInstaller.
+// Adapter implements ops.HookInstaller.
 type Adapter struct{}
 
 func (a *Adapter) Name() string        { return AgentName }
 func (a *Adapter) DisplayName() string { return displayName }
-
-func (a *Adapter) ParseEvent(_ context.Context, hookType string, rawData []byte) (*ops.Event, error) {
-	return parseHookEvent(hookType, rawData)
-}
 
 func init() {
 	ops.Register(&Adapter{})

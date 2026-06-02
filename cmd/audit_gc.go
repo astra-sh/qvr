@@ -5,28 +5,28 @@ import (
 	"time"
 
 	"github.com/raks097/quiver/internal/config"
-	"github.com/raks097/quiver/internal/ops"
 	"github.com/spf13/cobra"
 )
 
 var gcOlderThan string
 
+// defaultRawRetention is how far back `qvr audit gc` keeps raw traces when no
+// --older-than is given.
+const defaultRawRetention = 30 * 24 * time.Hour
+
 var auditGCCmd = &cobra.Command{
 	Use:   "gc",
-	Short: "Sweep skill-less sessions that never got a clean end",
-	Long: `Discard recorded sessions that never referenced any skill and have been
-idle past a cutoff. Skill-less sessions are normally pruned the moment they
-emit a session-end event; this backstop catches the orphans left behind by an
-agent that crashed or was force-killed before ending its session. (When
-ops.retain_skill_less_sessions is set, nothing is pruned automatically and this
-becomes the only sweep.)`,
+	Short: "Prune captured raw traces older than a cutoff",
+	Long: `Delete raw trace rows (and their derived spans become stale) captured
+before a cutoff, to bound the local database size. Defaults to pruning anything
+older than 30 days; override with --older-than.`,
 	Args: cobra.NoArgs,
 	RunE: runAuditGC,
 }
 
 func init() {
 	auditGCCmd.Flags().StringVar(&gcOlderThan, "older-than", "",
-		"only sweep sessions started before this age (e.g. 24h, 7d; default 24h)")
+		"prune traces captured before this age (e.g. 24h, 7d; default 30d)")
 	auditCmd.AddCommand(auditGCCmd)
 }
 
@@ -36,7 +36,7 @@ func runAuditGC(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	cutoff := time.Now().UTC().Add(-ops.DefaultSkilllessSweep)
+	cutoff := time.Now().UTC().Add(-defaultRawRetention)
 	if gcOlderThan != "" {
 		t, perr := parseTimeFlag(gcOlderThan)
 		if perr != nil {
@@ -45,13 +45,11 @@ func runAuditGC(cmd *cobra.Command, args []string) error {
 		cutoff = t
 	}
 
-	// Nothing recorded yet — treat as a no-op rather than failing a
-	// read-only open on a missing DB.
 	if !auditDBExists(cfg) {
 		if outputFormat == "json" {
-			return printer.JSON(map[string]any{"sessions_swept": 0})
+			return printer.JSON(map[string]any{"traces_pruned": 0})
 		}
-		printer.Info("nothing to sweep")
+		printer.Info("nothing to prune")
 		return nil
 	}
 
@@ -61,14 +59,14 @@ func runAuditGC(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	n, err := s.DeleteSkilllessSessions(cmd.Context(), cutoff)
+	n, err := s.DeleteRawBefore(cmd.Context(), cutoff)
 	if err != nil {
-		return fmt.Errorf("sweep skill-less sessions: %w", err)
+		return fmt.Errorf("prune raw traces: %w", err)
 	}
 
 	if outputFormat == "json" {
-		return printer.JSON(map[string]any{"sessions_swept": n})
+		return printer.JSON(map[string]any{"traces_pruned": n})
 	}
-	printer.Success(fmt.Sprintf("swept %d skill-less session(s)", n))
+	printer.Success(fmt.Sprintf("pruned %d raw trace(s)", n))
 	return nil
 }

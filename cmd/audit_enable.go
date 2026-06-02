@@ -21,9 +21,9 @@ Once enabled, installed agent hooks start recording events. Pair with
 var auditDisableCmd = &cobra.Command{
 	Use:   "disable",
 	Short: "Turn off the audit pipeline",
-	Long: `Disable sets ops.enabled=false. Installed hooks still fire but the
-funnel becomes a silent no-op — no events are recorded. The database and
-any installed hooks are left in place; re-enable with 'qvr audit enable'.`,
+	Long: `Disable sets ops.enabled=false. Installed hooks still fire but capture
+becomes a silent no-op — no traces are recorded. The database and any installed
+hooks are left in place; re-enable with 'qvr audit enable'.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return setAuditEnabled(false)

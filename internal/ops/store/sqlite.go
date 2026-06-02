@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/raks097/quiver/internal/ops"
 	"github.com/raks097/quiver/internal/ops/store/migrations"
 
 	_ "modernc.org/sqlite"
@@ -30,7 +29,7 @@ type OpenOptions struct {
 	BusyTimeoutMs int
 
 	// ReadOnly flips the connection string to immutable=1 + query_only.
-	// Used by read-only consumers (e.g. `qvr ops logs`).
+	// Used by read-only consumers (e.g. `qvr audit logs`).
 	ReadOnly bool
 }
 
@@ -53,10 +52,9 @@ func Open(ctx context.Context, opts OpenOptions) (Store, error) {
 		return nil, fmt.Errorf("store: open: %w", err)
 	}
 
-	// SQLite + WAL still serialises writers; a single connection
-	// keeps concurrent SaveEvents orderly without hitting "database
-	// is locked" under load. Readers are fast enough that the queue
-	// is imperceptible.
+	// SQLite + WAL still serialises writers; a single connection keeps
+	// concurrent captures orderly without hitting "database is locked"
+	// under load. Readers are fast enough that the queue is imperceptible.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
@@ -111,366 +109,18 @@ func (s *sqliteStore) Close() error {
 	return s.db.Close()
 }
 
-// --- SaveEvent ---
-
-const saveEventSQL = `INSERT INTO audit_events(
-  id, session_id, agent_session_id, sequence, timestamp, duration_ms,
-  agent_name, agent_version, working_directory,
-  skill_name, skill_registry, skill_commit, skill_path,
-  action_type, tool_name, result_status, error_message,
-  payload, diff_content, raw_event, is_sensitive,
-  subagent_id, subagent_type
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-
-func (s *sqliteStore) SaveEvent(ctx context.Context, e *ops.Event) error {
-	if e == nil {
-		return errors.New("store: nil event")
-	}
-	if e.ID == uuid.Nil {
-		e.ID = uuid.New()
-	}
-	if e.SessionID == uuid.Nil {
-		return errors.New("store: event missing session_id")
-	}
-	if e.Timestamp.IsZero() {
-		e.Timestamp = time.Now().UTC()
-	}
-	ts := e.Timestamp.UTC()
-
-	_, err := s.db.ExecContext(ctx, saveEventSQL,
-		e.ID.String(), e.SessionID.String(), nullableString(e.AgentSessionID),
-		e.Sequence, ts, e.DurationMs,
-		e.AgentName, nullableString(e.AgentVersion), nullableString(e.WorkingDirectory),
-		e.SkillName, nullableString(e.SkillRegistry), nullableString(e.SkillCommit), nullableString(e.SkillPath),
-		string(e.ActionType), nullableString(e.ToolName), string(e.ResultStatus), nullableString(e.ErrorMessage),
-		nullableJSON(e.Payload), nullableString(e.DiffContent), nullableJSON(e.RawEvent), boolToInt(e.IsSensitive),
-		nullableString(e.SubagentID), nullableString(e.SubagentType),
-	)
-	if err != nil {
-		return fmt.Errorf("store: save event: %w", err)
-	}
-	return nil
-}
-
-// --- QueryEvents / StreamEvents ---
-
-func (s *sqliteStore) QueryEvents(ctx context.Context, f *EventFilter) ([]*ops.Event, error) {
-	where, args := f.build()
-	limit := f.effectiveLimit()
-	q := `SELECT ` + eventColumns + ` FROM audit_events ` + where +
-		` ORDER BY timestamp DESC, id DESC LIMIT ?`
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: query events: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*ops.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-func (s *sqliteStore) StreamEvents(ctx context.Context, f *EventFilter, fn func(*ops.Event) error) error {
-	// Stream via cursor pagination so we never load the whole table.
-	// The caller passes a filter with no cursor; we re-enter with the
-	// tail of each page.
-	filter := *f
-	if filter.Limit == 0 {
-		filter.Limit = 500
-	}
-	for {
-		page, err := s.QueryEvents(ctx, &filter)
-		if err != nil {
-			return err
-		}
-		for _, ev := range page {
-			if err := fn(ev); err != nil {
-				return err
-			}
-		}
-		if len(page) < filter.Limit {
-			return nil
-		}
-		tail := page[len(page)-1]
-		filter.Cursor = &Cursor{Timestamp: tail.Timestamp, ID: tail.ID}
-	}
-}
-
-func (s *sqliteStore) GetEventsBySession(ctx context.Context, sessionID uuid.UUID) ([]*ops.Event, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+eventColumns+` FROM audit_events WHERE session_id = ? ORDER BY sequence ASC`,
-		sessionID.String(),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("store: events by session: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*ops.Event
-	for rows.Next() {
-		e, err := scanEvent(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
-// --- Sessions ---
-
-const upsertSessionSQL = `INSERT INTO sessions(
-  id, agent_session_id, agent_name, started_at, ended_at,
-  working_directory, project_name,
-  total_actions, files_read, files_written, commands_executed,
-  errors, sensitive_actions, blocked_actions, skills_touched
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET
-  ended_at = excluded.ended_at,
-  working_directory = excluded.working_directory,
-  project_name = excluded.project_name,
-  total_actions = excluded.total_actions,
-  files_read = excluded.files_read,
-  files_written = excluded.files_written,
-  commands_executed = excluded.commands_executed,
-  errors = excluded.errors,
-  sensitive_actions = excluded.sensitive_actions,
-  blocked_actions = excluded.blocked_actions,
-  skills_touched = excluded.skills_touched`
-
-func (s *sqliteStore) UpsertSession(ctx context.Context, sess *ops.Session) error {
-	if sess == nil {
-		return errors.New("store: nil session")
-	}
-	if sess.ID == uuid.Nil {
-		return errors.New("store: session missing id")
-	}
-	_, err := s.db.ExecContext(ctx, upsertSessionSQL,
-		sess.ID.String(), nullableString(sess.AgentSessionID), sess.AgentName,
-		sess.StartedAt.UTC(), nullableTime(sess.EndedAt),
-		nullableString(sess.WorkingDirectory), nullableString(sess.ProjectName),
-		sess.TotalActions, sess.FilesRead, sess.FilesWritten, sess.CommandsExecuted,
-		sess.Errors, sess.SensitiveActions, sess.BlockedActions,
-		encodeSkillsTouched(sess.SkillsTouched),
-	)
-	if err != nil {
-		return fmt.Errorf("store: upsert session: %w", err)
-	}
-	return nil
-}
-
-func (s *sqliteStore) GetSession(ctx context.Context, id uuid.UUID) (*ops.Session, error) {
-	row := s.db.QueryRowContext(ctx,
-		`SELECT `+sessionColumns+` FROM sessions WHERE id = ?`, id.String(),
-	)
-	sess, err := scanSession(row)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("store: get session: %w", err)
-	}
-	return sess, nil
-}
-
-func (s *sqliteStore) ListSessions(ctx context.Context, since, until *time.Time, agent string, limit int) ([]*ops.Session, error) {
-	if limit <= 0 {
-		limit = 50
-	}
-	var clauses []string
-	var args []any
-	if since != nil {
-		clauses = append(clauses, "started_at >= ?")
-		args = append(args, since.UTC())
-	}
-	if until != nil {
-		clauses = append(clauses, "started_at <= ?")
-		args = append(args, until.UTC())
-	}
-	if agent != "" {
-		clauses = append(clauses, "agent_name = ?")
-		args = append(args, agent)
-	}
-	where := ""
-	if len(clauses) > 0 {
-		where = "WHERE " + joinAnd(clauses)
-	}
-	args = append(args, limit)
-
-	q := `SELECT ` + sessionColumns + ` FROM sessions ` + where +
-		` ORDER BY started_at DESC LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("store: list sessions: %w", err)
-	}
-	defer rows.Close()
-
-	var out []*ops.Session
-	for rows.Next() {
-		sess, err := scanSession(rows)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, sess)
-	}
-	return out, rows.Err()
-}
-
-func joinAnd(clauses []string) string {
-	out := ""
-	for i, c := range clauses {
-		if i > 0 {
-			out += " AND "
-		}
-		out += c
-	}
-	return out
-}
-
-// --- Skill versions ---
-
-const upsertSkillVersionSQL = `INSERT INTO skill_versions(
-  registry, name, commit_sha, branch, content_hash, first_seen_at
-) VALUES (?,?,?,?,?,?)
-ON CONFLICT(registry, name, commit_sha) DO NOTHING`
-
-func (s *sqliteStore) UpsertSkillVersion(ctx context.Context, sv *ops.SkillVersion) error {
-	if sv == nil {
-		return errors.New("store: nil skill version")
-	}
-	if sv.FirstSeenAt.IsZero() {
-		sv.FirstSeenAt = time.Now().UTC()
-	}
-	_, err := s.db.ExecContext(ctx, upsertSkillVersionSQL,
-		sv.Registry, sv.Name, sv.Commit,
-		nullableString(sv.Branch), nullableString(sv.ContentHash),
-		sv.FirstSeenAt.UTC(),
-	)
-	if err != nil {
-		return fmt.Errorf("store: upsert skill version: %w", err)
-	}
-	return nil
-}
-
-// --- Retention / self-audits / stats ---
-
-func (s *sqliteStore) DeleteEventsBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+// DeleteRawBefore sweeps raw rows captured before cutoff.
+func (s *sqliteStore) DeleteRawBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM audit_events WHERE timestamp < ?`, cutoff.UTC(),
-	)
+		`DELETE FROM raw_traces WHERE captured_at < ?`, cutoff.UTC())
 	if err != nil {
-		return 0, fmt.Errorf("store: delete events: %w", err)
+		return 0, fmt.Errorf("store: delete raw before: %w", err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
 }
 
-// BackfillSkill stamps every still-provisional event in a session with the
-// resolved skill name, so the whole trace carries the attribution even
-// though the skill was only discovered partway through the stream. Only
-// rows still bearing the pending sentinel are touched — a real attribution
-// already on a row is never overwritten. Returns the number of rows updated.
-func (s *sqliteStore) BackfillSkill(ctx context.Context, sessionID uuid.UUID, skill string) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`UPDATE audit_events SET skill_name = ? WHERE session_id = ? AND skill_name = ?`,
-		skill, sessionID.String(), ops.SkillPending,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: backfill skill: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
-// DeleteSession removes a session and all of its events. Used to discard a
-// session that ended without ever referencing a skill. Returns the number
-// of events deleted.
-func (s *sqliteStore) DeleteSession(ctx context.Context, id uuid.UUID) (int64, error) {
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM audit_events WHERE session_id = ?`, id.String(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: delete session events: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE id = ?`, id.String(),
-	); err != nil {
-		return n, fmt.Errorf("store: delete session: %w", err)
-	}
-	return n, nil
-}
-
-// skilllessPredicate matches sessions that never referenced a skill —
-// skills_touched is NULL or an empty JSON array.
-const skilllessPredicate = `(skills_touched IS NULL OR skills_touched = '' OR skills_touched = '[]')`
-
-// DeleteSkilllessSessions sweeps sessions that touched no skill and whose
-// start time is older than the cutoff (so a still-active session mid-stream
-// is never reaped before it has had the chance to invoke a skill), along
-// with their events. This is the backstop for sessions that never emit a
-// clean SessionEnd. Returns the number of sessions deleted.
-func (s *sqliteStore) DeleteSkilllessSessions(ctx context.Context, olderThan time.Time) (int64, error) {
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM audit_events WHERE session_id IN (
-		   SELECT id FROM sessions WHERE `+skilllessPredicate+` AND started_at < ?)`,
-		olderThan.UTC(),
-	); err != nil {
-		return 0, fmt.Errorf("store: sweep skill-less events: %w", err)
-	}
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM sessions WHERE `+skilllessPredicate+` AND started_at < ?`,
-		olderThan.UTC(),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("store: sweep skill-less sessions: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
-// CountSessions returns the number of recorded sessions for an agent (all
-// stored sessions are skill-bearing once pruning is in effect). An empty
-// agent counts across all agents.
-func (s *sqliteStore) CountSessions(ctx context.Context, agent string) (int64, error) {
-	var n int64
-	var err error
-	if agent == "" {
-		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&n)
-	} else {
-		err = s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM sessions WHERE agent_name = ?`, agent,
-		).Scan(&n)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("store: count sessions: %w", err)
-	}
-	return n, nil
-}
-
-func (s *sqliteStore) CountEvents(ctx context.Context, agent string) (int64, error) {
-	var n int64
-	var err error
-	if agent == "" {
-		err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_events`).Scan(&n)
-	} else {
-		err = s.db.QueryRowContext(ctx,
-			`SELECT COUNT(*) FROM audit_events WHERE agent_name = ?`, agent,
-		).Scan(&n)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("store: count events: %w", err)
-	}
-	return n, nil
-}
+// --- self-audit ---
 
 func (s *sqliteStore) CountSelfAuditErrors(ctx context.Context, agent string) (int64, error) {
 	var n int64
@@ -525,65 +175,50 @@ func (s *sqliteStore) AppendSelfAudit(ctx context.Context, entry *SelfAudit) err
 	return nil
 }
 
+// Stats reports raw-trace counts and DB size for `qvr audit db stats`.
 func (s *sqliteStore) Stats(ctx context.Context) (*StoreStats, error) {
 	var out StoreStats
 
-	rows := map[string]*int64{
-		"SELECT COUNT(*) FROM audit_events":                        &out.EventCount,
-		"SELECT COUNT(*) FROM sessions":                            &out.SessionCount,
-		"SELECT COUNT(*) FROM skill_versions":                      &out.SkillVersionCount,
-		"SELECT COUNT(*) FROM self_audits":                         &out.SelfAuditCount,
-		"SELECT COUNT(*) FROM audit_events WHERE is_sensitive = 1": &out.SensitiveCount,
+	counts := map[string]*int64{
+		"SELECT COUNT(*) FROM raw_traces":                   &out.RawTraceCount,
+		"SELECT COUNT(DISTINCT session_id) FROM raw_traces": &out.SessionCount,
+		"SELECT COUNT(*) FROM self_audits":                  &out.SelfAuditCount,
 	}
-	for q, dst := range rows {
+	for q, dst := range counts {
 		if err := s.db.QueryRowContext(ctx, q).Scan(dst); err != nil {
 			return nil, fmt.Errorf("store: stats (%q): %w", q, err)
 		}
 	}
 
-	// Oldest / newest event. SQLite's aggregate MIN/MAX over a
-	// DATETIME column returns the underlying TEXT rather than
-	// round-tripping to time.Time, so we scan as strings and parse.
 	var oldest, newest sql.NullString
 	if err := s.db.QueryRowContext(ctx,
-		`SELECT MIN(timestamp), MAX(timestamp) FROM audit_events`,
+		`SELECT MIN(captured_at), MAX(captured_at) FROM raw_traces`,
 	).Scan(&oldest, &newest); err != nil {
 		return nil, fmt.Errorf("store: stats (range): %w", err)
 	}
 	if oldest.Valid {
 		if t, err := parseSQLiteTime(oldest.String); err == nil {
-			out.OldestEvent = &t
+			out.OldestTrace = &t
 		}
 	}
 	if newest.Valid {
 		if t, err := parseSQLiteTime(newest.String); err == nil {
-			out.NewestEvent = &t
+			out.NewestTrace = &t
 		}
 	}
 
-	// DB size: stat the file. Not perfectly accurate under WAL (the
-	// -wal file holds pending pages) but close enough for `db stats`.
 	if info, err := os.Stat(s.path); err == nil {
 		out.DBSizeBytes = info.Size()
 	}
-
 	return &out, nil
 }
 
-// parseSQLiteTime handles the formats modernc.org/sqlite emits when
-// DATETIME values surface as strings via aggregates. Known formats:
-//   - "2006-01-02 15:04:05.999999999-07:00"
-//   - "2006-01-02T15:04:05.999999999Z07:00"
-//   - "2006-01-02 15:04:05+00:00"
-//
-// We try RFC3339 first (the driver's default write format), falling back
-// to the space-separated variant.
+// parseSQLiteTime handles the formats modernc.org/sqlite emits when DATETIME
+// values surface as strings via aggregates.
 func parseSQLiteTime(s string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
-		// Go's default time.Time.String() — modernc.org/sqlite emits
-		// this when a DATETIME column surfaces via an aggregate.
 		"2006-01-02 15:04:05.999999999 -0700 MST",
 		"2006-01-02 15:04:05 -0700 MST",
 		"2006-01-02 15:04:05.999999999-07:00",

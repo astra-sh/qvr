@@ -3,7 +3,6 @@ module github.com/raks097/quiver
 go 1.26.1
 
 require (
-	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/go-git/go-git/v5 v5.17.2
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0

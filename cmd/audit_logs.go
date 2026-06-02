@@ -8,41 +8,34 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/raks097/quiver/internal/config"
-	"github.com/raks097/quiver/internal/ops"
 	"github.com/raks097/quiver/internal/ops/store"
 	"github.com/spf13/cobra"
 )
 
 var (
-	logsSkill     string
-	logsAgent     string
-	logsAction    string
-	logsSession   string
-	logsSince     string
-	logsUntil     string
-	logsLimit     int
-	logsSensitive bool
+	logsAgent   string
+	logsKind    string
+	logsSession string
+	logsLimit   int
 )
 
 var auditLogsCmd = &cobra.Command{
 	Use:   "logs",
-	Short: "Show recorded agent events",
-	Long: `Query the audit trail. Filter by skill, agent, action type, session,
-or time window. Events are shown newest-first.`,
+	Short: "Show recent derived activity (spans)",
+	Long: `Query the derived span view — the Turn / Tool / Skill spans projected
+from captured raw traces. Filter by agent, span kind, or session. For the
+verbatim native trace use 'qvr audit raw'; for a session's full span tree or an
+OTLP payload use 'qvr audit spans'.`,
 	Args: cobra.NoArgs,
 	RunE: runAuditLogs,
 }
 
 func init() {
 	f := auditLogsCmd.Flags()
-	f.StringVar(&logsSkill, "skill", "", "filter by skill name")
 	f.StringVar(&logsAgent, "agent", "", "filter by agent name")
-	f.StringVar(&logsAction, "action", "", "filter by action type (e.g. file_write, command_exec)")
+	f.StringVar(&logsKind, "kind", "", "filter by span kind (LLM, TOOL, SKILL)")
 	f.StringVar(&logsSession, "session", "", "filter by session id")
-	f.StringVar(&logsSince, "since", "", "only events since this time (e.g. 1d, 12h, 30m, or RFC3339)")
-	f.StringVar(&logsUntil, "until", "", "only events until this time (e.g. 1h or RFC3339)")
-	f.IntVar(&logsLimit, "limit", 50, "maximum events to show (0 = no limit)")
-	f.BoolVar(&logsSensitive, "sensitive", false, "show only events flagged sensitive")
+	f.IntVar(&logsLimit, "limit", 50, "maximum spans to show (0 = no limit)")
 	auditCmd.AddCommand(auditLogsCmd)
 }
 
@@ -52,16 +45,27 @@ func runAuditLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	filter, err := buildEventFilter()
-	if err != nil {
-		return err
+	f := &store.SpanFilter{Limit: logsLimit}
+	if logsAgent != "" {
+		f.Agents = []string{logsAgent}
+	}
+	if logsKind != "" {
+		f.Kinds = []string{strings.ToUpper(logsKind)}
+	}
+	if logsSession != "" {
+		id, perr := uuid.Parse(logsSession)
+		if perr != nil {
+			return fmt.Errorf("invalid --session id %q: %w", logsSession, perr)
+		}
+		f.SessionID = &id
 	}
 
-	// A missing DB means nothing has been recorded yet (ops enabled but no
-	// events, or never enabled). Treat as an empty result rather than an
-	// error — opening read-only would fail with "no such table".
 	if !auditDBExists(cfg) {
-		return renderEmptyEvents()
+		if outputFormat == "json" {
+			return printer.JSON([]*store.SpanRow{})
+		}
+		printer.Info("no activity recorded yet")
+		return nil
 	}
 
 	s, err := openAuditStore(cmd.Context(), cfg, true)
@@ -70,84 +74,64 @@ func runAuditLogs(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	events, err := s.QueryEvents(cmd.Context(), filter)
+	spans, err := s.QuerySpans(cmd.Context(), f)
 	if err != nil {
-		return fmt.Errorf("query events: %w", err)
+		return fmt.Errorf("query spans: %w", err)
 	}
 
 	if outputFormat == "json" {
-		// Never emit a bare `null` — a nil slice would break downstream
-		// jq/script pipelines. An empty result must serialise to `[]`.
-		if events == nil {
-			events = []*ops.Event{}
+		if spans == nil {
+			spans = []*store.SpanRow{}
 		}
-		return printer.JSON(events)
+		return printer.JSON(spans)
 	}
-	if len(events) == 0 {
-		printer.Info("no events match")
+	if len(spans) == 0 {
+		printer.Info("no activity matches")
 		return nil
 	}
-	headers := []string{"TIME", "AGENT", "SKILL", "ACTION", "TOOL", "STATUS", "TARGET"}
-	rows := make([][]string, 0, len(events))
-	for _, e := range events {
+	headers := []string{"TIME", "AGENT", "KIND", "NAME", "SKILL"}
+	rows := make([][]string, 0, len(spans))
+	for _, sp := range spans {
 		rows = append(rows, []string{
-			e.Timestamp.Local().Format("01-02 15:04:05"),
-			e.AgentName,
-			e.SkillName,
-			string(e.ActionType),
-			e.ToolName,
-			string(e.ResultStatus),
-			eventTarget(e),
+			msTime(sp.StartMs),
+			sp.AgentName,
+			sp.Kind,
+			truncTarget(sp.Name),
+			spanAttr(sp.Attributes, "skill.name"),
 		})
 	}
 	printer.Table(headers, rows)
 	return nil
 }
 
-// buildEventFilter translates the logs flags into a store.EventFilter.
-func buildEventFilter() (*store.EventFilter, error) {
-	f := &store.EventFilter{Limit: logsLimit}
-
-	if logsSkill != "" {
-		f.Skills = []string{logsSkill}
+// msTime renders an epoch-ms span start as a local short timestamp.
+func msTime(ms int64) string {
+	if ms == 0 {
+		return "-"
 	}
-	if logsAgent != "" {
-		f.Agents = []string{logsAgent}
-	}
-	if logsAction != "" {
-		f.Actions = []ops.ActionType{ops.ActionType(logsAction)}
-	}
-	if logsSensitive {
-		t := true
-		f.IsSensitive = &t
-	}
-	if logsSession != "" {
-		id, err := uuid.Parse(logsSession)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --session id %q: %w", logsSession, err)
-		}
-		f.SessionID = &id
-	}
-	if logsSince != "" {
-		t, err := parseTimeFlag(logsSince)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --since: %w", err)
-		}
-		f.Since = &t
-	}
-	if logsUntil != "" {
-		t, err := parseTimeFlag(logsUntil)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --until: %w", err)
-		}
-		f.Until = &t
-	}
-	return f, nil
+	return time.UnixMilli(ms).Local().Format("01-02 15:04:05")
 }
 
-// parseTimeFlag accepts either an RFC3339 timestamp or a relative duration
-// like "1d", "12h", "30m" (interpreted as "ago"). The "d" (days) suffix is
-// supported on top of Go's standard duration units.
+// spanAttr pulls a string attribute out of a span's JSON attributes blob.
+func spanAttr(attrsJSON, key string) string {
+	if attrsJSON == "" {
+		return ""
+	}
+	// Cheap substring extraction avoids a full unmarshal for one field.
+	needle := `"` + key + `":"`
+	i := strings.Index(attrsJSON, needle)
+	if i < 0 {
+		return ""
+	}
+	rest := attrsJSON[i+len(needle):]
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		return rest[:j]
+	}
+	return ""
+}
+
+// parseTimeFlag accepts either an RFC3339 timestamp or a relative duration like
+// "1d", "12h", "30m" (interpreted as "ago").
 func parseTimeFlag(s string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t, nil
@@ -159,8 +143,8 @@ func parseTimeFlag(s string) (time.Time, error) {
 	return time.Now().UTC().Add(-dur), nil
 }
 
-// parseRelative parses a duration, additionally supporting a trailing "d"
-// for whole days (e.g. "7d").
+// parseRelative parses a duration, additionally supporting a trailing "d" for
+// whole days (e.g. "7d").
 func parseRelative(s string) (time.Duration, error) {
 	if rest, ok := strings.CutSuffix(s, "d"); ok {
 		days, err := strconv.Atoi(rest)
@@ -172,32 +156,7 @@ func parseRelative(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
 }
 
-// eventTarget extracts a human-friendly "what" from an event's payload —
-// the file path for file actions, the command for execs, else empty.
-func eventTarget(e *ops.Event) string {
-	switch e.ActionType {
-	case ops.ActionFileRead:
-		var p ops.FileReadPayload
-		if e.DecodePayload(&p) == nil {
-			if p.Path != "" {
-				return p.Path
-			}
-			return p.Pattern
-		}
-	case ops.ActionFileWrite:
-		var p ops.FileWritePayload
-		if e.DecodePayload(&p) == nil {
-			return p.Path
-		}
-	case ops.ActionCommandExec:
-		var p ops.CommandExecPayload
-		if e.DecodePayload(&p) == nil {
-			return truncTarget(p.Command)
-		}
-	}
-	return ""
-}
-
+// truncTarget clips a label for table display.
 func truncTarget(s string) string {
 	const max = 50
 	if len(s) <= max {

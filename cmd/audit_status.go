@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -78,13 +77,13 @@ func runAuditStatus(cmd *cobra.Command, args []string) error {
 			as.Issues = st.Issues
 		}
 		if s != nil {
-			if ts := lastEventTime(cmd.Context(), s, inst.Name()); ts != nil {
+			if ts, lErr := s.LatestRawAt(cmd.Context(), inst.Name()); lErr == nil && ts != nil {
 				as.LastEvent = ts.Local().Format(time.RFC3339)
 			}
-			if n, cErr := s.CountSessions(cmd.Context(), inst.Name()); cErr == nil {
+			if n, cErr := s.CountRawSessions(cmd.Context(), nil, inst.Name()); cErr == nil {
 				as.Sessions = n
 			}
-			if n, cErr := s.CountEvents(cmd.Context(), inst.Name()); cErr == nil {
+			if n, cErr := s.CountRawTraces(cmd.Context(), nil, inst.Name()); cErr == nil {
 				as.Recorded = n
 			}
 			if n, cErr := s.CountSelfAuditErrors(cmd.Context(), inst.Name()); cErr == nil {
@@ -124,15 +123,6 @@ func runAuditStatus(cmd *cobra.Command, args []string) error {
 	}
 	printer.Table(headers, rows)
 	return nil
-}
-
-// lastEventTime returns the timestamp of the newest event for agent, or nil.
-func lastEventTime(ctx context.Context, s store.Store, agent string) *time.Time {
-	events, err := s.QueryEvents(ctx, &store.EventFilter{Agents: []string{agent}, Limit: 1})
-	if err != nil || len(events) == 0 {
-		return nil
-	}
-	return &events[0].Timestamp
 }
 
 func yesNo(b bool) string {

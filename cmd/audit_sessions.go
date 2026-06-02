@@ -2,11 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/raks097/quiver/internal/config"
+	"github.com/raks097/quiver/internal/ops/store"
 	"github.com/spf13/cobra"
 )
 
@@ -19,15 +18,16 @@ var (
 var auditSessionsCmd = &cobra.Command{
 	Use:   "sessions [show <id>]",
 	Short: "List recorded agent sessions",
-	Long: `Lists agent sessions newest-first with per-session counts. Use
-'qvr audit sessions show <id>' to see every event in one session.`,
+	Long: `Lists agent sessions newest-first with per-session row counts derived
+from captured raw traces. Use 'qvr audit sessions show <id>' to print one
+session's verbatim raw lines (equivalent to 'qvr audit raw --session <id>').`,
 	Args: cobra.ArbitraryArgs,
 	RunE: runAuditSessions,
 }
 
 func init() {
 	auditSessionsCmd.Flags().StringVar(&sessionsSince, "since", "", "only sessions started since this time (e.g. 7d, 24h, or RFC3339)")
-	auditSessionsCmd.Flags().StringVar(&sessionsAgent, "agent", "", "filter by agent name (e.g. claude-code, opencode)")
+	auditSessionsCmd.Flags().StringVar(&sessionsAgent, "agent", "", "filter by agent name (e.g. claude-code, codex)")
 	auditSessionsCmd.Flags().IntVar(&sessionsLimit, "limit", 50, "maximum sessions to show (0 = no limit)")
 	auditCmd.AddCommand(auditSessionsCmd)
 }
@@ -38,7 +38,6 @@ func runAuditSessions(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// `sessions show <id>` subform.
 	if len(args) >= 1 && args[0] == "show" {
 		if len(args) < 2 {
 			return fmt.Errorf("usage: qvr audit sessions show <id>")
@@ -63,23 +62,21 @@ func runAuditSessions(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	var since *time.Time
+	f := &store.RawSessionFilter{Agent: sessionsAgent, Limit: sessionsLimit}
 	if sessionsSince != "" {
 		t, perr := parseTimeFlag(sessionsSince)
 		if perr != nil {
 			return fmt.Errorf("invalid --since: %w", perr)
 		}
-		since = &t
+		f.Since = &t
 	}
 
-	sessions, err := s.ListSessions(cmd.Context(), since, nil, sessionsAgent, sessionsLimit)
+	sessions, err := s.ListRawSessions(cmd.Context(), f)
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
 
 	if outputFormat == "json" {
-		// Never emit a bare `null` on an empty result — keep it pipe-safe
-		// (mirror the missing-DB path above, which returns `[]`).
 		if len(sessions) == 0 {
 			return printer.JSON([]any{})
 		}
@@ -89,23 +86,23 @@ func runAuditSessions(cmd *cobra.Command, args []string) error {
 		printer.Info("no sessions recorded yet")
 		return nil
 	}
-	headers := []string{"STARTED", "AGENT", "ACTIONS", "WRITES", "CMDS", "ERRORS", "SKILLS"}
+	headers := []string{"STARTED", "AGENT", "LINES", "HOOKS", "ROWS", "SESSION ID"}
 	rows := make([][]string, 0, len(sessions))
 	for _, sess := range sessions {
 		rows = append(rows, []string{
 			sess.StartedAt.Local().Format("01-02 15:04"),
 			sess.AgentName,
-			fmt.Sprintf("%d", sess.TotalActions),
-			fmt.Sprintf("%d", sess.FilesWritten),
-			fmt.Sprintf("%d", sess.CommandsExecuted),
-			fmt.Sprintf("%d", sess.Errors),
-			strings.Join(sess.SkillsTouched, ","),
+			fmt.Sprintf("%d", sess.TranscriptLines),
+			fmt.Sprintf("%d", sess.HookPayloads),
+			fmt.Sprintf("%d", sess.TotalRows),
+			sess.SessionID.String(),
 		})
 	}
 	printer.Table(headers, rows)
 	return nil
 }
 
+// showSession prints one session's verbatim raw lines.
 func showSession(cmd *cobra.Command, cfg *config.Config, idArg string) error {
 	id, err := uuid.Parse(idArg)
 	if err != nil {
@@ -120,29 +117,20 @@ func showSession(cmd *cobra.Command, cfg *config.Config, idArg string) error {
 	}
 	defer s.Close()
 
-	events, err := s.GetEventsBySession(cmd.Context(), id)
+	rows, err := s.QueryRawTraces(cmd.Context(), &store.RawTraceFilter{SessionID: &id})
 	if err != nil {
-		return fmt.Errorf("get session events: %w", err)
+		return fmt.Errorf("get session traces: %w", err)
 	}
 	if outputFormat == "json" {
-		return printer.JSON(events)
+		return printer.JSON(rows)
 	}
-	if len(events) == 0 {
-		printer.Info("no events for that session")
+	if len(rows) == 0 {
+		printer.Info("no traces for that session")
 		return nil
 	}
-	headers := []string{"TIME", "SKILL", "ACTION", "TOOL", "STATUS", "TARGET"}
-	rows := make([][]string, 0, len(events))
-	for _, e := range events {
-		rows = append(rows, []string{
-			e.Timestamp.Local().Format("15:04:05"),
-			e.SkillName,
-			string(e.ActionType),
-			e.ToolName,
-			string(e.ResultStatus),
-			eventTarget(e),
-		})
+	w := cmd.OutOrStdout()
+	for _, r := range rows {
+		fmt.Fprintln(w, string(r.Raw))
 	}
-	printer.Table(headers, rows)
 	return nil
 }

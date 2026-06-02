@@ -58,49 +58,12 @@ type CacheConfig struct {
 
 // OpsConfig controls the SkillOps audit pipeline. The struct lives here
 // (not in internal/ops) so that internal/ops can depend on internal/config
-// without a cycle. Defaults and behaviour live in internal/ops/config.go.
+// without a cycle. In the raw-only model the only knobs are the on/off switch
+// and the database location; capture stores verbatim, so there is no per-agent
+// logging level, retention, or skill-less policy to configure.
 type OpsConfig struct {
-	Enabled       bool                      `yaml:"enabled" json:"enabled"`
-	DBPath        string                    `yaml:"db_path,omitempty" json:"db_path,omitempty"`
-	RetentionDays int                       `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
-	Logging       OpsLoggingConfig          `yaml:"logging,omitempty" json:"logging,omitempty"`
-	Privacy       OpsPrivacyConfig          `yaml:"privacy,omitempty" json:"privacy,omitempty"`
-	Agents        map[string]OpsAgentConfig `yaml:"agents,omitempty" json:"agents,omitempty"`
-
-	// RetainSkilllessSessions, when true, keeps a session that ends without
-	// ever referencing an installed skill (recorded under the pending
-	// sentinel) instead of discarding it. It defaults to false: skill-less
-	// sessions are pruned at their end, because the audit surface is about
-	// *skill-attributed* activity and a session that touches no skill is
-	// noise. This is only safe because attribution now also fires on
-	// command_exec events — a shell-first agent's `qvr read <skill>` or a
-	// `cat .codex/skills/<skill>/…` touch is attributed, so a genuine skill
-	// session is no longer mistaken for skill-less and pruned (see #138).
-	RetainSkilllessSessions bool `yaml:"retain_skill_less_sessions,omitempty" json:"retain_skill_less_sessions,omitempty"`
-}
-
-// OpsLoggingConfig tunes how much of an event's content survives the
-// logging-level truncation stage. See internal/ops/logging_level.go.
-type OpsLoggingConfig struct {
-	Level           string `yaml:"level,omitempty" json:"level,omitempty"`                         // minimal|standard|full
-	StdoutMaxChars  int    `yaml:"stdout_max_chars,omitempty" json:"stdout_max_chars,omitempty"`   // 0 = unlimited
-	StderrMaxChars  int    `yaml:"stderr_max_chars,omitempty" json:"stderr_max_chars,omitempty"`   // 0 = unlimited
-	ContextMaxChars int    `yaml:"context_max_chars,omitempty" json:"context_max_chars,omitempty"` // 0 = unlimited
-	ContentHash     bool   `yaml:"content_hash,omitempty" json:"content_hash,omitempty"`
-}
-
-// OpsPrivacyConfig lets users extend the built-in privacy defaults.
-// Defaults are always the floor — user patterns are merged on top.
-type OpsPrivacyConfig struct {
-	SensitivePaths []string `yaml:"sensitive_paths,omitempty" json:"sensitive_paths,omitempty"`
-	RedactPatterns []string `yaml:"redact_patterns,omitempty" json:"redact_patterns,omitempty"`
-}
-
-// OpsAgentConfig overrides the global ops settings for a specific
-// agent (e.g. log full events from claude, only minimal from cursor).
-type OpsAgentConfig struct {
-	Enabled      bool   `yaml:"enabled" json:"enabled"`
-	LoggingLevel string `yaml:"logging_level,omitempty" json:"logging_level,omitempty"`
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	DBPath  string `yaml:"db_path,omitempty" json:"db_path,omitempty"`
 }
 
 // RegistryConfig holds configuration for a single registry.

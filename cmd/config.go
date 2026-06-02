@@ -122,8 +122,6 @@ var knownConfigKeys = []string{
 	"cache.index_ttl",
 	"ops.enabled",
 	"ops.db_path",
-	"ops.retention_days",
-	"ops.logging.level",
 }
 
 // suggestSubKeys returns the known dotted keys nested under prefix
@@ -172,13 +170,6 @@ func configRead(cfg *config.Config, key string) string {
 		return "false"
 	case "ops.db_path":
 		return cfg.Ops.DBPath
-	case "ops.retention_days":
-		if cfg.Ops.RetentionDays > 0 {
-			return fmt.Sprintf("%d", cfg.Ops.RetentionDays)
-		}
-		return ""
-	case "ops.logging.level":
-		return cfg.Ops.Logging.Level
 	}
 	return ""
 }

@@ -1,43 +1,48 @@
 package ops
 
 import (
-	"context"
-	"errors"
 	"sync"
 	"testing"
 )
 
-type fakeAdapter struct{ name string }
+// fakeInstaller is a minimal HookInstaller for registry tests.
+type fakeInstaller struct{ name string }
 
-func (f *fakeAdapter) Name() string { return f.name }
-func (f *fakeAdapter) ParseEvent(context.Context, string, []byte) (*Event, error) {
-	return nil, nil
+func (f *fakeInstaller) Name() string        { return f.name }
+func (f *fakeInstaller) DisplayName() string { return f.name }
+func (f *fakeInstaller) Detect() (DetectionResult, error) {
+	return DetectionResult{}, nil
 }
+func (f *fakeInstaller) Install(InstallOptions) (InstallResult, error) {
+	return InstallResult{}, nil
+}
+func (f *fakeInstaller) Uninstall(UninstallOptions) (UninstallResult, error) {
+	return UninstallResult{}, nil
+}
+func (f *fakeInstaller) Status() (HookStatus, error) { return HookStatus{}, nil }
 
-// Helper to reset the global registry between tests. Returns a
-// restore func to call in t.Cleanup.
-func snapshotAdapters(t *testing.T) func() {
+// snapshotInstallers resets the global registry between tests.
+func snapshotInstallers(t *testing.T) func() {
 	t.Helper()
 	adapterMu.Lock()
-	saved := make(map[string]Adapter, len(adapters))
-	for k, v := range adapters {
+	saved := make(map[string]HookInstaller, len(installers))
+	for k, v := range installers {
 		saved[k] = v
 	}
 	adapterMu.Unlock()
 	return func() {
 		adapterMu.Lock()
 		defer adapterMu.Unlock()
-		adapters = saved
+		installers = saved
 	}
 }
 
 func TestRegister_RoundTrip(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
-	a := &fakeAdapter{name: "fake"}
-	Register(a)
-	got, err := GetAdapter("fake")
-	if err != nil {
-		t.Fatalf("GetAdapter: %v", err)
+	t.Cleanup(snapshotInstallers(t))
+	Register(&fakeInstaller{name: "fake"})
+	got, ok := GetInstaller("fake")
+	if !ok {
+		t.Fatal("GetInstaller: not found")
 	}
 	if got.Name() != "fake" {
 		t.Errorf("expected fake; got %q", got.Name())
@@ -45,24 +50,22 @@ func TestRegister_RoundTrip(t *testing.T) {
 }
 
 func TestRegister_NilIgnored(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
+	t.Cleanup(snapshotInstallers(t))
 	Register(nil)
-	list := ListAdapters()
-	for _, n := range list {
-		if n == "" {
-			t.Errorf("nil adapter registered under empty name")
+	for _, inst := range ListInstallers() {
+		if inst.Name() == "" {
+			t.Errorf("nil installer registered under empty name")
 		}
 	}
 }
 
 func TestRegister_ReplacesExisting(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
-	Register(&fakeAdapter{name: "dup"})
-	Register(&fakeAdapter{name: "dup"})
-	list := ListAdapters()
+	t.Cleanup(snapshotInstallers(t))
+	Register(&fakeInstaller{name: "dup"})
+	Register(&fakeInstaller{name: "dup"})
 	count := 0
-	for _, n := range list {
-		if n == "dup" {
+	for _, inst := range ListInstallers() {
+		if inst.Name() == "dup" {
 			count++
 		}
 	}
@@ -72,58 +75,48 @@ func TestRegister_ReplacesExisting(t *testing.T) {
 }
 
 func TestUnregister(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
-	Register(&fakeAdapter{name: "ephemeral"})
+	t.Cleanup(snapshotInstallers(t))
+	Register(&fakeInstaller{name: "ephemeral"})
 	Unregister("ephemeral")
-	_, err := GetAdapter("ephemeral")
-	if !errors.Is(err, ErrUnknownAdapter) {
-		t.Errorf("expected ErrUnknownAdapter; got %v", err)
+	if _, ok := GetInstaller("ephemeral"); ok {
+		t.Error("expected installer to be gone after Unregister")
 	}
 }
 
-func TestGetAdapter_UnknownReturnsSentinel(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
-	_, err := GetAdapter("totally-not-a-real-adapter-xyz")
-	if !errors.Is(err, ErrUnknownAdapter) {
-		t.Errorf("expected ErrUnknownAdapter; got %v", err)
-	}
-}
-
-func TestListAdapters_SortedStable(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
-	// Reset to a known set.
+func TestListInstallers_SortedStable(t *testing.T) {
+	t.Cleanup(snapshotInstallers(t))
 	adapterMu.Lock()
-	adapters = map[string]Adapter{}
+	installers = map[string]HookInstaller{}
 	adapterMu.Unlock()
-	Register(&fakeAdapter{name: "zebra"})
-	Register(&fakeAdapter{name: "alpha"})
-	Register(&fakeAdapter{name: "mike"})
-	got := ListAdapters()
+	Register(&fakeInstaller{name: "zebra"})
+	Register(&fakeInstaller{name: "alpha"})
+	Register(&fakeInstaller{name: "mike"})
+	got := ListInstallers()
 	want := []string{"alpha", "mike", "zebra"}
 	if len(got) != len(want) {
-		t.Fatalf("len=%d want %d; got %v", len(got), len(want), got)
+		t.Fatalf("len=%d want %d", len(got), len(want))
 	}
 	for i := range got {
-		if got[i] != want[i] {
-			t.Errorf("sort drift: got %v, want %v", got, want)
+		if got[i].Name() != want[i] {
+			t.Errorf("sort drift: got %v at %d, want %v", got[i].Name(), i, want[i])
 		}
 	}
 }
 
 func TestRegistry_ConcurrentAccess(t *testing.T) {
-	t.Cleanup(snapshotAdapters(t))
+	t.Cleanup(snapshotInstallers(t))
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(2)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			Register(&fakeAdapter{name: "concurrent"})
-			_, _ = GetAdapter("concurrent")
-		}(i)
-		go func(i int) {
+			Register(&fakeInstaller{name: "concurrent"})
+			_, _ = GetInstaller("concurrent")
+		}()
+		go func() {
 			defer wg.Done()
-			_ = ListAdapters()
-		}(i)
+			_ = ListInstallers()
+		}()
 	}
 	wg.Wait()
 }

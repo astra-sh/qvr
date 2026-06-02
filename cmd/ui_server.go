@@ -1,0 +1,774 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"net/http"
+	"os"
+	"path"
+	"path/filepath"
+	"sort"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/raks097/quiver/internal/config"
+	"github.com/raks097/quiver/internal/git"
+	"github.com/raks097/quiver/internal/model"
+	"github.com/raks097/quiver/internal/ops"
+	"github.com/raks097/quiver/internal/ops/store"
+	"github.com/raks097/quiver/internal/registry"
+	"github.com/raks097/quiver/internal/security"
+	"github.com/raks097/quiver/internal/skill"
+	"github.com/raks097/quiver/internal/ui"
+)
+
+// uiServer is the read-only HTTP backend for `qvr ui`. Every handler reuses the
+// same logic the CLI commands do (loadScopedLocks, buildSkillInfo,
+// buildTreeGroups, buildProvenanceView, the store, the scanner) so the dashboard
+// can never drift from CLI truth — it's a view layer, not a second source.
+//
+// The store is opened read-only and may be nil when the audit DB doesn't exist
+// yet (audit never enabled); session/overview handlers degrade to empty results
+// rather than erroring.
+type uiServer struct {
+	projectRoot string
+	global      bool
+	all         bool
+	cfg         *config.Config
+	store       store.Store // nil when the audit DB is absent
+	version     string
+}
+
+// buildUIServer bootstraps the server: loads config and opens the audit store
+// read-only if its DB file exists. A missing DB is not an error — the dashboard
+// still serves skills/tree/provenance/scan. Taking projectRoot as a param (vs.
+// os.Getwd internally) lets tests inject a temp project without chdir.
+func buildUIServer(ctx context.Context, projectRoot string, global, all bool, version string) (*uiServer, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	s := &uiServer{
+		projectRoot: projectRoot,
+		global:      global,
+		all:         all,
+		cfg:         cfg,
+		version:     version,
+	}
+	dbPath := ops.DBPath(cfg)
+	if _, statErr := os.Stat(dbPath); statErr == nil {
+		st, openErr := store.Open(ctx, store.OpenOptions{Path: dbPath, ReadOnly: true})
+		if openErr != nil {
+			return nil, fmt.Errorf("open audit store: %w", openErr)
+		}
+		s.store = st
+	}
+	return s, nil
+}
+
+// Close releases the store handle.
+func (s *uiServer) Close() error {
+	if s.store != nil {
+		return s.store.Close()
+	}
+	return nil
+}
+
+// handler wires the routes. Go 1.22+ method+pattern routing keeps method
+// dispatch and path params in the mux instead of hand-rolled switches.
+func (s *uiServer) handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/registries", s.handleRegistries)
+	mux.HandleFunc("GET /api/projects", s.handleProjects)
+	mux.HandleFunc("GET /api/overview", s.handleOverview)
+	mux.HandleFunc("GET /api/sessions", s.handleSessions)
+	mux.HandleFunc("GET /api/sessions/{id}", s.handleSession)
+	mux.HandleFunc("GET /api/skills", s.handleSkills)
+	mux.HandleFunc("GET /api/skills/{name}", s.handleSkill)
+	mux.HandleFunc("GET /api/tree", s.handleTree)
+	mux.HandleFunc("GET /api/provenance", s.handleProvenance)
+	mux.HandleFunc("GET /api/scan", s.handleScanSummary)
+	mux.HandleFunc("POST /api/scan/{name}", s.handleScanRun)
+	// Catch-all: static SPA assets with index.html fallback for client routes.
+	mux.HandleFunc("/", s.handleStatic)
+	return mux
+}
+
+// ---- JSON helpers ----------------------------------------------------------
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// uiScope is the lens a single request is answered through. The server's launch
+// flags (projectRoot + --global/--all) are the default, but the dashboard's
+// project switcher overrides per request via ?project=/?scope= so one running
+// `qvr ui` can browse every project on the machine without relaunching.
+type uiScope struct {
+	projectRoot string
+	global      bool
+	all         bool
+}
+
+// label names the scope for the overview payload so a reader never misattributes
+// global activity to one project.
+func (sc uiScope) label() string {
+	switch {
+	case sc.all:
+		return "all"
+	case sc.global:
+		return "global"
+	default:
+		return "project"
+	}
+}
+
+// auditDirs returns the working-directory whitelist that scopes the audit panels
+// (sessions/events) for this scope. Project mode pins them to the project root
+// so they match the project-scoped skill/gate panels; global/all return nil (no
+// scope → every session/event), matching how those widen the lock panels.
+func (sc uiScope) auditDirs() []string {
+	if sc.global || sc.all {
+		return nil
+	}
+	return []string{sc.projectRoot}
+}
+
+// resolveScope reads the per-request scope from ?scope=global|all and
+// ?project=<abs path>. A ?project= path MUST be a known project (in
+// projects.json, the launch root, or the global home) — the dashboard never
+// reads a lock from an arbitrary client-supplied path. With no params it falls
+// back to the server's launch flags, preserving the original single-scope CLI
+// behavior.
+func (s *uiServer) resolveScope(r *http.Request) (uiScope, error) {
+	q := r.URL.Query()
+	switch q.Get("scope") {
+	case "global":
+		return uiScope{projectRoot: s.projectRoot, global: true}, nil
+	case "all":
+		return uiScope{projectRoot: s.projectRoot, all: true}, nil
+	}
+	if p := q.Get("project"); p != "" {
+		abs, err := s.knownProjectRoot(p)
+		if err != nil {
+			return uiScope{}, err
+		}
+		return uiScope{projectRoot: abs}, nil
+	}
+	return uiScope{projectRoot: s.projectRoot, global: s.global, all: s.all}, nil
+}
+
+// knownProjectRoot resolves p to an absolute path and confirms it is a project
+// Quiver already knows about (the launch root, the global home, or a recorded
+// entry in projects.json whose lock still exists). Returns an error for
+// anything else.
+func (s *uiServer) knownProjectRoot(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("invalid project path: %w", err)
+	}
+	if abs == s.projectRoot || abs == config.Dir() {
+		return abs, nil
+	}
+	if _, ok := indexedProjectRoots()[abs]; ok {
+		return abs, nil
+	}
+	return "", fmt.Errorf("unknown project: %s", p)
+}
+
+// indexedProjectRoots returns the project root directories recorded in
+// ~/.quiver/projects.json whose lock file still exists, keyed by absolute root
+// with the LastSeen timestamp. The index keys are lock-file paths
+// (`<root>/qvr.lock`), so the root is the parent dir. Stale entries (project
+// moved/deleted, lock gone) are skipped so the switcher isn't cluttered with
+// dead temp dirs.
+func indexedProjectRoots() map[string]time.Time {
+	roots := map[string]time.Time{}
+	pf, err := registry.ReadProjects()
+	if err != nil {
+		return roots
+	}
+	for lockPath, rec := range pf.Projects {
+		if _, statErr := os.Stat(lockPath); statErr != nil {
+			continue
+		}
+		roots[filepath.Dir(lockPath)] = rec.LastSeen
+	}
+	return roots
+}
+
+// ---- shared lock access ----------------------------------------------------
+
+// entriesForScope returns every lock entry in the given scope, flattened across
+// project/global per the resolved flags.
+func (s *uiServer) entriesForScope(sc uiScope) ([]*model.LockEntry, error) {
+	locks, err := loadScopedLocks(sc.projectRoot, sc.global, sc.all)
+	if err != nil {
+		return nil, err
+	}
+	var out []*model.LockEntry
+	for _, sl := range locks {
+		if sl.Lock == nil {
+			continue
+		}
+		out = append(out, sl.Lock.Entries()...)
+	}
+	return out, nil
+}
+
+// ---- handlers --------------------------------------------------------------
+
+func (s *uiServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"version":       s.version,
+		"audit_enabled": s.store != nil,
+	})
+}
+
+// handleRegistries returns the global registry list — the same data as
+// `qvr registry list`, which is shared across all projects (registries live at
+// the QUIVER_HOME root, not per project). Manager.List() is local-only (config +
+// cached index + FETCH_HEAD mtime), so it never touches the network. Degrades to
+// an empty list on error rather than failing the page.
+func (s *uiServer) handleRegistries(w http.ResponseWriter, r *http.Request) {
+	mgr := newRegistryManager(git.NewGoGitClient())
+	regs, err := mgr.List()
+	if err != nil || regs == nil {
+		regs = []model.RegistryStatus{}
+	}
+	writeJSON(w, http.StatusOK, regs)
+}
+
+// projectSummary is one row in the dashboard's project switcher. Projects come
+// from Quiver's existing on-disk index (~/.quiver/projects.json, maintained by
+// every project-lock mutation), plus a synthetic Global entry and the launch
+// project. Counts are cheap: a lock read for skills, indexed COUNTs for traces.
+type projectSummary struct {
+	Path     string    `json:"path"`  // abs project root; "" for Global
+	Name     string    `json:"name"`  // base name, or "Global"
+	Scope    string    `json:"scope"` // "project" | "global"
+	LockPath string    `json:"lockPath,omitempty"`
+	HasLock  bool      `json:"hasLock"`
+	Current  bool      `json:"current"` // the directory `qvr ui` was launched from
+	Skills   int       `json:"skills"`
+	Sessions int64     `json:"sessions"`
+	Events   int64     `json:"events"`
+	LastSeen time.Time `json:"lastSeen,omitempty"`
+}
+
+func (s *uiServer) handleProjects(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Collect candidate project roots: the recorded index (live locks only) ∪
+	// the launch root.
+	roots := indexedProjectRoots()
+	if _, ok := roots[s.projectRoot]; !ok {
+		roots[s.projectRoot] = time.Time{} // launch project, even if never `qvr add`ed
+	}
+
+	out := make([]projectSummary, 0, len(roots)+1)
+
+	// Global pseudo-project: the user-global lock + machine-wide trace totals.
+	globalLock := filepath.Join(config.Dir(), model.LockFileName)
+	gs := projectSummary{
+		Name:     "Global",
+		Scope:    "global",
+		LockPath: globalLock,
+		Skills:   countLockEntries(globalLock),
+	}
+	gs.HasLock = gs.Skills > 0 || lockExists(globalLock)
+	if s.store != nil {
+		if n, err := s.store.CountRawSessions(ctx, nil, ""); err == nil {
+			gs.Sessions = n
+		}
+		if n, err := s.store.CountRawTraces(ctx, nil, ""); err == nil {
+			gs.Events = n
+		}
+	}
+	out = append(out, gs)
+
+	for root, lastSeen := range roots {
+		lockPath := filepath.Join(root, model.LockFileName)
+		ps := projectSummary{
+			Path:     root,
+			Name:     filepath.Base(root),
+			Scope:    "project",
+			LockPath: lockPath,
+			Current:  root == s.projectRoot,
+			HasLock:  lockExists(lockPath),
+			Skills:   countLockEntries(lockPath),
+			LastSeen: lastSeen,
+		}
+		if s.store != nil {
+			if n, err := s.store.CountRawSessions(ctx, []string{root}, ""); err == nil {
+				ps.Sessions = n
+			}
+			if n, err := s.store.CountRawTraces(ctx, []string{root}, ""); err == nil {
+				ps.Events = n
+			}
+		}
+		out = append(out, ps)
+	}
+
+	// Global first, then most-recently-seen projects; the launch project sorts
+	// to the top of its group so "where am I" is always visible.
+	sort.SliceStable(out[1:], func(i, j int) bool {
+		a, b := out[1+i], out[1+j]
+		if a.Current != b.Current {
+			return a.Current
+		}
+		return a.LastSeen.After(b.LastSeen)
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+// lockExists reports whether a lock file is present at path.
+func lockExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// countLockEntries returns the number of installed skills in the lock at path,
+// or 0 when the lock is absent or unreadable.
+func countLockEntries(path string) int {
+	lock, err := model.ReadLockFile(path)
+	if err != nil || lock == nil {
+		return 0
+	}
+	return len(lock.Entries())
+}
+
+// overviewResponse is the dashboard home payload: headline counts, a scan-gate
+// rollup, and the most recent sessions.
+type overviewResponse struct {
+	AuditEnabled bool `json:"audit_enabled"`
+	// Scope and ProjectRoot describe the lens the whole payload is taken
+	// through — including the sessions/events counts below — so the UI can
+	// label "this project" vs "global" instead of presenting project-scoped
+	// gate data and global audit data as if they share scope (issue #141).
+	Scope          string              `json:"scope"`
+	ProjectRoot    string              `json:"project_root,omitempty"`
+	Sessions       int64               `json:"sessions"`
+	Events         int64               `json:"events"`
+	Skills         int                 `json:"skills"`
+	Registries     int                 `json:"registries"`
+	GateAllowed    int                 `json:"gate_allowed"`
+	GateBlocked    int                 `json:"gate_blocked"`
+	GateUnscanned  int                 `json:"gate_unscanned"`
+	RecentSessions []*store.RawSession `json:"recent_sessions"`
+}
+
+func (s *uiServer) handleOverview(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	resp := overviewResponse{
+		AuditEnabled:   s.store != nil,
+		Scope:          sc.label(),
+		RecentSessions: []*store.RawSession{},
+	}
+	if resp.Scope == "project" {
+		resp.ProjectRoot = sc.projectRoot
+	}
+
+	if s.store != nil {
+		// Scope sessions/traces to the same lens as the skill/gate panels so
+		// switching project/global rescopes every count, not just half the screen.
+		dirs := sc.auditDirs()
+		if n, err := s.store.CountRawSessions(ctx, dirs, ""); err == nil {
+			resp.Sessions = n
+		}
+		if n, err := s.store.CountRawTraces(ctx, dirs, ""); err == nil {
+			resp.Events = n
+		}
+		if recent, err := s.store.ListRawSessions(ctx, &store.RawSessionFilter{Dirs: dirs, Limit: 5}); err == nil && recent != nil {
+			resp.RecentSessions = recent
+		}
+	}
+
+	entries, err := s.entriesForScope(sc)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	resp.Skills = len(entries)
+	regs := map[string]struct{}{}
+	for _, e := range entries {
+		if e.Registry != "" {
+			regs[e.Registry] = struct{}{}
+		}
+		switch buildProvenanceView(e).ScanDecision {
+		case "allowed":
+			resp.GateAllowed++
+		case "blocked":
+			resp.GateBlocked++
+		default:
+			resp.GateUnscanned++
+		}
+	}
+	resp.Registries = len(regs)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeJSON(w, http.StatusOK, []*store.RawSession{})
+		return
+	}
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	limit := 100
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := parsePositiveInt(v); err == nil {
+			limit = n
+		}
+	}
+	agent := r.URL.Query().Get("agent")
+	sessions, err := s.store.ListRawSessions(r.Context(), &store.RawSessionFilter{
+		Dirs: sc.auditDirs(), Agent: agent, Limit: limit,
+	})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if sessions == nil {
+		sessions = []*store.RawSession{}
+	}
+	writeJSON(w, http.StatusOK, sessions)
+}
+
+// sessionDetail bundles a session's derived span timeline. (Raw bytes are
+// available via the `qvr audit raw`/export CLI; the UI renders the spans.)
+type sessionDetail struct {
+	SessionID uuid.UUID        `json:"session_id"`
+	Spans     []*store.SpanRow `json:"spans"`
+}
+
+func (s *uiServer) handleSession(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("audit not enabled"))
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("id"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
+		return
+	}
+	spans, err := s.store.QuerySpans(r.Context(), &store.SpanFilter{SessionID: &id})
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	if spans == nil {
+		spans = []*store.SpanRow{}
+	}
+	writeJSON(w, http.StatusOK, sessionDetail{SessionID: id, Spans: spans})
+}
+
+func (s *uiServer) handleSkills(w http.ResponseWriter, r *http.Request) {
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	locks, err := loadScopedLocks(sc.projectRoot, sc.global, sc.all)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	rows := []scopedListEntry{}
+	for _, sl := range locks {
+		if sl.Lock == nil {
+			continue
+		}
+		for _, e := range sl.Lock.Entries() {
+			row := scopedListEntry{
+				Name:      e.Name,
+				Worktree:  skill.EntryWorktreePath(e),
+				LockEntry: e,
+			}
+			if sc.all {
+				row.Scope = sl.Scope
+			}
+			rows = append(rows, row)
+		}
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+func (s *uiServer) handleSkill(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	locks, err := loadScopedLocks(sc.projectRoot, sc.global, sc.all)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	entry, scope, err := findEntryAcrossLocks(name, locks)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	info, err := buildSkillInfo(entry, sc.projectRoot, scope.Scope == "global")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *uiServer) handleTree(w http.ResponseWriter, r *http.Request) {
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	locks, err := loadScopedLocks(sc.projectRoot, sc.global, sc.all)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	groups := buildTreeGroups(locks, sc.all)
+	if groups == nil {
+		groups = []treeGroup{}
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
+func (s *uiServer) handleProvenance(w http.ResponseWriter, r *http.Request) {
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, err := s.entriesForScope(sc)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	views := make([]*provenanceView, 0, len(entries))
+	for _, e := range entries {
+		views = append(views, buildProvenanceView(e))
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+// scanSummaryRow is the recorded (install-time) scan-gate decision per skill —
+// instant, no live scan. The Scan page renders this and offers a live re-scan.
+type scanSummaryRow struct {
+	Name           string `json:"name"`
+	Registry       string `json:"registry,omitempty"`
+	Decision       string `json:"decision,omitempty"`
+	ScannerVersion string `json:"scannerVersion,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+}
+
+func (s *uiServer) handleScanSummary(w http.ResponseWriter, r *http.Request) {
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	entries, err := s.entriesForScope(sc)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	rows := make([]scanSummaryRow, 0, len(entries))
+	for _, e := range entries {
+		v := buildProvenanceView(e)
+		mode := ""
+		switch {
+		case e.IsEdit():
+			mode = "edit"
+		case e.IsLink():
+			mode = "link"
+		}
+		rows = append(rows, scanSummaryRow{
+			Name:           e.Name,
+			Registry:       e.Registry,
+			Decision:       v.ScanDecision,
+			ScannerVersion: v.ScannerVersion,
+			Mode:           mode,
+		})
+	}
+	writeJSON(w, http.StatusOK, rows)
+}
+
+// scanRunGate is the live re-scan's gate verdict, computed under the SAME
+// policy that produced the recorded gate (cfg.Security.BlockSeverity) and
+// reported on the SAME 5-rung severity scale the lock uses
+// (critical/high/medium/low/info). This lets the Scan page compare the
+// recorded verdict to the live one 1:1 and surface drift — the recorded
+// `allowed` silently becoming a live `blocked` is exactly what a read-only
+// audit dashboard exists to show (issue #140).
+type scanRunGate struct {
+	Decision  string               `json:"decision"`  // allowed | blocked
+	Threshold string               `json:"threshold"` // block_severity policy applied
+	Counts    model.SeverityCounts `json:"counts"`    // lock-scale, comparable to verification.scan.counts
+}
+
+// scanRunResponse embeds the raw ScanResult (path/skill/findings/summary on the
+// scanner's native 4-rung scale, for the detail view) and adds the gate verdict
+// on the recorded scale so both representations are available to the UI.
+type scanRunResponse struct {
+	*security.ScanResult
+	Gate scanRunGate `json:"gate"`
+}
+
+// handleScanRun runs the scanner live against an installed skill's bytes and
+// returns the full ScanResult plus a gate verdict computed under the recorded
+// gate's policy (issue #140). This is the on-demand path; the recorded gate
+// decision still comes from handleScanSummary.
+func (s *uiServer) handleScanRun(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	sc, err := s.resolveScope(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	locks, err := loadScopedLocks(sc.projectRoot, sc.global, sc.all)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	entry, _, err := findEntryAcrossLocks(name, locks)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err)
+		return
+	}
+	dir := skill.EffectiveTarget(entry, sc.projectRoot)
+	if dir == "" {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("skill %q has no scannable directory (link install?)", name))
+		return
+	}
+	loaded, err := skill.LoadFromPath(dir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("load skill: %w", err))
+		return
+	}
+	scanner := security.New()
+	if p := security.LLMProviderFromEnv(); p != nil {
+		scanner = scanner.WithLLMProvider(p)
+	}
+	// Bound the live scan so a wedged check can't hang the request.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	result, err := scanner.Scan(ctx, loaded, dir)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Errorf("scan: %w", err))
+		return
+	}
+
+	// Apply the same threshold the install-time gate recorded into the lock
+	// (block_severity, default critical) so "live verdict" is the recorded
+	// verdict recomputed against the bytes on disk *now* — directly comparable.
+	threshold, perr := security.ParseSeverity(blockSeverityOrDefault(s.cfg))
+	if perr != nil {
+		threshold = security.SeverityCritical
+	}
+	decision := "allowed"
+	if exceedsThreshold(result, threshold) {
+		decision = "blocked"
+	}
+	writeJSON(w, http.StatusOK, scanRunResponse{
+		ScanResult: result,
+		Gate: scanRunGate{
+			Decision:  decision,
+			Threshold: string(threshold),
+			Counts:    severityCountsFromSummary(result.Summary),
+		},
+	})
+}
+
+// ---- static SPA serving ----------------------------------------------------
+
+func (s *uiServer) handleStatic(w http.ResponseWriter, r *http.Request) {
+	// Unmatched /api/* routes are real 404s, not SPA paths — keep them JSON so
+	// a typo in a fetch surfaces as an API error, not an HTML page.
+	if len(r.URL.Path) >= 5 && r.URL.Path[:5] == "/api/" {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("no such endpoint: %s", r.URL.Path))
+		return
+	}
+	if !ui.HasIndex() {
+		serveStub(w)
+		return
+	}
+	dist := ui.Dist()
+	name := path.Clean("/" + r.URL.Path)[1:] // strip leading slash, clean traversal
+	if name == "" {
+		name = "index.html"
+	}
+	// Missing files fall back to index.html so client-side routes (e.g.
+	// /sessions/<id>) resolve to the SPA instead of 404.
+	if st, err := fs.Stat(dist, name); err != nil || st.IsDir() {
+		name = "index.html"
+	}
+	http.ServeFileFS(w, r, dist, name)
+}
+
+// serveStub is shown when the React bundle hasn't been built. It tells the user
+// how to build it rather than rendering a blank page.
+func serveStub(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`<!doctype html>
+<html><head><meta charset="utf-8"><title>Quiver UI</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1rem;color:#1f2937}
+code{background:#f3f4f6;padding:.15rem .4rem;border-radius:.25rem}</style></head>
+<body><h1>Quiver dashboard not built</h1>
+<p>The API is live, but the React bundle hasn't been compiled into this binary yet.</p>
+<p>Build it with:</p>
+<pre><code>make ui &amp;&amp; make build</code></pre>
+<p>Then re-run <code>qvr ui</code>. The JSON API is already available under <code>/api/</code>.</p>
+</body></html>`))
+}
+
+// ---- small utils -----------------------------------------------------------
+
+func parsePositiveInt(s string) (int, error) {
+	const maxN = 100000
+	if s == "" {
+		return 0, fmt.Errorf("must be positive")
+	}
+	n := 0
+	for _, c := range s {
+		// Validate every character — never break early, or a trailing
+		// non-digit (e.g. "100000abc") would slip through unvalidated.
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("not a number: %q", s)
+		}
+		if n < maxN {
+			n = n*10 + int(c-'0')
+			if n > maxN {
+				n = maxN // clamp; keep scanning to validate the rest
+			}
+		}
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return n, nil
+}

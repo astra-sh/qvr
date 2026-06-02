@@ -2,22 +2,14 @@ package ops
 
 import "sort"
 
-// HookInstaller is the optional second capability an adapter can
-// implement: wiring Quiver into an agent's native hook mechanism (and
-// tearing it back out). It is deliberately kept separate from Adapter so
-// the hot parse path (Adapter.ParseEvent) carries no install/detect
-// machinery, and so install-free adapters like `generic` are unaffected.
-//
-// Adapters that target a real agent implement BOTH ops.Adapter (for the
-// `qvr _hook` funnel) and ops.HookInstaller (for `qvr audit install-hooks`)
-// on the same struct — Name() is shared. The install commands enumerate
-// installers via ListInstallers / GetInstaller, which type-assert over the
-// adapter registry, so an adapter that only implements Adapter is simply
-// skipped by the install tooling.
+// HookInstaller wires Quiver into an agent's native hook mechanism (and tears
+// it back out). It is the sole capability the registry tracks: in the raw-only
+// model capture is parser-free (the hook tails the transcript verbatim), so a
+// per-agent package only needs to know how to install/remove/detect its hooks.
+// The install commands enumerate installers via ListInstallers / GetInstaller.
 type HookInstaller interface {
-	// Name returns the same dispatch key as Adapter.Name() — the two
-	// must match so `qvr _hook <name>` and `qvr audit install-hooks
-	// --agent <name>` address the same adapter.
+	// Name returns the dispatch key — it must match the `qvr _hook <name>`
+	// argument and `qvr audit install-hooks --agent <name>`.
 	Name() string
 
 	// DisplayName is the human-facing label (e.g. "Claude Code").
@@ -85,35 +77,27 @@ type HookStatus struct {
 
 // GetInstaller returns the registered adapter for name if it also
 // implements HookInstaller. The bool is false when name is unregistered
-// or registered but install-incapable (e.g. the generic adapter).
 func GetInstaller(name string) (HookInstaller, bool) {
 	adapterMu.RLock()
 	defer adapterMu.RUnlock()
-	a, ok := adapters[name]
-	if !ok {
-		return nil, false
-	}
-	inst, ok := a.(HookInstaller)
-	return inst, ok
+	h, ok := installers[name]
+	return h, ok
 }
 
-// ListInstallers returns every registered adapter that implements
-// HookInstaller, sorted by name. Used by `qvr audit install-hooks` (no
-// --agent) and `qvr audit status` to enumerate installable agents.
+// ListInstallers returns every registered installer, sorted by name. Used by
+// `qvr audit install-hooks` (no --agent) and `qvr audit status` to enumerate
+// installable agents.
 func ListInstallers() []HookInstaller {
 	adapterMu.RLock()
 	defer adapterMu.RUnlock()
-	// Sort names first so output is deterministic.
-	names := make([]string, 0, len(adapters))
-	for name := range adapters {
+	names := make([]string, 0, len(installers))
+	for name := range installers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	out := make([]HookInstaller, 0, len(names))
 	for _, name := range names {
-		if inst, ok := adapters[name].(HookInstaller); ok {
-			out = append(out, inst)
-		}
+		out = append(out, installers[name])
 	}
 	return out
 }

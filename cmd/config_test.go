@@ -58,24 +58,20 @@ func TestConfigValidator_BlockSeverityErrorMessageListsScannerVocab(t *testing.T
 func TestConfigRead_OpsKeysSurface(t *testing.T) {
 	cfg := &config.Config{
 		Ops: config.OpsConfig{
-			Enabled:       true,
-			DBPath:        "/var/log/qvr.db",
-			RetentionDays: 30,
-			Logging:       config.OpsLoggingConfig{Level: "standard"},
+			Enabled: true,
+			DBPath:  "/var/log/qvr.db",
 		},
 	}
 	cases := map[string]string{
-		"ops.enabled":        "true",
-		"ops.db_path":        "/var/log/qvr.db",
-		"ops.retention_days": "30",
-		"ops.logging.level":  "standard",
+		"ops.enabled": "true",
+		"ops.db_path": "/var/log/qvr.db",
 	}
 	for k, want := range cases {
 		if got := configRead(cfg, k); got != want {
 			t.Errorf("configRead(%q) = %q, want %q", k, got, want)
 		}
 	}
-	for _, k := range []string{"ops.enabled", "ops.db_path", "ops.retention_days", "ops.logging.level"} {
+	for _, k := range []string{"ops.enabled", "ops.db_path"} {
 		var found bool
 		for _, kk := range knownConfigKeys {
 			if kk == k {

@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
 
+	"github.com/google/uuid"
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/ops"
 	"github.com/raks097/quiver/internal/ops/store"
@@ -13,27 +13,28 @@ import (
 )
 
 var (
-	exportSkill string
-	exportAgent string
-	exportSince string
-	exportOut   string
+	exportAgent   string
+	exportSession string
+	exportSource  string
+	exportOut     string
 )
 
 var auditExportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "Export recorded events as canonical JSONL",
-	Long: `Streams matching events as one canonical JSON object per line (the
-$schema-stamped Event format), to stdout or a file. Suitable for archival,
-external analysis, or 'ingest' into another Quiver store.`,
+	Short: "Export captured raw traces as JSONL",
+	Long: `Streams matching raw trace rows as one JSON object per line — the
+agent's own transcript lines and hook payloads, verbatim. Suitable for
+archival, external analysis, or replay. Use --source to restrict to transcript
+lines or hook payloads.`,
 	Args: cobra.NoArgs,
 	RunE: runAuditExport,
 }
 
 func init() {
 	f := auditExportCmd.Flags()
-	f.StringVar(&exportSkill, "skill", "", "filter by skill name")
 	f.StringVar(&exportAgent, "agent", "", "filter by agent name")
-	f.StringVar(&exportSince, "since", "", "only events since this time (e.g. 7d, 24h, or RFC3339)")
+	f.StringVar(&exportSession, "session", "", "filter by session id")
+	f.StringVar(&exportSource, "source", "", "filter by source (transcript | hook_payload)")
 	f.StringVarP(&exportOut, "out", "o", "", "write to this file instead of stdout")
 	auditCmd.AddCommand(auditExportCmd)
 }
@@ -44,12 +45,21 @@ func runAuditExport(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	filter, err := buildExportFilter()
-	if err != nil {
-		return err
+	filter := &store.RawTraceFilter{}
+	if exportAgent != "" {
+		filter.Agents = []string{exportAgent}
+	}
+	if exportSource != "" {
+		filter.Sources = []string{exportSource}
+	}
+	if exportSession != "" {
+		id, perr := uuid.Parse(exportSession)
+		if perr != nil {
+			return fmt.Errorf("invalid --session id %q: %w", exportSession, perr)
+		}
+		filter.SessionID = &id
 	}
 
-	// Destination writer.
 	var w *bufio.Writer
 	if exportOut != "" {
 		f, oErr := os.Create(exportOut)
@@ -61,12 +71,10 @@ func runAuditExport(cmd *cobra.Command, args []string) error {
 	} else {
 		w = bufio.NewWriter(os.Stdout)
 	}
-	defer w.Flush()
 
 	if !auditDBExists(cfg) {
-		// Nothing to export — succeed with zero output.
 		if exportOut != "" {
-			printer.Info("no events to export")
+			printer.Info("no traces to export")
 		}
 		return nil
 	}
@@ -78,13 +86,10 @@ func runAuditExport(cmd *cobra.Command, args []string) error {
 	defer s.Close()
 
 	count := 0
-	err = s.StreamEvents(cmd.Context(), filter, func(e *ops.Event) error {
-		// Event.MarshalJSON emits the $schema-stamped canonical shape.
-		data, mErr := json.Marshal(e)
-		if mErr != nil {
-			return mErr
-		}
-		if _, wErr := w.Write(data); wErr != nil {
+	err = s.StreamRawTraces(cmd.Context(), filter, func(r *ops.RawTrace) error {
+		// Emit the verbatim native bytes (valid JSON for transcript lines and
+		// hook payloads), one per line.
+		if _, wErr := w.Write(r.Raw); wErr != nil {
 			return wErr
 		}
 		if _, wErr := w.WriteString("\n"); wErr != nil {
@@ -94,29 +99,17 @@ func runAuditExport(cmd *cobra.Command, args []string) error {
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("export events: %w", err)
+		return fmt.Errorf("export traces: %w", err)
+	}
+
+	// Surface any buffered-write error rather than dropping it on a deferred
+	// flush — a truncated export must not report success.
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("flush export: %w", err)
 	}
 
 	if exportOut != "" {
-		printer.Success(fmt.Sprintf("exported %d events to %s", count, exportOut))
+		printer.Success(fmt.Sprintf("exported %d traces to %s", count, exportOut))
 	}
 	return nil
-}
-
-func buildExportFilter() (*store.EventFilter, error) {
-	f := &store.EventFilter{}
-	if exportSkill != "" {
-		f.Skills = []string{exportSkill}
-	}
-	if exportAgent != "" {
-		f.Agents = []string{exportAgent}
-	}
-	if exportSince != "" {
-		t, err := parseTimeFlag(exportSince)
-		if err != nil {
-			return nil, fmt.Errorf("invalid --since: %w", err)
-		}
-		f.Since = &t
-	}
-	return f, nil
 }

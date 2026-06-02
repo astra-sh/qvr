@@ -1,62 +1,32 @@
 package ops
 
-import (
-	"fmt"
-	"sort"
-	"sync"
-)
+import "sync"
 
-// adapterRegistry is the process-wide map of registered adapters.
-// Guarded by a mutex so init() registration and runtime lookup are
-// safe across goroutines (tests sometimes Register/Unregister during
-// setup).
+// installers is the process-wide map of registered hook installers, keyed by
+// agent name. In the raw-only model the registry's sole purpose is hook
+// installation (`qvr audit install-hooks`) and status — capture no longer
+// parses, so there is no per-agent parser to register. Guarded by a mutex so
+// init() registration and runtime lookup are safe across goroutines.
 var (
-	adapterMu sync.RWMutex
-	adapters  = map[string]Adapter{}
+	adapterMu  sync.RWMutex
+	installers = map[string]HookInstaller{}
 )
 
-// Register adds an adapter to the registry. If an adapter with the
-// same Name already exists, it is replaced — this keeps test fixtures
-// simple (register a fake, run, restore). Callers typically register
-// from an init() function in the adapter's own subpackage.
-func Register(a Adapter) {
-	if a == nil {
+// Register adds a hook installer to the registry. If one with the same Name
+// already exists it is replaced — keeps test fixtures simple. Per-agent
+// packages call this from an init() function.
+func Register(h HookInstaller) {
+	if h == nil {
 		return
 	}
 	adapterMu.Lock()
 	defer adapterMu.Unlock()
-	adapters[a.Name()] = a
+	installers[h.Name()] = h
 }
 
-// Unregister removes an adapter by name. Primarily for test cleanup.
+// Unregister removes an installer by name. Primarily for test cleanup.
 func Unregister(name string) {
 	adapterMu.Lock()
 	defer adapterMu.Unlock()
-	delete(adapters, name)
-}
-
-// GetAdapter returns the adapter registered under name, or (nil,
-// ErrUnknownAdapter) if none. The funnel wraps the error into a
-// self_audit entry.
-func GetAdapter(name string) (Adapter, error) {
-	adapterMu.RLock()
-	defer adapterMu.RUnlock()
-	a, ok := adapters[name]
-	if !ok {
-		return nil, fmt.Errorf("%w: %q", ErrUnknownAdapter, name)
-	}
-	return a, nil
-}
-
-// ListAdapters returns the currently-registered adapter names in
-// sorted order. Used by `qvr ops doctor` and similar diagnostics.
-func ListAdapters() []string {
-	adapterMu.RLock()
-	defer adapterMu.RUnlock()
-	out := make([]string, 0, len(adapters))
-	for name := range adapters {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
+	delete(installers, name)
 }

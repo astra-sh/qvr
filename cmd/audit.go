@@ -11,8 +11,8 @@ import (
 	"github.com/raks097/quiver/internal/ops/store"
 	"github.com/spf13/cobra"
 
-	// Side-effect imports: register the per-agent adapters so both the
-	// `qvr _hook` funnel and the install/status tooling can see them.
+	// Side-effect imports: register the per-agent hook installers so the
+	// install/status tooling can see them.
 	_ "github.com/raks097/quiver/internal/ops/claudecode"
 	_ "github.com/raks097/quiver/internal/ops/codex"
 	_ "github.com/raks097/quiver/internal/ops/copilot"
@@ -50,12 +50,12 @@ func auditDBExists(cfg *config.Config) bool {
 	return err == nil && !info.IsDir()
 }
 
-// renderEmptyEvents prints the no-events result in the active format.
+// renderEmptyEvents prints the no-results result in the active format.
 func renderEmptyEvents() error {
 	if outputFormat == "json" {
-		return printer.JSON([]*ops.Event{})
+		return printer.JSON([]any{})
 	}
-	printer.Info("no events recorded yet")
+	printer.Info("nothing recorded yet")
 	return nil
 }
 

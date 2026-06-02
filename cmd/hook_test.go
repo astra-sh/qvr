@@ -7,88 +7,78 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/raks097/quiver/internal/config"
-	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/ops"
 	"github.com/raks097/quiver/internal/ops/store"
-	"github.com/raks097/quiver/internal/registry"
 )
 
-// isolatedHome returns a fresh $QUIVER_HOME for a test. Sets up:
-//   - QUIVER_HOME env var
-//   - config.yaml with ops.enabled=true (or false when dis=true)
-//   - qvr.lock.json with a "foo" skill entry rooted at a real dir
-//
-// Returns the skill's worktree dir (for crafting event paths) plus a
-// function to read back events from the SQLite store.
-func isolatedHome(t *testing.T, opsEnabled bool) (worktree string, readEvents func() []*ops.Event) {
+// isolatedHome returns a fresh $QUIVER_HOME with config (ops.enabled per the
+// flag) plus a reader over the captured raw_traces.
+func isolatedHome(t *testing.T, opsEnabled bool) (home string, readRaw func() []*ops.RawTrace) {
 	t.Helper()
-	home := t.TempDir()
+	home = t.TempDir()
 	t.Setenv("QUIVER_HOME", home)
 
-	reg, name, commit := "team", "foo", "abc1234"
-	worktree = registry.WorktreePath(reg, name, registry.ShortSHA(commit))
-	if err := os.MkdirAll(worktree, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write lockfile with one entry whose derived worktree (v5: via
-	// EntryWorktreePath, keyed by registry/name/ShortSHA(commit)) lines up
-	// with the dir we just created. The hook resolver uses the same
-	// derivation, so events under this path attribute to "foo".
-	lf := &model.LockFile{
-		Version: model.LockFileVersion,
-		Skills: map[string]*model.LockEntry{
-			"foo": {
-				Name:        name,
-				Registry:    reg,
-				Source:      "git@example.test:" + reg + ".git",
-				Ref:         "main",
-				Commit:      commit,
-				InstalledAt: time.Now(),
-			},
-		},
-	}
-	buf, _ := json.Marshal(lf)
-	if err := os.WriteFile(filepath.Join(home, model.LockFileName), buf, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write config.
 	cfg := &config.Config{}
 	cfg.Ops.Enabled = opsEnabled
-	cfgBuf, _ := os.ReadFile(config.Path())
-	_ = cfgBuf
 	if err := config.Save(cfg); err != nil {
 		t.Fatal(err)
 	}
 
-	readEvents = func() []*ops.Event {
+	readRaw = func() []*ops.RawTrace {
 		s, err := store.Open(context.Background(), store.OpenOptions{Path: ops.DBPath(cfg)})
 		if err != nil {
 			t.Fatalf("open store: %v", err)
 		}
 		defer s.Close()
-		events, err := s.QueryEvents(context.Background(), &store.EventFilter{})
+		rows, err := s.QueryRawTraces(context.Background(), &store.RawTraceFilter{})
 		if err != nil {
 			t.Fatalf("query: %v", err)
 		}
-		return events
+		return rows
 	}
-
-	return worktree, readEvents
+	return home, readRaw
 }
 
-// runHookCmd invokes `qvr _hook <agent> <hookType>` with stdin. It
-// drives the Cobra command directly so tests don't shell out.
+// writeTranscript drops a Claude-style transcript JSONL and returns its path +
+// session id.
+func writeTranscript(t *testing.T, dir string) (path, sessionID string) {
+	t.Helper()
+	sessionID = "550e8400-e29b-41d4-a716-446655440000"
+	path = filepath.Join(dir, "session.jsonl")
+	lines := []string{
+		`{"type":"user","timestamp":"2026-06-02T00:00:00.000Z","message":{"role":"user","content":"do the thing"}}`,
+		`{"type":"assistant","timestamp":"2026-06-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"text","text":"done"}]}}`,
+	}
+	if err := os.WriteFile(path, []byte(joinLines(lines)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path, sessionID
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
+}
+
+func payloadFor(sessionID, transcript string) []byte {
+	b, _ := json.Marshal(map[string]string{
+		"session_id":      sessionID,
+		"transcript_path": transcript,
+		"cwd":             "/tmp/proj",
+		"hook_event_name": "Stop",
+	})
+	return b
+}
+
+// runHookCmd invokes `qvr _hook <agent> <hookType>` with stdin via Cobra.
 func runHookCmd(t *testing.T, stdin []byte, args ...string) (string, string, error) {
 	t.Helper()
-	// Cobra holds global state; reset the command tree for every call.
 	var stdout, stderr bytes.Buffer
 	rootCmd.SetOut(&stdout)
 	rootCmd.SetErr(&stderr)
@@ -103,276 +93,82 @@ func runHookCmd(t *testing.T, stdin []byte, args ...string) (string, string, err
 	return stdout.String(), stderr.String(), err
 }
 
-// --- Tests ---
-
 func TestHook_DisabledOps_NoOp(t *testing.T) {
-	worktree, readEvents := isolatedHome(t, false)
-	event := map[string]any{
-		"agent_name":       "claude",
-		"agent_session_id": "s",
-		"action_type":      "file_read",
-		"payload":          map[string]any{"path": filepath.Join(worktree, "SKILL.md")},
-	}
-	raw, _ := json.Marshal(event)
-	_, _, err := runHookCmd(t, raw, "generic", "PostToolUse")
+	home, _ := isolatedHome(t, false)
+	transcript, sid := writeTranscript(t, t.TempDir())
+	_, _, err := runHookCmd(t, payloadFor(sid, transcript), "claude-code", "Stop")
 	if err != nil {
 		t.Errorf("disabled hook should be silent no-op; got err %v", err)
 	}
-	// No DB created.
-	home := os.Getenv("QUIVER_HOME")
 	if _, err := os.Stat(filepath.Join(home, "skillops.db")); !os.IsNotExist(err) {
-		t.Errorf("DB should not be created when ops disabled; got err %v", err)
-	}
-	_ = readEvents // would fail if we called it — no DB
-}
-
-func TestHook_Happy_PersistsEvent(t *testing.T) {
-	worktree, readEvents := isolatedHome(t, true)
-	event := map[string]any{
-		"agent_name":       "claude",
-		"agent_session_id": "sess-abc",
-		"action_type":      "file_read",
-		"payload":          map[string]any{"path": filepath.Join(worktree, "SKILL.md")},
-	}
-	raw, _ := json.Marshal(event)
-	stdout, stderr, err := runHookCmd(t, raw, "generic", "PostToolUse")
-	if err != nil {
-		t.Fatalf("hook: err=%v stdout=%q stderr=%q", err, stdout, stderr)
-	}
-
-	events := readEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event; got %d", len(events))
-	}
-	e := events[0]
-	if e.SkillName != "foo" {
-		t.Errorf("SkillName=%q want foo", e.SkillName)
-	}
-	if e.AgentName != "claude" {
-		t.Errorf("AgentName=%q want claude", e.AgentName)
-	}
-	if e.ActionType != ops.ActionFileRead {
-		t.Errorf("ActionType=%q want file_read", e.ActionType)
+		t.Errorf("DB should not be created when ops disabled; got %v", err)
 	}
 }
 
-func TestHook_UnknownAgent_DropsNotErrors(t *testing.T) {
-	worktree, _ := isolatedHome(t, true)
-	raw, _ := json.Marshal(map[string]any{
-		"agent_name":       "nobody",
-		"agent_session_id": "s",
-		"action_type":      "file_read",
-		"payload":          map[string]any{"path": filepath.Join(worktree, "x")},
-	})
-	_, stderr, err := runHookCmd(t, raw, "unknown-adapter", "PostToolUse")
-	// Hook pipeline must not fail the caller; it only emits to stderr.
-	if err != nil {
-		t.Errorf("expected nil error for unknown adapter; got %v", err)
-	}
-	if !strings.Contains(stderr, "unknown") {
-		t.Errorf("expected stderr to mention unknown; got %q", stderr)
-	}
-}
+func TestHook_Happy_CapturesRawAndDerivesSpans(t *testing.T) {
+	_, readRaw := isolatedHome(t, true)
+	transcript, sid := writeTranscript(t, t.TempDir())
 
-func TestHook_InvalidJSON_RecordsHookError(t *testing.T) {
-	_, readEvents := isolatedHome(t, true)
-	_, _, err := runHookCmd(t, []byte("not json"), "generic", "PostToolUse")
+	_, stderr, err := runHookCmd(t, payloadFor(sid, transcript), "claude-code", "Stop")
 	if err != nil {
-		t.Errorf("expected nil error on bad JSON; got %v", err)
+		t.Fatalf("hook: err=%v stderr=%q", err, stderr)
 	}
-	// No event should be recorded, but a self_audit row should exist.
-	if got := readEvents(); len(got) != 0 {
-		t.Errorf("expected 0 events; got %d", len(got))
+
+	rows := readRaw()
+	// 2 transcript lines + 1 hook payload.
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 raw rows; got %d", len(rows))
 	}
-	// Open store directly to check self_audits via stats.
-	s, err := store.Open(context.Background(), store.OpenOptions{Path: filepath.Join(os.Getenv("QUIVER_HOME"), "skillops.db")})
-	if err != nil {
-		t.Fatal(err)
+	var transcripts, hooks int
+	for _, r := range rows {
+		switch r.Source {
+		case ops.RawSourceTranscript:
+			transcripts++
+		case ops.RawSourceHookPayload:
+			hooks++
+		}
+		if r.AgentName != "claude-code" {
+			t.Errorf("AgentName=%q want claude-code", r.AgentName)
+		}
 	}
+	if transcripts != 2 || hooks != 1 {
+		t.Errorf("want 2 transcript + 1 hook row; got %d + %d", transcripts, hooks)
+	}
+
+	// Spans were derived and persisted alongside raw.
+	s, _ := store.Open(context.Background(), store.OpenOptions{Path: ops.DBPath(loadCfg(t))})
 	defer s.Close()
-	stats, _ := s.Stats(context.Background())
-	if stats.SelfAuditCount != 1 {
-		t.Errorf("expected 1 self_audit row; got %d", stats.SelfAuditCount)
+	spans, err := s.QuerySpans(context.Background(), &store.SpanFilter{})
+	if err != nil {
+		t.Fatalf("query spans: %v", err)
+	}
+	if len(spans) == 0 {
+		t.Error("expected derived spans to be persisted")
 	}
 }
 
-func TestHook_UnattributedPath_RecordsPending(t *testing.T) {
-	_, readEvents := isolatedHome(t, true)
-	raw, _ := json.Marshal(map[string]any{
-		"agent_name":       "claude",
-		"agent_session_id": "s",
-		"action_type":      "file_read",
-		"payload":          map[string]any{"path": "/entirely/unrelated/path.md"},
-	})
-	if _, _, err := runHookCmd(t, raw, "generic", "PostToolUse"); err != nil {
-		t.Errorf("unexpected err: %v", err)
-	}
-	// The event is no longer dropped — it is recorded provisionally under
-	// the pending sentinel until its session references a skill (or is
-	// pruned at session end).
-	got := readEvents()
-	if len(got) != 1 {
-		t.Fatalf("expected 1 provisional event; got %d", len(got))
-	}
-	if got[0].SkillName != ops.SkillPending {
-		t.Errorf("SkillName=%q want %q", got[0].SkillName, ops.SkillPending)
-	}
-}
-
-// Empty stdin must never fail the agent's hook pipeline, but it must also
-// never be a silent no-op. For the generic adapter (strict canonical JSON)
-// an empty payload can't be turned into a real event, so we surface it as a
-// visible self_audit row plus a stderr diagnostic — not a silent drop.
 func TestHook_EmptyStdin_NotSilent(t *testing.T) {
-	_, readEvents := isolatedHome(t, true)
-	_, stderr, err := runHookCmd(t, []byte(""), "generic", "PostToolUse")
+	_, _ = isolatedHome(t, true)
+	_, stderr, err := runHookCmd(t, nil, "codex", "PreToolUse")
 	if err != nil {
-		t.Errorf("expected nil error for empty stdin; got %v", err)
+		t.Fatalf("hook: %v", err)
 	}
-	if !strings.Contains(stderr, "empty stdin") {
-		t.Errorf("expected stderr to flag empty stdin; got %q", stderr)
-	}
-	// Generic can't synthesise an event from nothing, so no event is stored —
-	// but the drop is now recorded in self_audit instead of vanishing.
-	if got := readEvents(); len(got) != 0 {
-		t.Errorf("expected 0 events for empty stdin (generic); got %d", len(got))
-	}
-	s, err := store.Open(context.Background(), store.OpenOptions{Path: filepath.Join(os.Getenv("QUIVER_HOME"), "skillops.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	stats, _ := s.Stats(context.Background())
-	if stats.SelfAuditCount != 1 {
-		t.Errorf("expected 1 self_audit row recording the empty-payload drop; got %d", stats.SelfAuditCount)
-	}
-}
-
-// Codex CLI in `codex exec` mode fires its hooks but does not pipe the JSON
-// payload to stdin, so qvr is invoked for a genuine event with empty stdin.
-// The codex adapter must still record a minimal event (keyed off the hook
-// type on argv) rather than dropping the trail — otherwise audit is a
-// complete no-op for Codex while every surface reports the hook VALID.
-func TestHook_EmptyStdin_Codex_RecordsMinimalEvent(t *testing.T) {
-	_, readEvents := isolatedHome(t, true)
-	_, stderr, err := runHookCmd(t, []byte(""), "codex", "PostToolUse")
-	if err != nil {
-		t.Fatalf("expected nil error for empty codex stdin; got %v", err)
-	}
-	if !strings.Contains(stderr, "empty stdin") {
-		t.Errorf("expected stderr to flag empty stdin; got %q", stderr)
-	}
-	got := readEvents()
-	if len(got) != 1 {
-		t.Fatalf("expected 1 provisional event from empty codex stdin; got %d", len(got))
-	}
-	if got[0].AgentName != "codex" {
-		t.Errorf("AgentName=%q want codex", got[0].AgentName)
-	}
-	if got[0].SkillName != ops.SkillPending {
-		t.Errorf("SkillName=%q want %q", got[0].SkillName, ops.SkillPending)
+	if !bytes.Contains([]byte(stderr), []byte("empty stdin")) {
+		t.Errorf("empty stdin should warn on stderr; got %q", stderr)
 	}
 }
 
 func TestHook_HookCommandIsHidden(t *testing.T) {
-	var found bool
-	for _, c := range rootCmd.Commands() {
-		if c.Use == "_hook <agent> <hook_type>" {
-			found = true
-			if !c.Hidden {
-				t.Errorf("_hook command should be Hidden")
-			}
-		}
-	}
-	if !found {
-		t.Errorf("_hook command not registered")
+	if !hookCmd.Hidden {
+		t.Error("_hook command should be hidden")
 	}
 }
 
-func TestHook_SensitivePathStripsContent_EndToEnd(t *testing.T) {
-	worktree, readEvents := isolatedHome(t, true)
-	envPath := filepath.Join(worktree, ".env")
-	raw, _ := json.Marshal(map[string]any{
-		"agent_name":       "claude",
-		"agent_session_id": "s",
-		"action_type":      "file_write",
-		"diff_content":     "AWS_SECRET_ACCESS_KEY=realsecret",
-		"payload": map[string]any{
-			"path":       envPath,
-			"new_string": "AWS_SECRET_ACCESS_KEY=realsecret",
-		},
-	})
-	if _, _, err := runHookCmd(t, raw, "generic", "PostToolUse"); err != nil {
-		t.Fatal(err)
-	}
-	events := readEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event; got %d", len(events))
-	}
-	e := events[0]
-	if !e.IsSensitive {
-		t.Errorf("expected IsSensitive=true")
-	}
-	if strings.Contains(string(e.Payload), "realsecret") {
-		t.Errorf("secret survived: %s", e.Payload)
-	}
-	if e.DiffContent != "" {
-		t.Errorf("expected DiffContent stripped; got %q", e.DiffContent)
-	}
-}
-
-// --- Adapter bridge smoke ---
-
-func TestStoreSessionAdapter_BridgesAllMethods(t *testing.T) {
-	// Bridge compiles and all four methods pass through.
-	home := t.TempDir()
-	s, err := store.Open(context.Background(), store.OpenOptions{Path: filepath.Join(home, "x.db")})
+func loadCfg(t *testing.T) *config.Config {
+	t.Helper()
+	cfg, err := config.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	a := storeSessionAdapter{s}
-
-	sess := ops.NewSession("claude", "sess", time.Now())
-	if err := a.UpsertSession(context.Background(), sess); err != nil {
-		t.Fatal(err)
-	}
-	if got, err := a.GetSession(context.Background(), sess.ID); err != nil {
-		t.Fatal(err)
-	} else if got == nil {
-		t.Errorf("session not found")
-	}
-	e := &ops.Event{
-		ID:           uuid.New(),
-		SessionID:    sess.ID,
-		AgentName:    "claude",
-		SkillName:    "foo",
-		ActionType:   ops.ActionFileRead,
-		ResultStatus: ops.ResultSuccess,
-		Timestamp:    time.Now(),
-	}
-	if err := a.SaveEvent(context.Background(), e); err != nil {
-		t.Fatal(err)
-	}
-	err = a.AppendSelfAudit(context.Background(), &ops.SelfAuditEntry{
-		Action:   ops.SelfAuditHookError,
-		Result:   ops.SelfAuditResultError,
-		ErrorMsg: "test",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestStoreSessionAdapter_NilSelfAuditRejected(t *testing.T) {
-	home := t.TempDir()
-	s, err := store.Open(context.Background(), store.OpenOptions{Path: filepath.Join(home, "x.db")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	a := storeSessionAdapter{s}
-	if err := a.AppendSelfAudit(context.Background(), nil); err == nil {
-		t.Errorf("expected rejection")
-	}
+	return cfg
 }

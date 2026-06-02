@@ -8,14 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/raks097/quiver/internal/ops"
 )
 
-// runRoot drives the root command with the given args, capturing stdout.
-// The output.Printer writes to os.Stdout directly (not cmd.OutOrStdout), so
-// we swap os.Stdout/os.Stderr for pipes and drain them concurrently to
-// avoid blocking on a full pipe buffer.
+// runRoot drives the root command, capturing stdout/stderr. The output.Printer
+// writes to os.Stdout directly, so we swap it for a pipe and drain it.
 func runRoot(t *testing.T, stdin []byte, args ...string) (string, string, error) {
 	t.Helper()
 	rOut, wOut, _ := os.Pipe()
@@ -45,103 +41,67 @@ func runRoot(t *testing.T, stdin []byte, args ...string) (string, string, error)
 	return stdout, stderr, err
 }
 
-// TestAudit_ClaudeCodeEventAttributed feeds a real Claude Code PostToolUse
-// hook through the funnel and asserts the stored event is attributed to the
-// installed skill, with agent_name=claude-code.
-func TestAudit_ClaudeCodeEventAttributed(t *testing.T) {
-	worktree, readEvents := isolatedHome(t, true)
-
-	raw, _ := json.Marshal(map[string]any{
-		"session_id": "sess-xyz",
-		"cwd":        worktree,
-		"tool_name":  "Write",
-		"tool_input": map[string]any{
-			"file_path": filepath.Join(worktree, "SKILL.md"),
-			"content":   "hello world",
-		},
-		"tool_response": map[string]any{"success": true},
-	})
-
-	stdout, stderr, err := runHookCmd(t, raw, "claude-code", "PostToolUse")
-	if err != nil {
-		t.Fatalf("hook: err=%v stdout=%q stderr=%q", err, stdout, stderr)
-	}
-
-	events := readEvents()
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event; got %d", len(events))
-	}
-	e := events[0]
-	if e.AgentName != "claude-code" {
-		t.Errorf("AgentName=%q want claude-code", e.AgentName)
-	}
-	if e.SkillName != "foo" {
-		t.Errorf("SkillName=%q want foo", e.SkillName)
-	}
-	if e.ActionType != ops.ActionFileWrite {
-		t.Errorf("ActionType=%q want file_write", e.ActionType)
-	}
-	if e.ToolName != "Write" {
-		t.Errorf("ToolName=%q want Write", e.ToolName)
-	}
-}
-
-// TestAudit_LogsCommand feeds an event then queries it back through the
-// `qvr audit logs` command in JSON mode.
-func TestAudit_LogsCommand(t *testing.T) {
-	worktree, _ := isolatedHome(t, true)
-
-	raw, _ := json.Marshal(map[string]any{
-		"session_id": "sess-logs",
-		"cwd":        worktree,
-		"tool_name":  "Read",
-		"tool_input": map[string]any{"file_path": filepath.Join(worktree, "SKILL.md")},
-	})
-	if _, _, err := runHookCmd(t, raw, "claude-code", "PostToolUse"); err != nil {
+// captureSession runs a hook against a fresh transcript and returns the
+// canonical session id.
+func captureSession(t *testing.T) string {
+	t.Helper()
+	transcript, sid := writeTranscript(t, t.TempDir())
+	if _, _, err := runHookCmd(t, payloadFor(sid, transcript), "claude-code", "Stop"); err != nil {
 		t.Fatalf("hook: %v", err)
 	}
+	return sid
+}
 
-	stdout, stderr, err := runRoot(t, nil, "audit", "logs", "--output", "json")
-	if err != nil {
-		t.Fatalf("audit logs: err=%v stderr=%q", err, stderr)
-	}
-	var events []*ops.Event
-	if err := json.Unmarshal([]byte(stdout), &events); err != nil {
-		t.Fatalf("parse logs json: %v\n%s", err, stdout)
-	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event from logs; got %d", len(events))
-	}
-	if events[0].SkillName != "foo" || events[0].AgentName != "claude-code" {
-		t.Errorf("unexpected event: skill=%q agent=%q", events[0].SkillName, events[0].AgentName)
-	}
+// TestAudit_RawCommand asserts `qvr audit raw` returns the verbatim native
+// lines that were captured.
+func TestAudit_RawCommand(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	captureSession(t)
 
-	// Filtering by a different skill yields nothing.
-	stdout2, _, err := runRoot(t, nil, "audit", "logs", "--skill", "nonexistent", "--output", "json")
+	stdout, stderr, err := runRoot(t, nil, "audit", "raw", "--source", "transcript", "--output", "json")
 	if err != nil {
-		t.Fatalf("audit logs filtered: %v", err)
+		t.Fatalf("audit raw: err=%v stderr=%q", err, stderr)
 	}
-	if strings.TrimSpace(stdout2) != "[]" && strings.TrimSpace(stdout2) != "null" {
-		t.Errorf("expected empty result for unknown skill; got %s", stdout2)
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(stdout), &rows); err != nil {
+		t.Fatalf("parse raw json: %v\n%s", err, stdout)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 transcript rows; got %d", len(rows))
+	}
+	if rows[0]["agent_name"] != "claude-code" {
+		t.Errorf("agent_name=%v want claude-code", rows[0]["agent_name"])
+	}
+	// The stored raw is emitted inline as native JSON (a "type" field present).
+	if raw, ok := rows[0]["raw"].(map[string]any); !ok || raw["type"] != "user" {
+		t.Errorf("raw line not verbatim native JSON: %v", rows[0]["raw"])
 	}
 }
 
-// TestAudit_SessionsAndExport feeds an event, then exercises the sessions
-// and export read commands.
+// TestAudit_SpansCommand derives spans for the captured session.
+func TestAudit_SpansCommand(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	sid := captureSession(t)
+
+	stdout, stderr, err := runRoot(t, nil, "audit", "spans", "--session", sid, "--output", "json")
+	if err != nil {
+		t.Fatalf("audit spans: err=%v stderr=%q", err, stderr)
+	}
+	// The captured fixture has an assistant turn, so an LLM span must be
+	// derived: require BOTH the Kind field and the LLM kind value, not either.
+	if !strings.Contains(stdout, `"Kind"`) {
+		t.Errorf("spans output missing Kind field: %s", stdout)
+	}
+	if !strings.Contains(stdout, "LLM") {
+		t.Errorf("spans output missing derived LLM span: %s", stdout)
+	}
+}
+
+// TestAudit_SessionsAndExport exercises the sessions list and raw export.
 func TestAudit_SessionsAndExport(t *testing.T) {
-	worktree, _ := isolatedHome(t, true)
+	_, _ = isolatedHome(t, true)
+	captureSession(t)
 
-	raw, _ := json.Marshal(map[string]any{
-		"session_id": "sess-se",
-		"cwd":        worktree,
-		"tool_name":  "Write",
-		"tool_input": map[string]any{"file_path": filepath.Join(worktree, "SKILL.md"), "content": "x"},
-	})
-	if _, _, err := runHookCmd(t, raw, "claude-code", "PostToolUse"); err != nil {
-		t.Fatalf("hook: %v", err)
-	}
-
-	// sessions (json)
 	stdout, _, err := runRoot(t, nil, "audit", "sessions", "--output", "json")
 	if err != nil {
 		t.Fatalf("audit sessions: %v", err)
@@ -150,9 +110,8 @@ func TestAudit_SessionsAndExport(t *testing.T) {
 		t.Errorf("sessions output missing agent: %s", stdout)
 	}
 
-	// export to a file
 	out := filepath.Join(t.TempDir(), "trail.jsonl")
-	if _, _, err := runRoot(t, nil, "audit", "export", "-o", out); err != nil {
+	if _, _, err := runRoot(t, nil, "audit", "export", "--source", "transcript", "-o", out); err != nil {
 		t.Fatalf("audit export: %v", err)
 	}
 	data, err := os.ReadFile(out)
@@ -160,29 +119,40 @@ func TestAudit_SessionsAndExport(t *testing.T) {
 		t.Fatalf("read export: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 exported line; got %d", len(lines))
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 exported transcript lines; got %d", len(lines))
 	}
-	var ev map[string]any
-	if err := json.Unmarshal([]byte(lines[0]), &ev); err != nil {
+	// Each exported line is the verbatim native JSON.
+	var ln map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &ln); err != nil {
 		t.Fatalf("export line not JSON: %v", err)
 	}
-	if ev["$schema"] == nil {
-		t.Error("exported event missing $schema")
-	}
-	if ev["skill_name"] != "foo" {
-		t.Errorf("exported skill_name=%v want foo", ev["skill_name"])
+	if ln["type"] == nil {
+		t.Error("exported line missing native 'type' field")
 	}
 }
 
-// TestAudit_StatusRuns verifies the status command runs and lists agents.
+// TestAudit_LogsCommand queries the derived span feed.
+func TestAudit_LogsCommand(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	captureSession(t)
+
+	stdout, stderr, err := runRoot(t, nil, "audit", "logs", "--output", "json")
+	if err != nil {
+		t.Fatalf("audit logs: err=%v stderr=%q", err, stderr)
+	}
+	if !strings.Contains(stdout, "claude-code") {
+		t.Errorf("logs missing agent: %s", stdout)
+	}
+}
+
+// TestAudit_StatusRuns verifies the status command lists every adapter.
 func TestAudit_StatusRuns(t *testing.T) {
 	_, _ = isolatedHome(t, true)
 	stdout, _, err := runRoot(t, nil, "audit", "status", "--output", "json")
 	if err != nil {
 		t.Fatalf("audit status: %v", err)
 	}
-	// All five adapters should appear.
 	for _, agent := range []string{"claude-code", "cursor", "codex", "opencode", "copilot"} {
 		if !strings.Contains(stdout, agent) {
 			t.Errorf("status missing agent %q in: %s", agent, stdout)
@@ -197,13 +167,9 @@ func TestAudit_EnableDisable(t *testing.T) {
 	if _, _, err := runRoot(t, nil, "audit", "enable"); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	stdout, _, err := runRoot(t, nil, "audit", "logs", "--output", "json")
-	if err != nil {
+	if _, _, err := runRoot(t, nil, "audit", "logs", "--output", "json"); err != nil {
 		t.Fatalf("logs after enable: %v", err)
 	}
-	// Empty DB → empty/null result, but the command must succeed.
-	_ = stdout
-
 	if _, _, err := runRoot(t, nil, "audit", "disable"); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
