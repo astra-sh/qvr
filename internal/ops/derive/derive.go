@@ -13,7 +13,12 @@ import (
 // deriver can be told apart and re-derived for parity comparison.
 //
 // v2: OpenTelemetry gen_ai.* semantic conventions (was OpenInference in v1).
-const Version = 2
+// v3: skill.* identity (registry/version/commit/source/subtree_hash/canonical)
+// resolved from qvr.lock via EnrichSkillIdentity (#146).
+// v4: load-path-aware attribution — codex spans carry skill.load_path, and
+// EnrichSkillIdentity asserts lock identity only when the loaded path proves it
+// (stamping skill.verified); unprovable identity is withheld or flagged (#149).
+const Version = 4
 
 // KindSkill is the Quiver span category for a skill load/invocation within a
 // turn. It exists so the trace makes skill usage a first-class, queryable stage

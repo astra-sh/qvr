@@ -10,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/ops"
+	"github.com/raks097/quiver/internal/ops/derive"
 	"github.com/raks097/quiver/internal/ops/store"
 	"github.com/raks097/quiver/internal/registry"
 	"github.com/raks097/quiver/internal/security"
@@ -82,6 +84,7 @@ func (s *uiServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	mux.HandleFunc("GET /api/registries", s.handleRegistries)
+	mux.HandleFunc("GET /api/registries/{name}/skills", s.handleRegistrySkills)
 	mux.HandleFunc("GET /api/projects", s.handleProjects)
 	mux.HandleFunc("GET /api/overview", s.handleOverview)
 	mux.HandleFunc("GET /api/sessions", s.handleSessions)
@@ -251,6 +254,124 @@ func (s *uiServer) handleRegistries(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, regs)
 }
 
+// registryVersion is one installable ref (branch or tag) of a registry repo,
+// resolved to its commit with a timestamp so the dashboard can render a version
+// timeline. Current marks the repo's default branch.
+type registryVersion struct {
+	Ref     string    `json:"ref"`
+	IsTag   bool      `json:"isTag"`
+	SHA     string    `json:"sha"`
+	Time    time.Time `json:"time"`
+	Subject string    `json:"subject,omitempty"`
+	Current bool      `json:"current,omitempty"`
+}
+
+// registrySkillRow is one skill discovered in a registry, annotated with whether
+// (and at what ref/commit) it is installed in the active scope so the UI can
+// highlight the in-use version inside the shared version tree.
+type registrySkillRow struct {
+	Name            string `json:"name"`
+	Description     string `json:"description,omitempty"`
+	Path            string `json:"path,omitempty"`
+	Installed       bool   `json:"installed"`
+	InstalledRef    string `json:"installedRef,omitempty"`
+	InstalledCommit string `json:"installedCommit,omitempty"`
+}
+
+// registrySkillsResponse is the payload for the registry detail page: the
+// registry's metadata, its full branch/tag version timeline (repo-level, shared
+// by every skill in the repo), and the skills it offers with install status.
+type registrySkillsResponse struct {
+	Registry      string             `json:"registry"`
+	URL           string             `json:"url,omitempty"`
+	DefaultBranch string             `json:"defaultBranch,omitempty"`
+	Versions      []registryVersion  `json:"versions"`
+	Skills        []registrySkillRow `json:"skills"`
+	Error         string             `json:"error,omitempty"`
+}
+
+// handleRegistrySkills powers the registry detail page: every skill the registry
+// offers plus the repo's branch/tag version timeline. Skills come from the
+// cache-aware index (no network); versions come from the bare clone's refs
+// resolved to commit + time. Install status is taken from the active scope's
+// lock so the in-use ref can be highlighted in the version tree. Registries are
+// global, but install status is scoped — so this endpoint still honors ?scope/
+// ?project for the installed/current markers.
+func (s *uiServer) handleRegistrySkills(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if _, ok := s.cfg.Registries[name]; !ok {
+		writeErr(w, http.StatusNotFound, fmt.Errorf("registry %q not found", name))
+		return
+	}
+	resp := registrySkillsResponse{
+		Registry: name,
+		URL:      s.cfg.Registries[name].URL,
+		Versions: []registryVersion{},
+		Skills:   []registrySkillRow{},
+	}
+
+	repoPath := registry.RegistryPath(name)
+	gc := git.NewGoGitClient()
+	defaultBranch, _ := gc.DefaultBranch(repoPath)
+	resp.DefaultBranch = defaultBranch
+
+	// Repo-level version timeline: branches + tags resolved to commit + time.
+	if vers, err := gc.RefVersions(repoPath); err == nil {
+		for _, v := range vers {
+			resp.Versions = append(resp.Versions, registryVersion{
+				Ref:     v.Name,
+				IsTag:   v.IsTag,
+				SHA:     v.Hash,
+				Time:    v.Time,
+				Subject: v.Subject,
+				Current: v.Name == defaultBranch,
+			})
+		}
+	}
+
+	// Installed skills in the active scope, keyed by name, so each offered skill
+	// can show its in-use ref/commit. Best-effort: a scope error just omits the
+	// install annotations rather than failing the (global) registry page.
+	installed := map[string]*model.LockEntry{}
+	if sc, err := s.resolveScope(r); err == nil {
+		if entries, err := s.entriesForScope(sc); err == nil {
+			for _, e := range entries {
+				if e.Registry == name {
+					installed[e.Name] = e
+				}
+			}
+		}
+	}
+
+	mgr := newRegistryManager(gc)
+	listed, err := mgr.ListSkills([]string{name})
+	if err != nil || len(listed) == 0 {
+		if err != nil {
+			resp.Error = err.Error()
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+	rs := listed[0]
+	if rs.Error != "" {
+		resp.Error = rs.Error
+	}
+	for _, sk := range rs.Skills {
+		row := registrySkillRow{
+			Name:        sk.Name,
+			Description: sk.Description,
+			Path:        sk.Path,
+		}
+		if e, ok := installed[sk.Name]; ok {
+			row.Installed = true
+			row.InstalledRef = e.Ref
+			row.InstalledCommit = e.Commit
+		}
+		resp.Skills = append(resp.Skills, row)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // projectSummary is one row in the dashboard's project switcher. Projects come
 // from Quiver's existing on-disk index (~/.quiver/projects.json, maintained by
 // every project-lock mutation), plus a synthetic Global entry and the launch
@@ -397,6 +518,7 @@ func (s *uiServer) handleOverview(w http.ResponseWriter, r *http.Request) {
 			resp.Events = n
 		}
 		if recent, err := s.store.ListRawSessions(ctx, &store.RawSessionFilter{Dirs: dirs, Limit: 5}); err == nil && recent != nil {
+			s.populateTitles(ctx, recent)
 			resp.RecentSessions = recent
 		}
 	}
@@ -435,31 +557,162 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
+	q := r.URL.Query()
 	limit := 100
-	if v := r.URL.Query().Get("limit"); v != "" {
+	if v := q.Get("limit"); v != "" {
 		if n, err := parsePositiveInt(v); err == nil {
 			limit = n
 		}
 	}
-	agent := r.URL.Query().Get("agent")
-	sessions, err := s.store.ListRawSessions(r.Context(), &store.RawSessionFilter{
-		Dirs: sc.auditDirs(), Agent: agent, Limit: limit,
-	})
+	filter := &store.RawSessionFilter{
+		Dirs:  sc.auditDirs(),
+		Agent: q.Get("agent"),
+		Skill: q.Get("skill"),
+		Limit: limit,
+	}
+	// Date filters accept a calendar day (YYYY-MM-DD from the UI's date inputs)
+	// or a full RFC3339 instant. `until` is inclusive: a bare day extends to its
+	// end so a session anywhere on that day still matches.
+	if since := parseDateParam(q.Get("since"), false); since != nil {
+		filter.Since = since
+	}
+	if until := parseDateParam(q.Get("until"), true); until != nil {
+		filter.Until = until
+	}
+
+	sessions, err := s.store.ListRawSessions(r.Context(), filter)
 	if err != nil {
+		if schemaNotReady(err) {
+			writeJSON(w, http.StatusOK, []*store.RawSession{})
+			return
+		}
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	if sessions == nil {
 		sessions = []*store.RawSession{}
 	}
+	s.populateTitles(r.Context(), sessions)
+	s.populateSessionSkills(r.Context(), sessions)
 	writeJSON(w, http.StatusOK, sessions)
 }
 
-// sessionDetail bundles a session's derived span timeline. (Raw bytes are
-// available via the `qvr audit raw`/export CLI; the UI renders the spans.)
+// parseDateParam parses a session date filter: a calendar day (YYYY-MM-DD) or a
+// full RFC3339 instant, in UTC. When endOfDay is set a bare day is pushed to its
+// last instant so an inclusive `until` covers the whole day. Returns nil for an
+// empty or unparseable value (the filter is then simply not applied).
+func parseDateParam(s string, endOfDay bool) *time.Time {
+	if s == "" {
+		return nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		u := t.UTC()
+		return &u
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		u := t.UTC()
+		if endOfDay {
+			u = u.Add(24*time.Hour - time.Nanosecond)
+		}
+		return &u
+	}
+	return nil
+}
+
+// populateSessionSkills fills each session's Skills with the distinct skills it
+// used, looked up from its derived spans in one batched query. Best-effort: a
+// lookup error leaves Skills empty rather than failing the list.
+func (s *uiServer) populateSessionSkills(ctx context.Context, sessions []*store.RawSession) {
+	if s.store == nil || len(sessions) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(sessions))
+	for _, sess := range sessions {
+		ids = append(ids, sess.SessionID.String())
+	}
+	bySession, err := s.store.SkillsForSessions(ctx, ids)
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		if skills := bySession[sess.SessionID.String()]; len(skills) > 0 {
+			sess.Skills = skills
+		}
+	}
+}
+
+// titlePromptRows is how many leading transcript rows we read per session to
+// derive its title. The first user prompt is essentially always within the
+// first few rows, so a small window keeps the sessions list cheap (the deriver
+// runs over just these rows, not the whole session).
+const titlePromptRows = 20
+
+// titleMaxLen clips derived session titles so a long first prompt stays a tidy
+// single-line table cell.
+const titleMaxLen = 100
+
+// schemaNotReady reports whether err is the "raw-trace tables don't exist yet"
+// condition — a DB that predates v0.10.0 and hasn't had a write-mode capture
+// apply migration 0002 (the read-only UI open can't create tables). The
+// dashboard treats this as "no audit data captured yet" and shows the empty
+// state with the `qvr audit enable` hint, rather than surfacing a raw SQL error.
+func schemaNotReady(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such table: raw_traces") ||
+		strings.Contains(msg, "no such table: spans")
+}
+
+// populateTitles fills each session's Title with its first user prompt, derived
+// from a small leading window of its transcript rows. Best-effort: a session we
+// can't derive (no deriver for its agent, no transcript, query error) keeps an
+// empty Title and the UI falls back to a placeholder. The store is required;
+// callers only invoke this when s.store != nil.
+func (s *uiServer) populateTitles(ctx context.Context, sessions []*store.RawSession) {
+	if s.store == nil {
+		return
+	}
+	for _, sess := range sessions {
+		if sess == nil || sess.TranscriptLines == 0 {
+			continue
+		}
+		id := sess.SessionID
+		rows, err := s.store.QueryRawTraces(ctx, &store.RawTraceFilter{
+			SessionID: &id,
+			Sources:   []string{ops.RawSourceTranscript},
+			Limit:     titlePromptRows,
+		})
+		if err != nil || len(rows) == 0 {
+			continue
+		}
+		sess.Title = derive.FirstPrompt(rows, titleMaxLen)
+	}
+}
+
+// sessionDetail bundles both representations of a session so the UI can toggle
+// between them: the derived span timeline (the processed view) and the verbatim
+// raw rows (the lossless source). Session carries the summary + derived title so
+// the detail header names the session by its first prompt, not by its agent.
 type sessionDetail struct {
-	SessionID uuid.UUID        `json:"session_id"`
-	Spans     []*store.SpanRow `json:"spans"`
+	Session *store.RawSession `json:"session"`
+	Spans   []*store.SpanRow  `json:"spans"`
+	Traces  []rawTraceView    `json:"traces"`
+}
+
+// rawTraceView is one raw row rendered for the dashboard. Raw holds the verbatim
+// native bytes as inline JSON when they parse (the common case — transcript
+// lines and hook payloads are JSON), or as a quoted string when they don't, so
+// the UI can pretty-print without a second decode step. RawText carries the
+// undecoded string as a copy/export fallback.
+type rawTraceView struct {
+	Seq        int             `json:"seq"`
+	Source     string          `json:"source"`
+	HookType   string          `json:"hook_type,omitempty"`
+	SourcePath string          `json:"source_path,omitempty"`
+	CapturedAt time.Time       `json:"captured_at"`
+	Raw        json.RawMessage `json:"raw"`
 }
 
 func (s *uiServer) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -472,7 +725,28 @@ func (s *uiServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("invalid session id"))
 		return
 	}
-	spans, err := s.store.QuerySpans(r.Context(), &store.SpanFilter{SessionID: &id})
+	ctx := r.Context()
+
+	// Pull the full set of raw rows for this session once: they drive the raw
+	// view, the derived title, and the summary, so we read them a single time.
+	rawRows, err := s.store.QueryRawTraces(ctx, &store.RawTraceFilter{
+		SessionID: &id,
+		Limit:     100000,
+	})
+	if err != nil {
+		if schemaNotReady(err) {
+			writeJSON(w, http.StatusOK, sessionDetail{
+				Session: &store.RawSession{SessionID: id},
+				Spans:   []*store.SpanRow{},
+				Traces:  []rawTraceView{},
+			})
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	spans, err := s.store.QuerySpans(ctx, &store.SpanFilter{SessionID: &id})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -480,7 +754,86 @@ func (s *uiServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	if spans == nil {
 		spans = []*store.SpanRow{}
 	}
-	writeJSON(w, http.StatusOK, sessionDetail{SessionID: id, Spans: spans})
+
+	detail := sessionDetail{
+		Session: summarizeRawSession(id, rawRows),
+		Spans:   spans,
+		Traces:  toRawTraceViews(rawRows),
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// summarizeRawSession builds the session summary the detail header renders from
+// the session's own raw rows — the same fields ListRawSessions computes in SQL,
+// recomputed here in Go so the detail page never needs a second scan over every
+// session. Includes the derived title.
+func summarizeRawSession(id uuid.UUID, rows []*ops.RawTrace) *store.RawSession {
+	sess := &store.RawSession{SessionID: id, TotalRows: int64(len(rows))}
+	for i, r := range rows {
+		if r == nil {
+			continue
+		}
+		if r.AgentName != "" {
+			sess.AgentName = r.AgentName
+		}
+		if r.AgentSessionID != "" {
+			sess.AgentSessionID = r.AgentSessionID
+		}
+		if r.WorkingDirectory != "" {
+			sess.WorkingDirectory = r.WorkingDirectory
+		}
+		switch r.Source {
+		case ops.RawSourceTranscript:
+			sess.TranscriptLines++
+		case ops.RawSourceHookPayload:
+			sess.HookPayloads++
+		}
+		if i == 0 || r.CapturedAt.Before(sess.StartedAt) {
+			sess.StartedAt = r.CapturedAt
+		}
+		if r.CapturedAt.After(sess.LastAt) {
+			sess.LastAt = r.CapturedAt
+		}
+	}
+	sess.Title = derive.FirstPrompt(rows, titleMaxLen)
+	return sess
+}
+
+// toRawTraceViews renders raw rows for the dashboard's raw toggle, decoding each
+// row's bytes to inline JSON when valid (so the UI pretty-prints directly).
+func toRawTraceViews(rows []*ops.RawTrace) []rawTraceView {
+	out := make([]rawTraceView, 0, len(rows))
+	for _, r := range rows {
+		if r == nil {
+			continue
+		}
+		out = append(out, rawTraceView{
+			Seq:        r.Seq,
+			Source:     r.Source,
+			HookType:   r.HookType,
+			SourcePath: r.SourcePath,
+			CapturedAt: r.CapturedAt,
+			Raw:        rawAsJSON(r.Raw),
+		})
+	}
+	return out
+}
+
+// rawAsJSON returns b verbatim if it is valid JSON, otherwise b quoted as a JSON
+// string. Either way the result is a legal json.RawMessage, so the row always
+// serializes cleanly even when a transcript line isn't JSON.
+func rawAsJSON(b []byte) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage("null")
+	}
+	if json.Valid(b) {
+		return json.RawMessage(b)
+	}
+	quoted, err := json.Marshal(string(b))
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(quoted)
 }
 
 func (s *uiServer) handleSkills(w http.ResponseWriter, r *http.Request) {

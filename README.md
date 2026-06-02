@@ -34,6 +34,51 @@ reads skills from a directory).
 
 [agent skills]: https://agentskills.io
 
+## Standards
+
+Quiver builds on open standards rather than inventing its own formats — one for
+what a skill *is*, one for what an agent *did*:
+
+- **Skills follow [agentskills.io](https://agentskills.io/specification).** A
+  skill is a directory with a `SKILL.md` whose YAML frontmatter carries `name`
+  + `description` (plus optional `license`, `compatibility`, `allowed-tools`,
+  `metadata`). Quiver's parser (`pkg/skillspec`) and validator enforce the spec;
+  nothing Quiver-proprietary is required to author a skill.
+- **Traces follow [OpenTelemetry](https://opentelemetry.io/docs/specs/semconv/gen-ai/).**
+  `qvr audit` captures each agent's native transcript **verbatim** (lossless, the
+  canonical source of truth), then *projects* it into OpenTelemetry spans —
+  Turn / Tool / Skill — using the **GenAI semantic conventions** (`gen_ai.operation.name`,
+  `gen_ai.request.model`, `gen_ai.usage.*`, `gen_ai.tool.*`). Spans serialize to
+  the standard **OTLP** `resourceSpans` envelope, so `qvr audit spans --otlp`
+  emits a payload any OTLP consumer (Jaeger, Tempo, Honeycomb, an OTel
+  Collector) accepts unchanged.
+
+The projection is regenerable: spans are derived from the raw bytes and stamped
+with a `deriver_version`, so an improved deriver can be re-run over old captures
+(`qvr audit rederive`) without ever re-capturing. Capture is normally hook-driven,
+but `qvr audit ingest <transcript|rollout|dir>` records an already-produced
+transcript with no live hook at all — the supported path for QA / CI / sandboxed
+capture that must not mutate the developer's live agent config.
+
+On top of those two standards sits one Quiver extension: the `skill.*` attribute
+family. `skill.name` tags which skill a Turn/Tool span belongs to; when the span
+can be tied to an installed skill, `skill.registry/version/commit/source/
+subtree_hash` carry its lock-resolved identity, and `skill.verified` records
+whether that identity was *proven* from the artifact the agent actually loaded
+(vs. a name-keyed best guess). This makes skill attribution a first-class,
+queryable dimension of the trace while staying valid OTLP; everything else is
+stock OpenTelemetry.
+
+**Skill-attributed, not generic logging.** Quiver is a skill manager, so its
+traces are about *skills*, not a catch-all transcript log. A session is only
+retained if it actually used a skill: when a session completes with no skill
+usage, Quiver drops it whole (raw + spans), and `qvr audit gc` sweeps any that
+slipped through. Skill usage is detected from each agent's **own** native
+signal — Claude Code's `Skill` tool-call, and for Codex the model opening a
+skill's `SKILL.md` per its injected `<skills_instructions>` — never by assuming
+`qvr` is on the agent's PATH. (Sessions for an agent Quiver can't yet derive are
+kept, since skill absence can't be proven there.)
+
 ## How it's wired
 
 ```
@@ -394,6 +439,10 @@ Shipping today:
   fine. `qvr tree`, `qvr export`/`import` for portability.
 - **Cache** — `cache list`/`cache prune` with `projects.json` reachability
   tracking and orphan-cleanup hints; object dedup via hardlinked worktrees
+- **Observability** — `qvr audit` captures agent transcripts verbatim and
+  projects OpenTelemetry spans (`logs`, `spans`, `--otlp` export, `rederive`
+  backfill) attributed to the active skill; embedded React dashboard via
+  `qvr ui`. See [Standards](#standards).
 
 Planned:
 
@@ -402,8 +451,8 @@ Planned:
 - v1.0 — prebuilt multi-platform binaries via Homebrew / `go install` /
   curl installer, `qvr doctor`, shell completions, and faster parallel
   fetch/install.
-- post-1.0 — two-stage scanner (`qvr scan --deep`, SBOM), `qvr inventory` /
-  `qvr audit`, and the embedded React dashboard (`qvr ui`).
+- post-1.0 — two-stage scanner (`qvr scan --deep`, SBOM), `qvr inventory`, and
+  OTLP push/live export to a configured collector.
 
 Team workflows are deliberately delegated to git + your git host (GitHub
 Teams, branch protection, CODEOWNERS); see

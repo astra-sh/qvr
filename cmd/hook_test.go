@@ -43,14 +43,16 @@ func isolatedHome(t *testing.T, opsEnabled bool) (home string, readRaw func() []
 }
 
 // writeTranscript drops a Claude-style transcript JSONL and returns its path +
-// session id.
+// session id. The assistant turn loads a skill (a "Skill" tool-call) so the
+// captured session is skill-attributed and survives the skill-only retention
+// gate — the common case these audit tests exercise.
 func writeTranscript(t *testing.T, dir string) (path, sessionID string) {
 	t.Helper()
 	sessionID = "550e8400-e29b-41d4-a716-446655440000"
 	path = filepath.Join(dir, "session.jsonl")
 	lines := []string{
 		`{"type":"user","timestamp":"2026-06-02T00:00:00.000Z","message":{"role":"user","content":"do the thing"}}`,
-		`{"type":"assistant","timestamp":"2026-06-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"text","text":"done"}]}}`,
+		`{"type":"assistant","timestamp":"2026-06-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"tool_use","id":"toolu_skill","name":"Skill","input":{"command":"code-review"}},{"type":"text","text":"done"}]}}`,
 	}
 	if err := os.WriteFile(path, []byte(joinLines(lines)), 0o644); err != nil {
 		t.Fatal(err)

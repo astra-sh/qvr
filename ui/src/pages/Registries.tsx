@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import { api, useFetch } from "../api";
 import {
   Empty,
@@ -19,7 +20,7 @@ export default function Registries() {
     <>
       <PageHeader
         title="Registries"
-        subtitle="Global · shared across all projects. The git repos Quiver installs skills from."
+        subtitle="Global · shared across all projects. Click a registry to see its skills and version tree."
       />
       {loading && <Loading />}
       {error && <ErrorBox message={error} />}
@@ -43,7 +44,12 @@ export default function Registries() {
           {data.map((r) => (
             <tr key={r.name} className="hover:bg-gray-50">
               <Td>
-                <span className="font-medium">{r.name}</span>
+                <Link
+                  to={`/registries/${encodeURIComponent(r.name)}`}
+                  className="font-medium text-blue-600 hover:underline"
+                >
+                  {r.name}
+                </Link>
                 {r.has_upstream_changes && (
                   <Pill tone="amber">
                     <span className="ml-1">updates</span>

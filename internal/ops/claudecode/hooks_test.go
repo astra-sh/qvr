@@ -18,6 +18,9 @@ func setupHome(t *testing.T) (home string) {
 	home = t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("QVR_HOME", filepath.Join(home, ".quiver"))
+	// Neutralize any ambient CLAUDE_CONFIG_DIR (the dev machine may have it set)
+	// so these tests resolve to the temp ~/.claude.
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
 		t.Fatalf("mkdir .claude: %v", err)
 	}
@@ -166,10 +169,64 @@ func TestInstallPreservesUserHooks(t *testing.T) {
 	}
 }
 
+// TestInstallHonorsConfigDirEnv verifies CLAUDE_CONFIG_DIR redirects install
+// (and status/detect) at an isolated config dir, never touching ~/.claude.
+func TestInstallHonorsConfigDirEnv(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("QVR_HOME", filepath.Join(home, ".quiver"))
+	// Live ~/.claude exists but must be left untouched.
+	liveSettings := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o755); err != nil {
+		t.Fatalf("mkdir .claude: %v", err)
+	}
+	if err := os.WriteFile(liveSettings, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("seed live settings.json: %v", err)
+	}
+
+	iso := filepath.Join(home, "iso")
+	if err := os.MkdirAll(iso, 0o755); err != nil {
+		t.Fatalf("mkdir iso: %v", err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", iso)
+
+	a := &Adapter{}
+	if _, err := a.Install(ops.InstallOptions{}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Hooks landed in the isolated dir...
+	isoRaw, err := os.ReadFile(filepath.Join(iso, "settings.json"))
+	if err != nil {
+		t.Fatalf("isolated settings.json not written: %v", err)
+	}
+	if !strings.Contains(string(isoRaw), "_hook "+AgentName) {
+		t.Errorf("isolated settings.json missing quiver hook:\n%s", isoRaw)
+	}
+
+	// ...and the live config was never touched.
+	liveRaw, err := os.ReadFile(liveSettings)
+	if err != nil {
+		t.Fatalf("read live settings.json: %v", err)
+	}
+	if strings.Contains(string(liveRaw), "_hook") {
+		t.Errorf("live ~/.claude/settings.json was mutated:\n%s", liveRaw)
+	}
+
+	st, err := a.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !st.Installed || !st.Valid {
+		t.Errorf("Status = %+v, want installed+valid against isolated dir", st)
+	}
+}
+
 func TestDetectNotInstalled(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("QVR_HOME", filepath.Join(home, ".quiver"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	// No ~/.claude created.
 	a := &Adapter{}
 	det, err := a.Detect()

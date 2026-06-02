@@ -186,6 +186,10 @@ func TestUI_Sessions(t *testing.T) {
 	if sessions[0].AgentName != "claude-code" {
 		t.Errorf("agent = %q, want claude-code", sessions[0].AgentName)
 	}
+	// The session is named by its first prompt (seeded as "hi"), not its agent.
+	if sessions[0].Title != "hi" {
+		t.Errorf("title = %q, want %q (first prompt)", sessions[0].Title, "hi")
+	}
 }
 
 func TestUI_SessionDetail(t *testing.T) {
@@ -198,8 +202,12 @@ func TestUI_SessionDetail(t *testing.T) {
 	}
 	var detail sessionDetail
 	mustJSON(t, rec, &detail)
-	if detail.SessionID != id {
-		t.Errorf("session id mismatch: got %v want %v", detail.SessionID, id)
+	if detail.Session == nil || detail.Session.SessionID != id {
+		t.Errorf("session id mismatch: got %v want %v", detail.Session, id)
+	}
+	// Raw rows back the dashboard's raw-trace toggle.
+	if len(detail.Traces) < 1 {
+		t.Errorf("traces empty, want >=1 raw rows")
 	}
 	// The derived spans back the dashboard's session timeline.
 	if len(detail.Spans) < 1 {
@@ -505,6 +513,72 @@ func TestUI_SessionsMalformedID(t *testing.T) {
 	// The malformed row is skipped; the good one survives.
 	if len(sessions) != 1 {
 		t.Errorf("sessions = %d, want 1 (good row kept, bad row skipped)", len(sessions))
+	}
+}
+
+// addSkillSession seeds a codex session in workingDir that used the code-review
+// skill (a skill-attributed span), for the Sessions filter test.
+func addSkillSession(t *testing.T, workingDir string) {
+	t.Helper()
+	st, err := store.Open(context.Background(), store.OpenOptions{Path: dbPathForTest(t)})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx := context.Background()
+	id := uuid.New()
+	if err := st.AppendRawTraces(ctx, []*ops.RawTrace{{
+		AgentName: "codex", SessionID: id, Source: ops.RawSourceTranscript,
+		WorkingDirectory: workingDir, CapturedAt: time.Now().UTC(),
+		Raw: []byte(`{"type":"event_msg","payload":{"type":"user_message","message":"review"}}`),
+	}}, nil); err != nil {
+		t.Fatalf("seed raw: %v", err)
+	}
+	attrs, _ := json.Marshal(map[string]any{"skill.name": "code-review"})
+	if err := st.ReplaceSessionSpans(ctx, id, []*store.SpanRow{{
+		SpanID: "skillspan", TraceID: "tr", SessionID: id, AgentName: "codex",
+		Kind: "SKILL", Name: "execute_tool exec_command", StartMs: 1, EndMs: 2,
+		Attributes: string(attrs), DeriverVersion: derive.Version,
+	}}); err != nil {
+		t.Fatalf("seed span: %v", err)
+	}
+}
+
+// TestUI_SessionsFilters exercises the harness/skill filters and the
+// skills-per-session payload over the HTTP layer.
+func TestUI_SessionsFilters(t *testing.T) {
+	root, _ := seedUIEnv(t, true) // one claude session ("hi"), no skill
+	addSkillSession(t, root)      // one codex session that used code-review
+	h := newUITestServer(t, root)
+
+	var all []*store.RawSession
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions"), &all)
+	if len(all) != 2 {
+		t.Fatalf("unfiltered sessions = %d, want 2", len(all))
+	}
+
+	// Harness filter narrows to the codex session.
+	var codexOnly []*store.RawSession
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions?agent=codex"), &codexOnly)
+	if len(codexOnly) != 1 || codexOnly[0].AgentName != "codex" {
+		t.Errorf("agent filter = %+v, want one codex session", codexOnly)
+	}
+
+	// Skill filter narrows to the skill-using session, with skills populated.
+	var skillOnly []*store.RawSession
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions?skill=code-review"), &skillOnly)
+	if len(skillOnly) != 1 {
+		t.Fatalf("skill filter = %d sessions, want 1", len(skillOnly))
+	}
+	if len(skillOnly[0].Skills) != 1 || skillOnly[0].Skills[0] != "code-review" {
+		t.Errorf("session.skills = %v, want [code-review]", skillOnly[0].Skills)
+	}
+
+	// A skill nobody used returns nothing.
+	var none []*store.RawSession
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions?skill=nope"), &none)
+	if len(none) != 0 {
+		t.Errorf("unknown skill filter = %d, want 0", len(none))
 	}
 }
 

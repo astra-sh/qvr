@@ -120,6 +120,34 @@ func (s *sqliteStore) DeleteRawBefore(ctx context.Context, cutoff time.Time) (in
 	return n, nil
 }
 
+// DeleteSession removes a session's raw rows, derived spans, and tailing cursor
+// in one tx. Returns the number of raw rows deleted.
+func (s *sqliteStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) (int64, error) {
+	id := sessionID.String()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete session tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM raw_traces WHERE session_id = ?`, id)
+	if err != nil {
+		return 0, fmt.Errorf("store: delete session raw: %w", err)
+	}
+	n, _ := res.RowsAffected()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM spans WHERE session_id = ?`, id); err != nil {
+		return 0, fmt.Errorf("store: delete session spans: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM trace_cursors WHERE session_id = ?`, id); err != nil {
+		return 0, fmt.Errorf("store: delete session cursor: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store: delete session commit: %w", err)
+	}
+	return n, nil
+}
+
 // --- self-audit ---
 
 func (s *sqliteStore) CountSelfAuditErrors(ctx context.Context, agent string) (int64, error) {

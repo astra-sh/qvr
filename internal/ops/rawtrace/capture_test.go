@@ -102,7 +102,10 @@ func TestCapture_TailsTranscriptVerbatim(t *testing.T) {
 	}
 	_ = f.Close()
 
-	res2, err := rawtrace.Capture(ctx, s, "claude-code", "Stop", payloadJSON(t, sessionID, transcript))
+	// Use a non-completion firing here so this test stays about verbatim
+	// tailing; the skill-only retention gate (which fires on "Stop") has its
+	// own test below.
+	res2, err := rawtrace.Capture(ctx, s, "claude-code", "PostToolUse", payloadJSON(t, sessionID, transcript))
 	if err != nil {
 		t.Fatalf("second capture: %v", err)
 	}
@@ -151,6 +154,71 @@ func TestCapture_NoTranscript_StillStoresHookPayload(t *testing.T) {
 	}
 	if string(rows[0].Raw) != string(payload) {
 		t.Error("hook payload not stored verbatim")
+	}
+}
+
+// TestCapture_SkillOnlyRetention proves the skill-only retention gate: a
+// session that completes ("Stop") with no skill usage is dropped whole, while a
+// session that loaded a skill is kept.
+func TestCapture_SkillOnlyRetention(t *testing.T) {
+	ctx := context.Background()
+
+	user := `{"type":"user","timestamp":"2026-06-02T00:00:00.000Z","message":{"role":"user","content":"do the thing"}}`
+	plain := `{"type":"assistant","timestamp":"2026-06-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x"}},{"type":"text","text":"done"}]}}`
+	withSkill := `{"type":"assistant","timestamp":"2026-06-02T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":3},"content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"command":"code-review"}},{"type":"text","text":"done"}]}}`
+
+	cases := []struct {
+		name      string
+		assistant string
+		wantRows  int // 0 = pruned
+		wantPrune bool
+	}{
+		{"skill-less session is dropped on completion", plain, 0, true},
+		{"skill session is retained", withSkill, 3, false}, // 2 transcript + 1 hook
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			transcript := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(transcript, []byte(user+"\n"+tc.assistant+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sessionID := "550e8400-e29b-41d4-a716-446655440000"
+			res, err := rawtrace.Capture(ctx, s, "claude-code", "Stop", payloadJSON(t, sessionID, transcript))
+			if err != nil {
+				t.Fatalf("capture: %v", err)
+			}
+			if res.Pruned != tc.wantPrune {
+				t.Errorf("Pruned = %v, want %v", res.Pruned, tc.wantPrune)
+			}
+			rows := queryRows(t, s, res.SessionID)
+			if len(rows) != tc.wantRows {
+				t.Fatalf("rows = %d, want %d", len(rows), tc.wantRows)
+			}
+		})
+	}
+}
+
+// TestCapture_NoDeriverNotPruned proves the gate never deletes data for an
+// agent we can't derive (skill absence is unprovable there): a codex-less
+// agent's session survives "Stop" even with no skill span.
+func TestCapture_NoDeriverNotPruned(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	transcript := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(transcript, []byte(`{"some":"copilot line"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rawtrace.Capture(ctx, s, "copilot", "Stop", payloadJSON(t, "11111111-1111-1111-1111-111111111111", transcript))
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if res.Pruned {
+		t.Error("a session for an agent with no deriver must not be pruned")
+	}
+	if len(queryRows(t, s, res.SessionID)) == 0 {
+		t.Error("expected rows retained for underivable agent")
 	}
 }
 

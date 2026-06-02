@@ -71,7 +71,11 @@ func runHook(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "qvr _hook: capture failed: %v\n", err)
 		return nil
 	}
-	if res != nil && (res.LinesStored > 0 || res.HookStored) {
+	if res != nil && res.Pruned {
+		// Skill-only retention dropped the completed session (no skill usage).
+		fmt.Fprintf(cmd.ErrOrStderr(),
+			"qvr _hook: %s %s dropped session (no skill usage)\n", agent, hookType)
+	} else if res != nil && (res.LinesStored > 0 || res.HookStored) {
 		fmt.Fprintf(cmd.ErrOrStderr(),
 			"qvr _hook: %s %s captured %d line(s), %d span(s), hook_payload=%t\n",
 			agent, hookType, res.LinesStored, res.SpansStored, res.HookStored)

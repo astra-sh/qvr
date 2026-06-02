@@ -1,12 +1,27 @@
 package git
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // RefInfo holds information about a git reference.
 type RefInfo struct {
 	Name  string
 	Hash  string
 	IsTag bool
+}
+
+// RefVersion is a branch or tag enriched with the metadata of the commit it
+// points at — the SHA, when it was authored, and the subject line. It powers
+// the dashboard's per-skill version tree, where each installable ref is shown
+// with a timestamp so a human can see how versions stack up over time.
+type RefVersion struct {
+	Name    string    `json:"name"`    // short ref name (branch or tag)
+	Hash    string    `json:"hash"`    // full commit SHA the ref resolves to
+	IsTag   bool      `json:"isTag"`   // tag vs branch
+	Time    time.Time `json:"time"`    // committer time of the target commit
+	Subject string    `json:"subject"` // first line of the commit message
 }
 
 // RemoteRefInfo holds reference information from ls-remote.

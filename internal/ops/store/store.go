@@ -58,9 +58,21 @@ type Store interface {
 	// QuerySpans returns stored spans ordered by (session_id, start_ms).
 	QuerySpans(ctx context.Context, f *SpanFilter) ([]*SpanRow, error)
 
+	// SkillsForSessions returns the distinct skill.name values attributed to
+	// each given session (from its SKILL-attributed spans), keyed by session id
+	// string. Sessions with no skill span are absent from the map.
+	SkillsForSessions(ctx context.Context, ids []string) (map[string][]string, error)
+
 	// DeleteRawBefore sweeps raw rows captured before cutoff. Returns the
 	// number of rows deleted.
 	DeleteRawBefore(ctx context.Context, cutoff time.Time) (int64, error)
+
+	// DeleteSession removes a whole session — its raw rows, derived spans, and
+	// tailing cursor — in one tx. Returns the number of raw rows deleted. Used
+	// by the skill-only retention policy to drop sessions with no skill usage;
+	// deleting the cursor means a session that later resumes re-tails from the
+	// start and is re-captured in full.
+	DeleteSession(ctx context.Context, sessionID uuid.UUID) (int64, error)
 
 	// --- Self-audit (install/uninstall provenance + status) ---
 

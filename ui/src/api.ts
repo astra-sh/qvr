@@ -4,58 +4,70 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-export interface Session {
-  id: string;
-  agent_session_id?: string;
-  agent_name: string;
-  started_at: string;
-  ended_at?: string;
-  working_directory?: string;
-  project_name?: string;
-  total_actions: number;
-  files_read: number;
-  files_written: number;
-  commands_executed: number;
-  errors: number;
-  sensitive_actions: number;
-  blocked_actions: number;
-  skills_touched?: string[];
-  end_reason?: string;
-}
-
-export interface Event {
-  id: string;
+// RawSession mirrors store.RawSession: a per-session summary derived on the fly
+// from the raw_traces rows that share a session_id. `title` is the first prompt
+// the user typed (the session's human name); `agent_name` is the harness that
+// produced it (claude-code, codex, …).
+export interface RawSession {
   session_id: string;
-  agent_session_id?: string;
-  sequence: number;
-  timestamp: string;
-  duration_ms?: number;
+  title?: string;
   agent_name: string;
+  agent_session_id?: string;
   working_directory?: string;
-  skill_name: string;
-  skill_registry?: string;
-  skill_commit?: string;
-  skill_path?: string;
-  action_type: string;
-  tool_name?: string;
-  result_status: string;
-  error_message?: string;
-  is_sensitive: boolean;
-  // The structured trace the funnel parsed (tool inputs/outputs) and the
-  // unmodified hook bytes as the agent emitted them. Both are Go json.RawMessage,
-  // so they arrive as inline JSON (object/array/scalar), not strings. Present at
-  // logging levels standard/full; null/absent under minimal. These are the
-  // foundation for trace-driven skill evolution — keep them lossless.
-  payload?: unknown;
-  diff_content?: string;
-  raw_event?: unknown;
-  subagent_id?: string;
-  subagent_type?: string;
+  started_at: string;
+  last_at: string;
+  transcript_lines: number;
+  hook_payloads: number;
+  total_rows: number;
+  // Distinct skills this session used (from its SKILL-attributed spans).
+  skills?: string[];
 }
 
+// SessionFilter narrows the Sessions list server-side. All fields optional; an
+// empty filter returns the scoped list unfiltered. Dates are YYYY-MM-DD.
+export interface SessionFilter {
+  agent?: string;
+  skill?: string;
+  since?: string;
+  until?: string;
+}
+
+// SpanRow mirrors store.SpanRow: one derived (processed) span. `attributes` is
+// the OpenTelemetry gen_ai.* attribute map serialized as a JSON string. Times
+// are epoch milliseconds. kind ∈ LLM | TOOL | SKILL | CHAIN.
+export interface SpanRow {
+  span_id: string;
+  trace_id: string;
+  parent_span_id?: string;
+  session_id: string;
+  agent_name: string;
+  kind: string;
+  name: string;
+  start_ms: number;
+  end_ms: number;
+  attributes: string; // JSON
+  deriver_version: number;
+  derived_at: string;
+}
+
+// RawTraceView mirrors the UI server's rawTraceView: one verbatim raw row. `raw`
+// arrives as inline JSON when the bytes parsed (the common case) or as a JSON
+// string otherwise, so it can be pretty-printed directly.
+export interface RawTraceView {
+  seq: number;
+  source: string; // "transcript" | "hook_payload"
+  hook_type?: string;
+  source_path?: string;
+  captured_at: string;
+  raw: unknown;
+}
+
+// SessionDetail carries both representations of a session so the detail page can
+// toggle between the processed span timeline and the lossless raw rows.
 export interface SessionDetail {
-  session: Session;
-  events: Event[];
+  session: RawSession;
+  spans: SpanRow[];
+  traces: RawTraceView[];
 }
 
 export interface Overview {
@@ -71,7 +83,7 @@ export interface Overview {
   gate_allowed: number;
   gate_blocked: number;
   gate_unscanned: number;
-  recent_sessions: Session[];
+  recent_sessions: RawSession[];
 }
 
 export interface SkillRow {
@@ -185,6 +197,41 @@ export interface ProjectSummary {
   sessions: number;
   events: number;
   lastSeen?: string;
+}
+
+// ---- registry detail (skills + version tree) -------------------------------
+
+// One installable ref of a registry repo, resolved to its commit with a
+// timestamp (Go: registryVersion). `current` marks the repo's default branch.
+export interface RegistryVersion {
+  ref: string;
+  isTag: boolean;
+  sha: string;
+  time: string;
+  subject?: string;
+  current?: boolean;
+}
+
+// One skill a registry offers, annotated with install status in the active
+// scope (Go: registrySkillRow).
+export interface RegistrySkillRow {
+  name: string;
+  description?: string;
+  path?: string;
+  installed: boolean;
+  installedRef?: string;
+  installedCommit?: string;
+}
+
+// Registry detail payload (Go: registrySkillsResponse): the registry's skills
+// plus its repo-level branch/tag version timeline.
+export interface RegistrySkillsResponse {
+  registry: string;
+  url?: string;
+  defaultBranch?: string;
+  versions: RegistryVersion[];
+  skills: RegistrySkillRow[];
+  error?: string;
 }
 
 export interface Finding {
@@ -311,10 +358,26 @@ export function scopeToken(s: Scope = currentScope): string {
   return "default";
 }
 
-function scopeQuery(): string {
+// scopeParams seeds a URLSearchParams with the active scope, so callers can add
+// their own params (e.g. session filters) on top.
+function scopeParams(): URLSearchParams {
   const p = new URLSearchParams();
   if (currentScope.scope) p.set("scope", currentScope.scope);
   else if (currentScope.project) p.set("project", currentScope.project);
+  return p;
+}
+
+function scopeQuery(): string {
+  const q = scopeParams().toString();
+  return q ? `?${q}` : "";
+}
+
+function sessionsQuery(f: SessionFilter): string {
+  const p = scopeParams();
+  if (f.agent) p.set("agent", f.agent);
+  if (f.skill) p.set("skill", f.skill);
+  if (f.since) p.set("since", f.since);
+  if (f.until) p.set("until", f.until);
   const q = p.toString();
   return q ? `?${q}` : "";
 }
@@ -322,7 +385,8 @@ function scopeQuery(): string {
 export const api = {
   // Scoped endpoints carry the active project/scope.
   overview: () => getJSON<Overview>(`/api/overview${scopeQuery()}`),
-  sessions: () => getJSON<Session[]>(`/api/sessions${scopeQuery()}`),
+  sessions: (f: SessionFilter = {}) =>
+    getJSON<RawSession[]>(`/api/sessions${sessionsQuery(f)}`),
   session: (id: string) => getJSON<SessionDetail>(`/api/sessions/${id}`),
   skills: () => getJSON<SkillRow[]>(`/api/skills${scopeQuery()}`),
   skill: (name: string) =>
@@ -332,10 +396,31 @@ export const api = {
   scanSummary: () => getJSON<ScanSummaryRow[]>(`/api/scan${scopeQuery()}`),
   runScan: (name: string) =>
     postJSON<ScanRunResult>(`/api/scan/${encodeURIComponent(name)}${scopeQuery()}`),
+  // Registries are global, but the registry detail's install/current markers
+  // are scoped, so the detail endpoint carries the active scope.
+  registrySkills: (name: string) =>
+    getJSON<RegistrySkillsResponse>(
+      `/api/registries/${encodeURIComponent(name)}/skills${scopeQuery()}`,
+    ),
   // Global endpoints — not scoped.
   registries: () => getJSON<RegistryStatus[]>("/api/registries"),
   projects: () => getJSON<ProjectSummary[]>("/api/projects"),
 };
+
+// prettyAgent maps a harness's internal agent_name to a short display label for
+// the "Harness" column (claude-code → claude, etc.). Unknown agents pass through.
+export function prettyAgent(agent?: string): string {
+  if (!agent) return "—";
+  const map: Record<string, string> = {
+    "claude-code": "claude",
+    claudecode: "claude",
+    codex: "codex",
+    cursor: "cursor",
+    opencode: "opencode",
+    copilot: "copilot",
+  };
+  return map[agent] ?? agent;
+}
 
 export interface AsyncState<T> {
   data: T | null;

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -13,14 +14,13 @@ import (
 )
 
 var (
-	editGlobal bool
 	editAuthor string
 	editEmail  string
 )
 
 var editCmd = &cobra.Command{
 	Use:   "edit <skill>",
-	Short: "Eject a skill into the project so you can modify it",
+	Short: "Eject a project-local skill so you can modify it",
 	Long: `Promote the symlinked skill into a real directory inside the project so
 you can edit it directly. The canonical agent target dir (alphabetical-first
 installed target, e.g. .claude/skills/<name>/) becomes a real directory
@@ -31,13 +31,19 @@ After eject, ` + "`qvr publish <skill>`" + ` ships your edits — either back to
 original upstream (` + "`--tag v1.0.1`" + `) or to a brand-new remote
 (` + "`--fork <url> --migrate`" + `).
 
+` + "`qvr edit`" + ` only ejects **project-local** skills. Editing a globally
+installed skill in place would mutate a shared copy that every project sees, so
+it is not supported. To change a global skill: add it to a project
+(` + "`qvr add <skill>`" + `), ` + "`qvr edit`" + ` and ` + "`qvr publish`" + ` your
+changes there, then re-add the published version globally
+(` + "`qvr add <skill> --global`" + `).
+
 Idempotent: running ` + "`qvr edit`" + ` again after the first eject is a no-op.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runEdit,
 }
 
 func init() {
-	editCmd.Flags().BoolVar(&editGlobal, "global", false, "operate on the user-global lock file instead of the project lock")
 	editCmd.Flags().StringVar(&editAuthor, "author", "", "git author for the initial commit (defaults to 'quiver')")
 	editCmd.Flags().StringVar(&editEmail, "email", "", "git author email for the initial commit (defaults to 'quiver@localhost')")
 	rootCmd.AddCommand(editCmd)
@@ -49,7 +55,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
-	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), editGlobal)
+	// edit is project-local only: ejecting a global skill in place would mutate
+	// the single copy every project shares. The global lock is read solely to
+	// give a precise "use publish then re-add globally" error below.
+	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), false)
 
 	var (
 		result       *skill.EjectResult
@@ -64,6 +73,10 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		}
 		entry, err := lock.Get(name)
 		if err != nil {
+			if errors.Is(err, model.ErrLockSkillMissing) && installedGlobally(projectRoot, name) {
+				return fmt.Errorf("%s is installed globally, not in this project — qvr edit only ejects project-local skills. "+
+					"To change it: `qvr add %s` here, edit & `qvr publish`, then re-add it globally with `qvr add %s --global`", name, name, name)
+			}
 			return err
 		}
 		// Surface a friendlier error than EjectToTarget's generic refusal —
@@ -82,7 +95,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		r, err := skill.EjectToTarget(skill.EjectRequest{
 			Entry:       entry,
 			ProjectRoot: projectRoot,
-			Global:      editGlobal,
+			Global:      false,
 			Author:      editAuthor,
 			AuthorEmail: editEmail,
 		})
@@ -104,7 +117,7 @@ func runEdit(cmd *cobra.Command, args []string) error {
 	}
 
 	registry.TouchProject(lockPath)
-	if !editGlobal && latestLock != nil {
+	if latestLock != nil {
 		_ = refreshAgentsMDIfPresent(projectRoot, latestLock.Entries())
 	}
 
@@ -127,4 +140,18 @@ func runEdit(cmd *cobra.Command, args []string) error {
 		printer.Info(fmt.Sprintf("  repointed %d sibling target symlink(s)", len(result.SiblingLinks)))
 	}
 	return nil
+}
+
+// installedGlobally reports whether name is present in the user-global lock.
+// Used only to turn a project-lock "not found" into an actionable message that
+// steers the user to the publish → re-add-globally workflow instead of editing
+// a shared global copy in place. Best-effort: any read error means "can't
+// confirm", so the caller falls back to the plain not-found error.
+func installedGlobally(projectRoot, name string) bool {
+	globalLock, err := model.ReadLockFile(model.DefaultLockPath(projectRoot, config.Dir(), true))
+	if err != nil {
+		return false
+	}
+	_, err = globalLock.Get(name)
+	return err == nil
 }

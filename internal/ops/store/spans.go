@@ -57,6 +57,22 @@ func (s *sqliteStore) ReplaceSessionSpans(ctx context.Context, sessionID uuid.UU
 		`DELETE FROM spans WHERE session_id = ?`, sessionID.String()); err != nil {
 		return fmt.Errorf("store: clear session spans: %w", err)
 	}
+	// Defensively drop duplicate span_ids (last write wins) before inserting:
+	// span_id is UNIQUE, and a single colliding row from a deriver bug must not
+	// fail the whole insert and lose the entire session's spans (#147). Derivers
+	// are expected to emit unique ids; this is the belt-and-suspenders backstop.
+	seen := make(map[string]struct{}, len(rows))
+	for i := len(rows) - 1; i >= 0; i-- {
+		r := rows[i]
+		if r == nil {
+			continue
+		}
+		if _, dup := seen[r.SpanID]; dup {
+			rows[i] = nil // a later row already claimed this span_id
+			continue
+		}
+		seen[r.SpanID] = struct{}{}
+	}
 	for _, r := range rows {
 		if r == nil {
 			continue

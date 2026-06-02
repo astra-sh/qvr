@@ -5,10 +5,13 @@
 //
 // The wire shape is the OTLP JSON envelope (resourceSpans → scopeSpans →
 // spans). Attributes follow OpenTelemetry's GenAI semantic conventions
-// (gen_ai.*: see https://opentelemetry.io/docs/concepts/signals/traces/), with
-// one Quiver extension — the skill.name attribute — tagging which skill a span
-// belongs to. It is vendor-neutral: no backend names, no project injection.
-// Emitting to any OTLP consumer is a separate, optional step.
+// (gen_ai.*: see https://opentelemetry.io/docs/concepts/signals/traces/), plus
+// the Quiver skill.* extension family tagging which skill a span belongs to:
+// skill.name (set by the derivers) and, when resolved from the calling
+// project's qvr.lock by EnrichSkillIdentity, skill.registry/version/commit/
+// source/subtree_hash/canonical (see enrich.go). It is vendor-neutral: no
+// backend names, no project injection. Emitting to any OTLP consumer is a
+// separate, optional step.
 package derive
 
 import (
@@ -35,8 +38,8 @@ const (
 // Span is one derived span. Times are epoch milliseconds. Attributes use OTel
 // GenAI semantic-convention keys (e.g. "gen_ai.operation.name",
 // "gen_ai.request.model", "gen_ai.usage.input_tokens") plus the Quiver
-// extension "skill.name". It is a plain struct so callers can inspect or
-// re-serialize it; ToOTLP renders the wire form.
+// "skill.*" extension family (see the package doc). It is a plain struct so
+// callers can inspect or re-serialize it; ToOTLP renders the wire form.
 type Span struct {
 	Name         string
 	Kind         string
@@ -121,11 +124,13 @@ func (s Span) otlpSpan() map[string]any {
 	return obj
 }
 
-// ToOTLP renders a batch of spans as a single OTLP resourceSpans payload.
-// Returns nil for no spans.
+// ToOTLP renders a batch of spans as a single OTLP resourceSpans payload. For
+// an empty batch it returns a well-formed envelope with an empty resourceSpans
+// array — never a nil/`null` body — so a consumer always receives valid OTLP
+// (an underivable session POSTs "no spans", not garbage).
 func ToOTLP(spans []Span) map[string]any {
 	if len(spans) == 0 {
-		return nil
+		return map[string]any{"resourceSpans": []map[string]any{}}
 	}
 	inner := make([]map[string]any, 0, len(spans))
 	for _, sp := range spans {

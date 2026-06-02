@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -250,6 +252,83 @@ func (g *GoGitClient) ListTags(repoPath string) ([]RefInfo, error) {
 		return nil, fmt.Errorf("iterate tags: %w", err)
 	}
 	return refs, nil
+}
+
+// RefVersions returns every branch and tag in the repo resolved to its target
+// commit, enriched with the commit's committer time and subject line. Results
+// are sorted newest-commit-first so the dashboard's version tree reads like a
+// release timeline. Annotated tags are dereferenced to the commit they wrap.
+// This is a concrete read helper (not on the GitClient interface) used only by
+// the read-only dashboard, so it stays off the mockable surface.
+func (g *GoGitClient) RefVersions(repoPath string) ([]RefVersion, error) {
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("open repo: %w", err)
+	}
+
+	// commitMeta resolves a hash (possibly an annotated-tag object) to its
+	// underlying commit's time and subject. A ref we can't resolve still gets
+	// listed — just without time/subject — so a partially-corrupt repo never
+	// blanks the whole version tree.
+	commitMeta := func(h plumbing.Hash) (time.Time, string, plumbing.Hash) {
+		hash := h
+		if tagObj, terr := repo.TagObject(h); terr == nil {
+			if c, cerr := tagObj.Commit(); cerr == nil {
+				hash = c.Hash
+			}
+		}
+		c, cerr := repo.CommitObject(hash)
+		if cerr != nil {
+			return time.Time{}, "", hash
+		}
+		subject := c.Message
+		if i := strings.IndexByte(subject, '\n'); i >= 0 {
+			subject = subject[:i]
+		}
+		return c.Committer.When, strings.TrimSpace(subject), hash
+	}
+
+	var out []RefVersion
+
+	branches, err := repo.Branches()
+	if err != nil {
+		return nil, fmt.Errorf("list branches: %w", err)
+	}
+	if err := branches.ForEach(func(ref *plumbing.Reference) error {
+		when, subject, hash := commitMeta(ref.Hash())
+		out = append(out, RefVersion{
+			Name: ref.Name().Short(), Hash: hash.String(), IsTag: false,
+			Time: when, Subject: subject,
+		})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("iterate branches: %w", err)
+	}
+
+	tags, err := repo.Tags()
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	if err := tags.ForEach(func(ref *plumbing.Reference) error {
+		when, subject, hash := commitMeta(ref.Hash())
+		out = append(out, RefVersion{
+			Name: ref.Name().Short(), Hash: hash.String(), IsTag: true,
+			Time: when, Subject: subject,
+		})
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("iterate tags: %w", err)
+	}
+
+	// Newest commit first; ties (same commit time) fall back to name so the
+	// order is stable across runs.
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Time.Equal(out[j].Time) {
+			return out[i].Time.After(out[j].Time)
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 func (g *GoGitClient) LsRemote(ctx context.Context, url string) (*RemoteRefInfo, error) {

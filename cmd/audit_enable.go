@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/ops"
+	"github.com/raks097/quiver/internal/ops/store"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +18,7 @@ Once enabled, installed agent hooks start recording events. Pair with
 'qvr audit install-hooks' to wire your agents.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return setAuditEnabled(true)
+		return setAuditEnabled(cmd.Context(), true)
 	},
 }
 
@@ -26,11 +30,11 @@ becomes a silent no-op — no traces are recorded. The database and any installe
 hooks are left in place; re-enable with 'qvr audit enable'.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return setAuditEnabled(false)
+		return setAuditEnabled(cmd.Context(), false)
 	},
 }
 
-func setAuditEnabled(enabled bool) error {
+func setAuditEnabled(ctx context.Context, enabled bool) error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -38,6 +42,21 @@ func setAuditEnabled(enabled bool) error {
 	cfg.Ops.Enabled = enabled
 	if err := config.Save(cfg); err != nil {
 		return err
+	}
+
+	// Eagerly create + migrate the database on enable so the command does what
+	// its help advertises ("creates the SkillOps database") instead of deferring
+	// schema creation to the first captured event. Opening read-write runs the
+	// migrations and leaves a healthy skillops.db on disk; we close it right
+	// away since hooks open their own handle per event. (#144)
+	if enabled {
+		st, derr := store.Open(ctx, store.OpenOptions{Path: ops.DBPath(cfg)})
+		if derr != nil {
+			return fmt.Errorf("create skillops database: %w", derr)
+		}
+		if cerr := st.Close(); cerr != nil {
+			return fmt.Errorf("close skillops database: %w", cerr)
+		}
 	}
 
 	state := "disabled"
@@ -49,6 +68,7 @@ func setAuditEnabled(enabled bool) error {
 	}
 	printer.Success("audit pipeline " + state)
 	if enabled {
+		printer.Info("Database ready at " + ops.DBPath(cfg))
 		printer.Info("Next: qvr audit install-hooks   (wire your agents)")
 	}
 	return nil

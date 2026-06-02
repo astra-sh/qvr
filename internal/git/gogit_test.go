@@ -156,6 +156,65 @@ func TestListBranches(t *testing.T) {
 	}
 }
 
+func TestRefVersions(t *testing.T) {
+	srcDir := setupTestRepo(t, testSkills)
+	srcRepo, err := gogit.PlainOpen(srcDir)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	head, err := srcRepo.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if _, err := srcRepo.CreateTag("v1.0.0", head.Hash(), nil); err != nil {
+		t.Fatalf("create tag: %v", err)
+	}
+
+	bareDir := filepath.Join(t.TempDir(), "bare.git")
+	if _, err := gogit.PlainClone(bareDir, true, &gogit.CloneOptions{URL: srcDir}); err != nil {
+		t.Fatalf("bare clone: %v", err)
+	}
+
+	client := git.NewGoGitClient()
+	vers, err := client.RefVersions(bareDir)
+	if err != nil {
+		t.Fatalf("RefVersions: %v", err)
+	}
+	if len(vers) < 2 {
+		t.Fatalf("expected >=2 refs, got %d (%+v)", len(vers), vers)
+	}
+
+	var sawTag, sawBranch bool
+	for _, v := range vers {
+		if v.Hash == "" {
+			t.Errorf("ref %q has empty hash", v.Name)
+		}
+		if v.Time.IsZero() {
+			t.Errorf("ref %q has zero commit time", v.Name)
+		}
+		if v.IsTag && v.Name == "v1.0.0" {
+			sawTag = true
+		}
+		if !v.IsTag {
+			sawBranch = true
+		}
+	}
+	if !sawTag {
+		t.Errorf("expected the v1.0.0 tag in %+v", vers)
+	}
+	if !sawBranch {
+		t.Errorf("expected at least one branch in %+v", vers)
+	}
+
+	// Sorted newest-commit-first (non-increasing time).
+	for i := 1; i < len(vers); i++ {
+		if vers[i-1].Time.Before(vers[i].Time) {
+			t.Errorf("versions not sorted newest-first at %d: %v before %v",
+				i, vers[i-1].Time, vers[i].Time)
+		}
+	}
+}
+
 func TestListTags(t *testing.T) {
 	srcDir := setupTestRepo(t, testSkills)
 	srcRepo, err := gogit.PlainOpen(srcDir)

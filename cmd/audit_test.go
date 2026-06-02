@@ -158,6 +158,119 @@ func TestAudit_StatusRuns(t *testing.T) {
 			t.Errorf("status missing agent %q in: %s", agent, stdout)
 		}
 	}
+
+	// #143: status must report whether each agent has a span deriver, so a
+	// raw-only agent isn't presented as fully observable.
+	var resp struct {
+		Agents []struct {
+			Agent   string `json:"agent"`
+			Derives bool   `json:"derives"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		t.Fatalf("decode status json: %v (%s)", err, stdout)
+	}
+	derives := map[string]bool{}
+	for _, a := range resp.Agents {
+		derives[a.Agent] = a.Derives
+	}
+	for _, a := range []string{"claude-code", "codex"} {
+		if !derives[a] {
+			t.Errorf("%s should report derives=true (it has a deriver)", a)
+		}
+	}
+	for _, a := range []string{"copilot", "opencode"} {
+		if derives[a] {
+			t.Errorf("%s should report derives=false (raw-only, no deriver)", a)
+		}
+	}
+}
+
+// TestAudit_Ingest pins #148: a transcript can be recorded as a session with no
+// live hook installed — ingest stores the raw rows and derives spans, and the
+// session is then queryable like any captured one. It is idempotent.
+func TestAudit_Ingest(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	transcript, _ := writeTranscript(t, t.TempDir())
+
+	out, stderr, err := runRoot(t, nil, "audit", "ingest", "--agent", "claude-code", transcript, "--output", "json")
+	if err != nil {
+		t.Fatalf("ingest: err=%v stderr=%q", err, stderr)
+	}
+	var resp struct {
+		Ingested []struct {
+			Agent     string `json:"agent"`
+			SessionID string `json:"session_id"`
+			Lines     int    `json:"lines"`
+			Spans     int    `json:"spans"`
+			Error     string `json:"error"`
+		} `json:"ingested"`
+		Failed int `json:"failed"`
+	}
+	if e := json.Unmarshal([]byte(out), &resp); e != nil {
+		t.Fatalf("decode ingest json: %v\n%s", e, out)
+	}
+	if resp.Failed != 0 || len(resp.Ingested) != 1 {
+		t.Fatalf("want 1 successful ingest, got %+v", resp)
+	}
+	rec := resp.Ingested[0]
+	if rec.Lines != 2 {
+		t.Errorf("lines = %d, want 2", rec.Lines)
+	}
+	if rec.Spans < 1 {
+		t.Errorf("spans = %d, want >=1 (LLM turn derived)", rec.Spans)
+	}
+
+	// Queryable without any hook ever installed.
+	spansOut, _, err := runRoot(t, nil, "audit", "spans", "--session", rec.SessionID, "--output", "json")
+	if err != nil {
+		t.Fatalf("spans after ingest: %v", err)
+	}
+	if !strings.Contains(spansOut, "LLM") {
+		t.Errorf("ingested session should derive an LLM span: %s", spansOut)
+	}
+
+	// Idempotent + incremental: re-ingesting the unchanged file adds no rows.
+	out2, _, err := runRoot(t, nil, "audit", "ingest", "--agent", "claude-code", transcript, "--output", "json")
+	if err != nil {
+		t.Fatalf("re-ingest: %v", err)
+	}
+	var resp2 struct {
+		Ingested []struct {
+			Lines int `json:"lines"`
+		} `json:"ingested"`
+	}
+	if e := json.Unmarshal([]byte(out2), &resp2); e != nil {
+		t.Fatalf("decode re-ingest: %v\n%s", e, out2)
+	}
+	if len(resp2.Ingested) != 1 || resp2.Ingested[0].Lines != 0 {
+		t.Errorf("re-ingest should add 0 lines (idempotent), got %+v", resp2.Ingested)
+	}
+}
+
+// TestAudit_IngestSniffsAgent confirms the agent format is inferred from the
+// transcript when --agent is omitted (a claude transcript → claude-code).
+func TestAudit_IngestSniffsAgent(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	transcript, _ := writeTranscript(t, t.TempDir())
+
+	out, stderr, err := runRoot(t, nil, "audit", "ingest", transcript, "--output", "json")
+	if err != nil {
+		t.Fatalf("ingest (sniff): err=%v stderr=%q", err, stderr)
+	}
+	var resp struct {
+		Ingested []struct {
+			Agent string `json:"agent"`
+			Error string `json:"error"`
+		} `json:"ingested"`
+		Failed int `json:"failed"`
+	}
+	if e := json.Unmarshal([]byte(out), &resp); e != nil {
+		t.Fatalf("decode: %v\n%s", e, out)
+	}
+	if resp.Failed != 0 || len(resp.Ingested) != 1 || resp.Ingested[0].Agent != "claude-code" {
+		t.Errorf("expected sniffed agent claude-code, got %+v", resp)
+	}
 }
 
 // TestAudit_EnableDisable toggles the config flag through the commands.

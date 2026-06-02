@@ -36,6 +36,7 @@ type Store interface {
 	AppendRawTraces(ctx context.Context, rows []*ops.RawTrace, cursor *store.RawCursor) error
 	QueryRawTraces(ctx context.Context, f *store.RawTraceFilter) ([]*ops.RawTrace, error)
 	ReplaceSessionSpans(ctx context.Context, sessionID uuid.UUID, rows []*store.SpanRow) error
+	DeleteSession(ctx context.Context, sessionID uuid.UUID) (int64, error)
 }
 
 // hookPayload is the minimal slice of any agent hook payload we read to locate
@@ -57,6 +58,7 @@ type Result struct {
 	HookStored     bool
 	SpansStored    int
 	SpanError      error // non-nil if span re-derivation failed (capture still succeeded)
+	Pruned         bool  // session dropped by the skill-only retention gate
 }
 
 // Capture ingests one hook firing: it stores the raw hook payload and tails the
@@ -137,33 +139,85 @@ func Capture(ctx context.Context, s Store, agent, hookType string, payload []byt
 	}
 
 	// Re-derive and persist this session's spans whenever new transcript lines
-	// landed. Spans are a regenerable projection stored alongside raw (parity +
-	// later deriver improvements); a derive failure must never fail capture.
-	if res.LinesStored > 0 {
-		n, err := persistSpans(ctx, s, sessionID, agent)
+	// landed — and also on a session-completion firing, so the skill-only
+	// retention gate below can judge the finished session even if this firing
+	// brought no new lines. Spans are a regenerable projection stored alongside
+	// raw (parity + later deriver improvements); a derive failure must never
+	// fail capture.
+	completion := isSessionCompletionHook(hookType)
+	if res.LinesStored > 0 || completion {
+		n, hasSkill, derr := persistSpans(ctx, s, sessionID, agent)
 		res.SpansStored = n
-		res.SpanError = err
+		res.SpanError = derr
+
+		// Skill-only retention: Quiver keeps skill-attributed sessions, not
+		// generic transcripts. When a session completes with no skill usage,
+		// drop it whole (raw + spans + cursor). Only sessions whose agent has a
+		// deriver are eligible — for an agent we can't yet derive, absence of a
+		// skill span is unprovable, so we never delete its data.
+		// derr == nil guards against a failed derivation: a query/persist error
+		// yields hasSkill==false without a clean read, so acting on it would
+		// delete a session we never actually proved skill-free.
+		if completion && !hasSkill && derr == nil {
+			if _, ok := derive.Get(agent); ok {
+				if _, perr := s.DeleteSession(ctx, sessionID); perr == nil {
+					res.Pruned = true
+					res.SpansStored = 0
+				}
+				// A prune failure is non-fatal; capture already succeeded.
+			}
+		}
 	}
 	return res, nil
+}
+
+// isSessionCompletionHook reports whether a hook event marks the end of an
+// agent's response — the point at which the skill-only retention gate can judge
+// whether the session used a skill. Both Claude Code and Codex fire "Stop".
+func isSessionCompletionHook(hookType string) bool {
+	return hookType == "Stop"
+}
+
+// Rederive regenerates one session's persisted spans from its stored raw rows.
+// It is the backfill primitive behind `qvr audit rederive`: capture runs span
+// derivation inline on new lines, but sessions captured before a deriver
+// existed (or by an older deriver version) keep stale/empty spans until this
+// replays the projection. It returns the span count and whether the session
+// used any skill (so callers can apply the skill-only retention gate). It is a
+// no-op that returns (0, false, nil) when the agent has no registered deriver —
+// it never wipes spans in that case.
+func Rederive(ctx context.Context, s Store, sessionID uuid.UUID, agent string) (int, bool, error) {
+	return persistSpans(ctx, s, sessionID, agent)
 }
 
 // persistSpans re-derives the whole session from its stored raw rows and
 // replaces the session's persisted spans with the result. Re-deriving the full
 // session (not just the new lines) is what lets turns that span multiple hook
 // firings resolve correctly; span ids are deterministic, so the replace is
-// idempotent.
-func persistSpans(ctx context.Context, s Store, sessionID uuid.UUID, agent string) (int, error) {
+// idempotent. It also reports whether any derived span is skill-attributed.
+func persistSpans(ctx context.Context, s Store, sessionID uuid.UUID, agent string) (int, bool, error) {
 	rows, err := s.QueryRawTraces(ctx, &store.RawTraceFilter{
 		SessionID: &sessionID,
 		Sources:   []string{ops.RawSourceTranscript},
 	})
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	spans, err := derive.DeriveSession(rows)
 	if err != nil {
 		// No registered deriver for this agent is not an error worth failing on.
-		return 0, nil
+		return 0, false, nil
+	}
+	// Promote full skill identity (registry/commit/version/hash) from the
+	// project's qvr.lock onto skill-attributed spans before they're persisted,
+	// so name collisions across registries/versions stay distinguishable (#146).
+	derive.EnrichSkillIdentity(spans, rows)
+	hasSkill := false
+	for _, sp := range spans {
+		if name, ok := sp.Attributes["skill.name"].(string); ok && name != "" {
+			hasSkill = true
+			break
+		}
 	}
 	out := make([]*store.SpanRow, 0, len(spans))
 	for _, sp := range spans {
@@ -182,7 +236,7 @@ func persistSpans(ctx context.Context, s Store, sessionID uuid.UUID, agent strin
 			DeriverVersion: derive.Version,
 		})
 	}
-	return len(out), s.ReplaceSessionSpans(ctx, sessionID, out)
+	return len(out), hasSkill, s.ReplaceSessionSpans(ctx, sessionID, out)
 }
 
 // line is one complete transcript line plus its start offset in the file.

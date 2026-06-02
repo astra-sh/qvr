@@ -14,7 +14,11 @@ import (
 // There is no sessions table in the raw-only model — a "session" is just the
 // set of rows sharing a session_id, so its boundaries and counts are derived.
 type RawSession struct {
-	SessionID        uuid.UUID `json:"session_id"`
+	SessionID uuid.UUID `json:"session_id"`
+	// Title is the first prompt the user typed, derived on demand by the UI
+	// layer (not stored). It's the human-readable name of the session; empty
+	// until populated by a caller that has the session's raw rows.
+	Title            string    `json:"title,omitempty"`
 	AgentName        string    `json:"agent_name"`
 	AgentSessionID   string    `json:"agent_session_id,omitempty"`
 	WorkingDirectory string    `json:"working_directory,omitempty"`
@@ -23,12 +27,18 @@ type RawSession struct {
 	TranscriptLines  int64     `json:"transcript_lines"`
 	HookPayloads     int64     `json:"hook_payloads"`
 	TotalRows        int64     `json:"total_rows"`
+	// Skills lists the distinct skills this session used (skill.name from its
+	// SKILL-attributed spans). Derived on demand by a caller that has the store;
+	// empty until populated. Drives the skill filter + chips on the UI.
+	Skills []string `json:"skills,omitempty"`
 }
 
 // RawSessionFilter scopes ListRawSessions. Nil/zero fields are ignored.
 type RawSessionFilter struct {
 	Since *time.Time // sessions whose first row is at/after this time
+	Until *time.Time // sessions whose first row is at/before this time
 	Agent string
+	Skill string   // only sessions that used this skill (matched via spans)
 	Dirs  []string // working_directory ∈ Dirs (empty = all)
 	Limit int
 }
@@ -60,15 +70,32 @@ func (s *sqliteStore) ListRawSessions(ctx context.Context, f *RawSessionFilter) 
 				args = append(args, d)
 			}
 		}
+		if f.Skill != "" {
+			// A session "used" a skill when one of its derived spans is attributed
+			// to it (skill.name lives inside the spans.attributes JSON). Restrict
+			// to sessions whose span set includes the requested skill.
+			where = append(where,
+				`session_id IN (SELECT DISTINCT session_id FROM spans
+				  WHERE json_extract(attributes, '$."skill.name"') = ?)`)
+			args = append(args, f.Skill)
+		}
 	}
 	q := rawSessionSelect
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
 	q += " GROUP BY session_id"
+	var having []string
 	if f != nil && f.Since != nil {
-		q += " HAVING MIN(captured_at) >= ?"
+		having = append(having, "MIN(captured_at) >= ?")
 		args = append(args, f.Since.UTC())
+	}
+	if f != nil && f.Until != nil {
+		having = append(having, "MIN(captured_at) <= ?")
+		args = append(args, f.Until.UTC())
+	}
+	if len(having) > 0 {
+		q += " HAVING " + strings.Join(having, " AND ")
 	}
 	q += " ORDER BY MIN(captured_at) DESC"
 	if f != nil && f.Limit > 0 {
@@ -108,6 +135,40 @@ func (s *sqliteStore) ListRawSessions(ctx context.Context, f *RawSessionFilter) 
 			rs.LastAt = t
 		}
 		out = append(out, &rs)
+	}
+	return out, rows.Err()
+}
+
+// SkillsForSessions returns the distinct skill names attributed to each given
+// session, keyed by session id string. skill.name lives inside each span's
+// attributes JSON, so this extracts it from the spans of the requested
+// sessions. Sessions with no skill span are absent from the result. An empty
+// ids slice returns an empty map without querying.
+func (s *sqliteStore) SkillsForSessions(ctx context.Context, ids []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	q := `SELECT DISTINCT session_id, json_extract(attributes, '$."skill.name"') AS skill
+	      FROM spans
+	      WHERE session_id IN (` + placeholders(len(ids)) + `)
+	        AND skill IS NOT NULL AND skill != ''
+	      ORDER BY session_id, skill`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: skills for sessions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sid, skill string
+		if err := rows.Scan(&sid, &skill); err != nil {
+			return nil, fmt.Errorf("store: scan session skill: %w", err)
+		}
+		out[sid] = append(out[sid], skill)
 	}
 	return out, rows.Err()
 }

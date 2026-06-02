@@ -10,6 +10,7 @@ import Tree from "./pages/Tree";
 import Scan from "./pages/Scan";
 import Provenance from "./pages/Provenance";
 import Registries from "./pages/Registries";
+import RegistryDetail from "./pages/RegistryDetail";
 import { getScope, setScope, scopeToken, type Scope } from "./api";
 
 export default function App() {
@@ -28,6 +29,7 @@ export default function App() {
       <Routes key={scopeToken(scope)}>
         <Route path="/" element={<Overview />} />
         <Route path="/registries" element={<Registries />} />
+        <Route path="/registries/:name" element={<RegistryDetail />} />
         <Route path="/sessions" element={<Sessions />} />
         <Route path="/sessions/:id" element={<SessionDetail />} />
         <Route path="/skills" element={<Skills />} />

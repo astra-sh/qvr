@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { api, useFetch } from "../api";
+import { api, prettyAgent, useFetch } from "../api";
 import {
   Card,
   Empty,
@@ -42,7 +42,7 @@ export default function Overview() {
 
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <StatCard label="Sessions" value={data.sessions} />
-            <StatCard label="Events" value={data.events} />
+            <StatCard label="Traces" value={data.events} />
             <StatCard label="Skills" value={data.skills} />
             <StatCard label="Registries" value={data.registries} />
           </div>
@@ -76,15 +76,21 @@ export default function Overview() {
               ) : (
                 <ul className="divide-y divide-gray-100">
                   {data.recent_sessions.map((s) => (
-                    <li key={s.id} className="flex items-center justify-between py-2">
+                    <li
+                      key={s.session_id}
+                      className="flex items-center justify-between gap-3 py-2"
+                    >
                       <Link
-                        to={`/sessions/${s.id}`}
-                        className="text-sm font-medium text-blue-600 hover:underline"
+                        to={`/sessions/${s.session_id}`}
+                        className="min-w-0 truncate text-sm font-medium text-blue-600 hover:underline"
+                        title={s.title || s.session_id}
                       >
-                        {s.agent_name}
-                        {s.project_name ? ` · ${s.project_name}` : ""}
+                        {s.title || "untitled session"}
                       </Link>
-                      <span className="text-xs text-gray-400">{fmtTime(s.started_at)}</span>
+                      <span className="flex shrink-0 items-center gap-2">
+                        <Pill tone="blue">{prettyAgent(s.agent_name)}</Pill>
+                        <span className="text-xs text-gray-400">{fmtTime(s.started_at)}</span>
+                      </span>
                     </li>
                   ))}
                 </ul>

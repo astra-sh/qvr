@@ -178,7 +178,15 @@ func runAuditSpans(cmd *cobra.Command, args []string) error {
 		return printer.JSON(spans)
 	}
 	if len(spans) == 0 {
-		printer.Info("no spans derived (no transcript captured for this scope)")
+		// Distinguish "nothing was captured" from "rows exist but didn't
+		// derive". The latter is usually an agent with no registered deriver
+		// (deriveGrouped already warned per session with the real cause) — say
+		// so, rather than the false "no transcript captured" when rows exist.
+		if len(rows) > 0 {
+			printer.Info("no spans derived for this scope (captured transcript rows did not yield spans)")
+		} else {
+			printer.Info("no spans derived (no transcript captured for this scope)")
+		}
 		return nil
 	}
 	headers := []string{"KIND", "NAME", "MODEL", "TOKENS", "SKILL"}
@@ -216,6 +224,9 @@ func deriveGrouped(rows []*ops.RawTrace) ([]derive.Span, error) {
 			// dropping it silently, so a failed derivation is visible.
 			printer.Warning(fmt.Sprintf("skip session %s: %v", cur, err))
 		} else {
+			// Promote skill identity from qvr.lock so name collisions across
+			// registries/versions stay distinguishable in the output (#146).
+			derive.EnrichSkillIdentity(s, batch)
 			spans = append(spans, s...)
 		}
 		batch = nil

@@ -9,9 +9,14 @@ import (
 	"github.com/raks097/quiver/internal/ops"
 )
 
-// configDir returns the Claude Code config directory (~/.claude). It does
-// not check existence — Detect does that.
+// configDir returns the Claude Code config directory, honoring
+// CLAUDE_CONFIG_DIR (the same env claude-code itself reads to locate its
+// config) and falling back to ~/.claude. It does not check existence —
+// Detect does that.
 func configDir() (string, error) {
+	if env := os.Getenv("CLAUDE_CONFIG_DIR"); env != "" {
+		return env, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -38,7 +43,7 @@ func (a *Adapter) Detect() (ops.DetectionResult, error) {
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		return ops.DetectionResult{
 			Detected: false,
-			Message:  "Claude Code not detected (~/.claude not found)",
+			Message:  "Claude Code not detected (" + dir + " not found)",
 		}, nil
 	}
 	return ops.DetectionResult{
