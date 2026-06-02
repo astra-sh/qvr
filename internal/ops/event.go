@@ -46,13 +46,29 @@ const (
 	ResultBlocked ResultStatus = "blocked"
 )
 
+// Command returns the shell command of a command_exec event (decoded from
+// the typed payload), or "" for any other action or an undecodable payload.
+// Used by the resolver to mine skill references a shell-first agent leaves
+// only inside the command string.
+func (e *Event) Command() string {
+	if e == nil || e.ActionType != ActionCommandExec || len(e.Payload) == 0 {
+		return ""
+	}
+	var p CommandExecPayload
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return ""
+	}
+	return p.Command
+}
+
 // SkillPending is the sentinel skill_name an event carries while its
 // session has not yet referenced any skill. The funnel records events
 // provisionally under this name (skill_name is NOT NULL) and back-fills
 // them to a real skill once one is seen in the session; events whose
-// session ends skill-less keep the sentinel (and are pruned only when
-// ops.prune_skill_less_sessions is set). The parenthesised form can never
-// collide with a real skill name (lowercase alphanumeric + hyphens only).
+// session ends skill-less are pruned by default (kept under the sentinel
+// only when ops.retain_skill_less_sessions is set). The parenthesised form
+// can never collide with a real skill name (lowercase alphanumeric +
+// hyphens only).
 const SkillPending = "(pending)"
 
 // EventSchemaURL is the $schema marker embedded in every MarshalJSON

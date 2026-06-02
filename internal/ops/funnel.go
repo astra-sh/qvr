@@ -46,8 +46,7 @@ type SelfAuditEntry struct {
 // Self-audit action constants mirrored here so the funnel doesn't
 // import internal/ops/store.
 const (
-	SelfAuditHookError        = "hook_error"
-	SelfAuditUnattributedDrop = "unattributed_drop"
+	SelfAuditHookError = "hook_error"
 
 	SelfAuditResultSuccess = "success"
 	SelfAuditResultError   = "error"
@@ -82,10 +81,11 @@ type FunnelDeps struct {
 //
 // Attribution is session-level: every event is recorded (provisionally
 // under SkillPending if its session has no skill yet); once any event in a
-// session references a skill the whole trace is back-filled to it. A session
-// that ends without ever referencing a skill is retained under the pending
-// sentinel by default, and discarded only when ops.prune_skill_less_sessions
-// is set (see PruneSkilllessSessions).
+// session references a skill — including a skill path or `qvr read <skill>`
+// mined out of a command_exec — the whole trace is back-filled to it. A
+// session that ends without ever referencing a skill is pruned by default
+// (noise), and kept only when ops.retain_skill_less_sessions is set (see
+// PruneSkilllessSessions).
 type Funnel struct {
 	deps FunnelDeps
 }
@@ -213,13 +213,14 @@ func (f *Funnel) persistSessionAndEvent(ctx context.Context, e *Event) error {
 		session.AddSkillTouched(own)
 	}
 
-	// Skill-less pruning is opt-in (ops.prune_skill_less_sessions). The default
-	// is capture-first: a session that never references an installed skill is
-	// still recorded under the pending sentinel, not deleted at its end.
-	// Destructively dropping a completed session defeated the whole point of an
-	// audit trail and made every skill-less agent run — e.g. a plain
-	// `codex exec "echo hi"` — record nothing while exiting 0, looking exactly
-	// like total capture failure (issue #138).
+	// Skill-less pruning is the default: the audit surface tracks
+	// skill-attributed activity, so a session that ends having touched no
+	// installed skill is noise and is discarded at its end. This is only
+	// correct because attribution now also fires on command_exec events (a
+	// shell-first agent's `qvr read <skill>` / `cat .../skills/<skill>/…`),
+	// so a genuine skill session is no longer misread as skill-less and
+	// pruned — which was the real #138 failure. Opt out with
+	// ops.retain_skill_less_sessions to keep everything under the sentinel.
 	prune := PruneSkilllessSessions(f.deps.Config)
 
 	// On any session end, opportunistically sweep orphaned skill-less

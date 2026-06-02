@@ -13,12 +13,13 @@ var gcOlderThan string
 
 var auditGCCmd = &cobra.Command{
 	Use:   "gc",
-	Short: "Sweep recorded sessions that never referenced a skill",
+	Short: "Sweep skill-less sessions that never got a clean end",
 	Long: `Discard recorded sessions that never referenced any skill and have been
-idle past a cutoff. Skill-less sessions are retained by default (the audit
-trail is capture-first), so this is the manual sweep for reclaiming them; set
-ops.prune_skill_less_sessions to discard them automatically at session end
-instead.`,
+idle past a cutoff. Skill-less sessions are normally pruned the moment they
+emit a session-end event; this backstop catches the orphans left behind by an
+agent that crashed or was force-killed before ending its session. (When
+ops.retain_skill_less_sessions is set, nothing is pruned automatically and this
+becomes the only sweep.)`,
 	Args: cobra.NoArgs,
 	RunE: runAuditGC,
 }

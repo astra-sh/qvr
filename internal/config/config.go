@@ -67,15 +67,16 @@ type OpsConfig struct {
 	Privacy       OpsPrivacyConfig          `yaml:"privacy,omitempty" json:"privacy,omitempty"`
 	Agents        map[string]OpsAgentConfig `yaml:"agents,omitempty" json:"agents,omitempty"`
 
-	// PruneSkilllessSessions, when true, discards a session (and its events)
-	// the moment it ends without ever referencing an installed skill — the
-	// old noise-reduction behaviour. It defaults to false: an audit trail is
-	// capture-first, so a session that runs `echo hi` with no skill is still
-	// recorded (under the pending sentinel) rather than deleted at its end.
-	// Deleting completed sessions silently defeated the security-attribution
-	// purpose and made every skill-less agent run (e.g. a plain `codex exec`)
-	// look like total capture failure — see issue #138.
-	PruneSkilllessSessions bool `yaml:"prune_skill_less_sessions,omitempty" json:"prune_skill_less_sessions,omitempty"`
+	// RetainSkilllessSessions, when true, keeps a session that ends without
+	// ever referencing an installed skill (recorded under the pending
+	// sentinel) instead of discarding it. It defaults to false: skill-less
+	// sessions are pruned at their end, because the audit surface is about
+	// *skill-attributed* activity and a session that touches no skill is
+	// noise. This is only safe because attribution now also fires on
+	// command_exec events — a shell-first agent's `qvr read <skill>` or a
+	// `cat .codex/skills/<skill>/…` touch is attributed, so a genuine skill
+	// session is no longer mistaken for skill-less and pruned (see #138).
+	RetainSkilllessSessions bool `yaml:"retain_skill_less_sessions,omitempty" json:"retain_skill_less_sessions,omitempty"`
 }
 
 // OpsLoggingConfig tunes how much of an event's content survives the

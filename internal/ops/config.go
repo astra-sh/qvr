@@ -66,12 +66,14 @@ func ApplyDefaults(cfg *config.Config) {
 
 // PruneSkilllessSessions reports whether a session that ends without ever
 // referencing an installed skill should be discarded at its end (and swept
-// when orphaned). The default is false — retain everything; the audit trail
-// is capture-first. Opt in via `ops.prune_skill_less_sessions: true` (or run
-// `qvr audit gc` for a one-off sweep) when only skill-attributed sessions
-// matter. See issue #138.
+// when orphaned). The default is true — the audit surface tracks
+// skill-attributed activity, so a session that touches no skill is noise.
+// Opt out with `ops.retain_skill_less_sessions: true` to keep everything
+// under the pending sentinel. Pruning is only safe because command_exec
+// events are now attributed too (see the resolver), so a real skill session
+// is never mistaken for skill-less. See issue #138.
 func PruneSkilllessSessions(cfg *config.Config) bool {
-	return cfg != nil && cfg.Ops.PruneSkilllessSessions
+	return cfg == nil || !cfg.Ops.RetainSkilllessSessions
 }
 
 // AgentLoggingLevel returns the effective logging level for the given

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -442,12 +443,10 @@ func TestFunnel_MultipleSkills_AllInSkillsTouched(t *testing.T) {
 	}
 }
 
-// --- Skill-less session is discarded at its end only when opted in ---
+// --- Skill-less session is discarded at its end (default) ---
 
 func TestFunnel_SessionEnd_SkillLess_Pruned(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Ops.PruneSkilllessSessions = true // opt in to the old noise-reduction behaviour
-	h := newFunnelHarness(t, cfg, &model.LockEntry{Name: "foo"})
+	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
 	// An ordinary (pending) event, then a session end with no skill.
 	pre := mustJSON(t, map[string]any{
 		"agent_name":       "claude",
@@ -476,14 +475,15 @@ func TestFunnel_SessionEnd_SkillLess_Pruned(t *testing.T) {
 	}
 }
 
-// --- Skill-less session is retained at its end by default (issue #138) ---
+// --- Skill-less session is kept when ops.retain_skill_less_sessions is set ---
 //
 // A real `codex exec "echo hi"` fires SessionStart→…→Stop without ever
-// touching an installed skill. The default must capture it, not delete the
-// whole trace at Stop (which previously netted zero rows + exit 0 and was
-// misread as a Codex sandbox swallowing the write).
-func TestFunnel_SessionEnd_SkillLess_RetainedByDefault(t *testing.T) {
-	h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
+// touching an installed skill. With retention opted in, the whole trace is
+// kept under the pending sentinel rather than discarded at Stop.
+func TestFunnel_SessionEnd_SkillLess_RetainedWhenConfigured(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ops.RetainSkilllessSessions = true
+	h := newFunnelHarness(t, cfg, &model.LockEntry{Name: "foo"})
 	pre := mustJSON(t, map[string]any{
 		"agent_name":       "codex",
 		"agent_session_id": "live",
@@ -506,7 +506,6 @@ func TestFunnel_SessionEnd_SkillLess_RetainedByDefault(t *testing.T) {
 	if len(h.store.sessions) != 1 {
 		t.Fatalf("expected the skill-less session to be retained; got %d sessions", len(h.store.sessions))
 	}
-	// Both the pre-event and the terminal Stop event survive, under pending.
 	if len(h.store.events) != 2 {
 		t.Fatalf("expected both events retained; got %d", len(h.store.events))
 	}
@@ -519,6 +518,72 @@ func TestFunnel_SessionEnd_SkillLess_RetainedByDefault(t *testing.T) {
 		if s.EndedAt == nil {
 			t.Errorf("expected EndedAt set on the retained skill-less session")
 		}
+	}
+}
+
+// --- command_exec skill reference is attributed (issue #138 follow-up) ---
+//
+// Codex touches skills only by shelling out — `qvr read <skill>` or a
+// `cat`/`sed` of the skill's install path. Those land as command_exec events
+// with the reference buried in the command string. The resolver must mine it
+// so the session is attributed (and therefore survives skill-less pruning),
+// instead of staying (pending) forever.
+func TestFunnel_CommandExec_AttributesSkill(t *testing.T) {
+	// cmdFor builds the command string from the harness's own worktree dir so
+	// the absolute-path case points at the resolver's actual target.
+	cases := []struct {
+		name   string
+		cmdFor func(skillDir string) string
+	}{
+		{"qvr read <skill>", func(string) string { return "qvr read foo" }},
+		{"absolute worktree path", func(d string) string { return "sed -n '1,20p' " + filepath.Join(d, "SKILL.md") }},
+		{"agent symlink path", func(string) string { return "cat .codex/skills/foo/SKILL.md" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFunnelHarness(t, nil, &model.LockEntry{Name: "foo"})
+			skillDir := h.wts["foo"]
+			// The agent-symlink case needs the symlink to actually resolve to
+			// the worktree; create it under the funnel's cwd-equivalent.
+			cwd := filepath.Dir(skillDir)
+			if tc.name == "agent symlink path" {
+				link := filepath.Join(cwd, ".codex", "skills")
+				if err := os.MkdirAll(link, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(skillDir, filepath.Join(link, "foo")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			read := mustJSON(t, map[string]any{
+				"agent_name":        "codex",
+				"agent_session_id":  "sess",
+				"action_type":       "command_exec",
+				"working_directory": cwd,
+				"payload":           map[string]any{"command": tc.cmdFor(skillDir)},
+			})
+			end := mustJSON(t, map[string]any{
+				"agent_name":       "codex",
+				"agent_session_id": "sess",
+				"action_type":      "session_end",
+			})
+			if err := h.funnel.Ingest(context.Background(), "PreToolUse", read); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.funnel.Ingest(context.Background(), "Stop", end); err != nil {
+				t.Fatal(err)
+			}
+			h.store.mu.Lock()
+			defer h.store.mu.Unlock()
+			if len(h.store.sessions) != 1 {
+				t.Fatalf("expected the attributed session to survive pruning; got %d", len(h.store.sessions))
+			}
+			for _, s := range h.store.sessions {
+				if len(s.SkillsTouched) != 1 || s.SkillsTouched[0] != "foo" {
+					t.Errorf("SkillsTouched=%v want [foo]", s.SkillsTouched)
+				}
+			}
+		})
 	}
 }
 

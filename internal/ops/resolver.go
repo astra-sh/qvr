@@ -169,6 +169,34 @@ func (r *lockResolver) Attribute(e *Event) (Attribution, bool) {
 		}
 	}
 
+	// command_exec attribution. Shell-first agents — Codex above all — never
+	// emit a structured file_read with a resolved path; every skill touch is
+	// an opaque `sed`/`cat`/`qvr read` shelled out through Bash. The skill
+	// reference therefore lives only inside the command string. Mine it:
+	// first an explicit `qvr read <skill>` hot-path call, then any skill-dir
+	// path the command names (resolved against the event's cwd, symlink-
+	// followed to the worktree by attributePath). Without this, Codex skill
+	// usage is invisible to attribution and — under skill-less pruning —
+	// the whole session is discarded as noise.
+	if cmd := e.Command(); cmd != "" {
+		if name := SkillRefFromCommand(cmd); name != "" {
+			if t, ok := r.targetByName(name); ok {
+				attr := Attribution{Name: name, Registry: t.entry.Registry, Commit: t.entry.Commit}
+				r.rememberSession(e.SessionID, attr)
+				return attr, true
+			}
+		}
+		for _, tok := range CommandSkillPaths(cmd) {
+			if !filepath.IsAbs(tok) && e.WorkingDirectory != "" {
+				tok = filepath.Join(e.WorkingDirectory, tok)
+			}
+			if attr, ok := r.attributePath(tok); ok {
+				r.rememberSession(e.SessionID, attr)
+				return attr, true
+			}
+		}
+	}
+
 	// Session fallback: look up the last attribution for this session.
 	if e.SessionID != uuid.Nil {
 		r.sessionMu.RLock()
@@ -196,6 +224,22 @@ func (r *lockResolver) AttributeByName(name string) Attribution {
 		}
 	}
 	return Attribution{Name: name}
+}
+
+// targetByName returns the installed target for an exact skill name, if any.
+// Used to confirm a `qvr read <name>` reference points at a real installed
+// skill before attributing to it (an unknown name is left unattributed
+// rather than minting a bogus skill).
+func (r *lockResolver) targetByName(name string) (target, bool) {
+	if r == nil || name == "" {
+		return target{}, false
+	}
+	for _, t := range r.targets {
+		if t.entry != nil && t.entry.Name == name {
+			return t, true
+		}
+	}
+	return target{}, false
 }
 
 // attributePath matches one path against every target. The first match
