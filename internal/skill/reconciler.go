@@ -179,9 +179,19 @@ func (r *Reconciler) restoreFromLock(lock *model.LockFile, projectRoot string, g
 // edit copy (a real directory), so we never try to symlink over it. Sibling
 // targets get repointed at the canonical via CreateSymlink as usual.
 func (r *Reconciler) fixSymlinks(entry *model.LockEntry, projectRoot string, global bool, opts ReconcileOptions, res *ReconcileResult) error {
-	target := EffectiveTarget(entry, projectRoot)
+	// A consumed root-layout skill links to a sanitized view (no .git), not the
+	// worktree root (issue #154). AgentLinkTarget names it; materialize it on a
+	// real (non-dry-run) reconcile so the symlink resolves. Dry-run stays
+	// side-effect-free.
+	target := AgentLinkTarget(entry, projectRoot)
 	if target == "" {
 		return nil // nothing to link (e.g. fresh entry where install just failed)
+	}
+	if !opts.DryRun && isConsumedRootLayout(entry) {
+		if _, verr := MaterializeAgentView(entry, projectRoot); verr != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: agent view: %v", entry.Name, verr))
+			return nil
+		}
 	}
 	// For edit-mode entries the canonical EditPath is itself a real directory
 	// that must not be replaced with a self-referential symlink. Identify the

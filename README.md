@@ -113,14 +113,14 @@ Tell `qvr` where skills live. Any git clone URL works — one skill or fifty,
 doesn't matter. The indexer walks the repo and finds them.
 
 ```
-    $ qvr registry add https://github.com/vercel-labs/agent-skills
-    registered as vercel-labs/agent-skills
+    $ qvr registry add https://github.com/acme-labs/agent-skills
+    registered as acme-labs/agent-skills
 
     $ qvr registry add https://github.com/user/my-skill
     registered as user/my-skill
 
     $ qvr registry list                              # all registered sources
-    $ qvr registry list vercel-labs/agent-skills    # skills inside one source
+    $ qvr registry list acme-labs/agent-skills    # skills inside one source
 ```
 
 Use `--name <alias>` to override the auto-inferred `<org>/<repo>` name (handy
@@ -200,7 +200,7 @@ repo/                               repo/
 
 - **Layout A** — every immediate subdirectory of `skills/` with a valid
   `SKILL.md` becomes one indexed skill. This is the convention used by
-  `vercel-labs/agent-skills`, `anthropics/skills`, and friends.
+  `acme-labs/agent-skills`, `example-org/skills`, and friends.
 - **Layout B** — no `skills/` dir, but a root `SKILL.md` → the repo is treated
   as one skill at `.`.
 
@@ -330,7 +330,7 @@ the tag or branch shifts upstream.
     $ qvr publish foo --tag v1.3.0 -m "v1.3.0"
 
     # teammate picks up the new release
-    $ qvr registry update vercel-labs/agent-skills
+    $ qvr registry update acme-labs/agent-skills
     $ qvr upgrade foo                       # resolves latest semver tag, moves worktree
 ```
 

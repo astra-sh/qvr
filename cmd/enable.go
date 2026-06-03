@@ -87,7 +87,12 @@ func runEnable(cmd *cobra.Command, args []string) error {
 // enableSkill re-creates symlinks for each declared target. Idempotent:
 // CreateSymlink returns nil for symlinks already pointing at the worktree.
 func enableSkill(entry *model.LockEntry, projectRoot string, global bool) ([]string, error) {
-	target := skill.EffectiveTarget(entry, projectRoot)
+	// Link to the sanitized view for a consumed root-layout skill so .git isn't
+	// exposed (issue #154); a no-op passthrough for every other shape.
+	target, err := skill.MaterializeAgentView(entry, projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("agent view: %w", err)
+	}
 	if target == "" {
 		return nil, fmt.Errorf("skill %q has no worktree to link to", entry.Name)
 	}

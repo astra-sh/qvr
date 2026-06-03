@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Category labels the SkillSpector / Quiver taxonomy bucket a [Rule]
+// Category labels the detection-taxonomy bucket a [Rule]
 // belongs to. Findings expose this in JSON so dashboards can group by
 // category without re-parsing the rule ID.
 type Category string
@@ -36,7 +36,7 @@ const (
 // scope the rule to certain files; nil/empty means every text file. The
 // match is against the FileEntry.Path (forward-slash, skill-relative).
 //
-// Confidence is a 0.0-1.0 score that mirrors the SkillSpector taxonomy.
+// Confidence is a 0.0-1.0 score graded against the detection taxonomy.
 // It is exposed on findings so downstream tooling (UI, review packets)
 // can sort or threshold without re-deriving from message text. It is not
 // used by --severity / --fail-on, which act on Severity alone.

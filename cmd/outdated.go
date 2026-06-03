@@ -121,11 +121,12 @@ func runOutdated(cmd *cobra.Command, args []string) error {
 	for _, r := range rows {
 		remoteCol := shortSHA(r.Remote)
 		// Tag-pinned rows show the tag name a caller would move to so the user
-		// can see v0.1.1 → v0.2.0 rather than two opaque SHAs.
+		// can see v0.1.1 → v0.2.0 rather than two opaque SHAs. Strip the
+		// per-skill namespace prefix for display (#152).
 		if r.LatestTag != "" {
-			remoteCol = r.LatestTag
+			remoteCol = model.VersionPortion(r.LatestTag)
 		}
-		row := []string{r.Name, r.Branch, shortSHA(r.Local), remoteCol, r.State, signedCol(r.Signature)}
+		row := []string{r.Name, model.VersionPortion(r.Branch), shortSHA(r.Local), remoteCol, r.State, signedCol(r.Signature)}
 		if outdatedAll {
 			row = append([]string{r.Scope}, row...)
 		}
@@ -218,11 +219,11 @@ func computeOutdated(entry *model.LockEntry, remote remoteResult) outdatedRow {
 	// Compare pinned tag against the highest-sorted semver tag in the remote
 	// refs and, if newer, surface the new tag so `qvr upgrade` has a target.
 	if matchKind == "tag" && model.IsSemverTag(entry.Ref) {
-		if latestName, latestHash := latestSemverRemoteTag(remote.refs); latestName != "" && latestName != entry.Ref {
+		if latestName, latestHash := latestSemverRemoteTag(remote.refs, entry.Name); latestName != "" && latestName != entry.Ref {
 			row.LatestTag = latestName
 			row.Remote = latestHash
 			row.State = outStateBehind
-			row.Reason = fmt.Sprintf("newer tag %s available", latestName)
+			row.Reason = fmt.Sprintf("newer tag %s available", model.VersionPortion(latestName))
 			return row
 		}
 		row.State = outStateUpToDate
@@ -238,9 +239,11 @@ func computeOutdated(entry *model.LockEntry, remote remoteResult) outdatedRow {
 }
 
 // latestSemverRemoteTag scans the remote ref map for refs/tags/<semver> entries
-// and returns the name+hash of the highest-sorted one. Returns ("", "") when
-// the remote publishes no semver tags.
-func latestSemverRemoteTag(refs *git.RemoteRefInfo) (string, string) {
+// belonging to skillName and returns the name+hash of the highest-sorted one.
+// Returns ("", "") when the remote publishes no semver tags for the skill.
+// Scoping by skill keeps a multi-skill registry from reporting a sibling's
+// newer tag as this skill's upgrade target (issue #152).
+func latestSemverRemoteTag(refs *git.RemoteRefInfo, skillName string) (string, string) {
 	if refs == nil {
 		return "", ""
 	}
@@ -254,7 +257,7 @@ func latestSemverRemoteTag(refs *git.RemoteRefInfo) (string, string) {
 			// Peeled tag ref — ignore; the non-peeled entry carries the tag name we want.
 			continue
 		}
-		if !model.IsSemverTag(name) {
+		if !model.IsSemverTag(name) || !model.TagBelongsToSkill(name, skillName) {
 			continue
 		}
 		tags = append(tags, name)

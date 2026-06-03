@@ -10,6 +10,30 @@ import (
 	"time"
 )
 
+// RootSkillContentDirs are the directories (alongside SKILL.md) that make up a
+// root-layout skill's installable/scannable content when it shares a repo with
+// sibling skills. App code (bin/, lib/, test/, …) is deliberately excluded.
+var RootSkillContentDirs = []string{"references", "scripts", "assets"}
+
+// SkillScopePaths returns the repo-relative paths that make up a skill's
+// installable and scannable content, given its source subpath and whether it is
+// a root skill coexisting with siblings. It is the single source of truth shared
+// by the index, the scan gate, and the installer.
+//
+//   - A non-root skill owns its whole subtree → [path].
+//   - A lone root skill owns the whole repo → nil ("no sparse narrowing").
+//   - A root skill coexisting with siblings owns only SKILL.md + the recognized
+//     content dirs — never the siblings or unrelated app code.
+func SkillScopePaths(path string, rootCoexists bool) []string {
+	if path != "" && path != "." {
+		return []string{path}
+	}
+	if rootCoexists {
+		return append([]string{"SKILL.md"}, RootSkillContentDirs...)
+	}
+	return nil
+}
+
 // LockFileVersion is the current lock file schema version.
 //
 // v5 slims the v4 shape. Drops dead fields (worktree, installPath,
@@ -73,6 +97,14 @@ type LockEntry struct {
 	// Path is the subpath inside the source repo. Empty for link installs
 	// (the whole target tree is the skill).
 	Path string `json:"path,omitempty"`
+
+	// RootCoexists records that this is a root-layout skill (Path ".") that
+	// shared its repo with sibling skill directories at install time, so its
+	// content was scoped to SKILL.md + the recognized content dirs rather than
+	// the whole repo. Persisted so a reproducible restore (`qvr sync` at the
+	// pinned commit) re-applies the same scope even if the registry's current
+	// HEAD no longer reports the sibling layout. See SkillScopePaths.
+	RootCoexists bool `json:"rootCoexists,omitempty"`
 
 	// Canonical is the registry-side skill name when the user installed
 	// under an alias via `qvr add <skill> --as <alias>`. Empty when the

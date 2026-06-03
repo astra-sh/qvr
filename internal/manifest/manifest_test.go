@@ -12,7 +12,7 @@ import (
 func TestParse_BasicThreeColumn(t *testing.T) {
 	in := `# qvr export — 2026-05-31
 https://github.com/raks097/quiver_playground.git  code-review        v0.2.0
-https://github.com/vercel-labs/agent-skills.git   deploy-to-vercel   main
+https://github.com/acme-labs/agent-skills.git   deploy-to-cloud   main
 https://github.com/OmidZamani/dspy-skills.git     dspy-rag-pipeline  master
 `
 	got, perrs, err := manifest.Parse(strings.NewReader(in))
@@ -24,7 +24,7 @@ https://github.com/OmidZamani/dspy-skills.git     dspy-rag-pipeline  master
 	}
 	want := []manifest.Entry{
 		{RepoURL: "https://github.com/raks097/quiver_playground.git", Skill: "code-review", Version: "v0.2.0", Line: 2},
-		{RepoURL: "https://github.com/vercel-labs/agent-skills.git", Skill: "deploy-to-vercel", Version: "main", Line: 3},
+		{RepoURL: "https://github.com/acme-labs/agent-skills.git", Skill: "deploy-to-cloud", Version: "main", Line: 3},
 		{RepoURL: "https://github.com/OmidZamani/dspy-skills.git", Skill: "dspy-rag-pipeline", Version: "master", Line: 4},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -110,7 +110,7 @@ func TestParse_Errors(t *testing.T) {
 func TestFormat_RoundTrip(t *testing.T) {
 	entries := []manifest.Entry{
 		{RepoURL: "https://github.com/raks097/quiver_playground.git", Skill: "code-review", Version: "v0.2.0"},
-		{RepoURL: "https://github.com/vercel-labs/agent-skills.git", Skill: "deploy-to-vercel", Version: "main", Targets: []string{"cursor", "claude"}},
+		{RepoURL: "https://github.com/acme-labs/agent-skills.git", Skill: "deploy-to-cloud", Version: "main", Targets: []string{"cursor", "claude"}},
 		{RepoURL: "https://github.com/OmidZamani/dspy-skills.git", Skill: "dspy-rag-pipeline", Version: "master", Commit: "deadbeef", Alias: "dspy", RegistryAlias: "omid"},
 	}
 	var buf bytes.Buffer
@@ -132,7 +132,7 @@ func TestFormat_RoundTrip(t *testing.T) {
 	want := []manifest.Entry{
 		{RepoURL: "https://github.com/raks097/quiver_playground.git", Skill: "code-review", Version: "v0.2.0"},
 		// Targets are sorted on emit so the round-trip lands the slice sorted.
-		{RepoURL: "https://github.com/vercel-labs/agent-skills.git", Skill: "deploy-to-vercel", Version: "main", Targets: []string{"claude", "cursor"}},
+		{RepoURL: "https://github.com/acme-labs/agent-skills.git", Skill: "deploy-to-cloud", Version: "main", Targets: []string{"claude", "cursor"}},
 		{RepoURL: "https://github.com/OmidZamani/dspy-skills.git", Skill: "dspy-rag-pipeline", Version: "master", Commit: "deadbeef", Alias: "dspy", RegistryAlias: "omid"},
 	}
 	if !reflect.DeepEqual(got, want) {

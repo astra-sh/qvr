@@ -178,7 +178,7 @@ func TestDoctorChecks_RegistryMissing(t *testing.T) {
 // the lock entry — so the registry-config check must be skipped, not failed.
 func TestDoctorChecks_SubdirSourceSkipsRegistry(t *testing.T) {
 	t.Setenv("QUIVER_HOME", t.TempDir())
-	reg, name, commit := "github.com--mattpocock--skills", "demo", "abc1234"
+	reg, name, commit := "github.com--acme--skills", "demo", "abc1234"
 
 	// Seed the derived worktree path so the worktree check sees a real dir.
 	wtPath := registry.WorktreePath(reg, name, registry.ShortSHA(commit))
@@ -197,7 +197,7 @@ func TestDoctorChecks_SubdirSourceSkipsRegistry(t *testing.T) {
 	lock.Put(&model.LockEntry{
 		Name:     name,
 		Registry: reg,
-		Source:   "https://github.com/mattpocock/skills.git",
+		Source:   "https://github.com/acme/skills.git",
 		Ref:      "main",
 		Commit:   commit,
 		Targets:  []string{"claude"},

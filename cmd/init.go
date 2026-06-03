@@ -12,6 +12,7 @@ import (
 	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/output"
 	"github.com/raks097/quiver/internal/registry"
+	"github.com/raks097/quiver/internal/skill"
 	"github.com/spf13/cobra"
 )
 
@@ -94,6 +95,13 @@ func runInitStandalone(name string) error {
 	if err := scaffoldSkillContent(dir, name); err != nil {
 		return err
 	}
+	// Make the scaffolded dir a real git repo so the advertised publish flow
+	// (`qvr publish ./<name> --fork <url>`) round-trips without manual git
+	// plumbing (issue #150).
+	if err := skill.InitRepoWithCommit(dir, fmt.Sprintf("Initialize skill %s", name), "", ""); err != nil {
+		_ = os.RemoveAll(dir)
+		return fmt.Errorf("init skill repo: %w", err)
+	}
 	if printer.Format == output.FormatJSON {
 		return printer.JSON(map[string]any{
 			"name": name,
@@ -132,6 +140,13 @@ func runInitProjectScoped(name string) error {
 	}
 	if err := scaffoldSkillContent(canonicalAbs, name); err != nil {
 		return err
+	}
+	// Make the edit dir a real git repo from birth — like a worktree-ejected
+	// edit dir — so `qvr publish <name> --fork <url>` (the flow this command
+	// advertises below) works with no manual git init (issue #150).
+	if err := skill.InitRepoWithCommit(canonicalAbs, fmt.Sprintf("Initialize skill %s", name), "", ""); err != nil {
+		_ = os.RemoveAll(canonicalAbs)
+		return fmt.Errorf("init skill repo: %w", err)
 	}
 
 	// Compute subtree hash for the lock entry — gives drift detection a

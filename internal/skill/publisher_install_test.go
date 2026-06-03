@@ -58,8 +58,9 @@ func TestPublishInstalled_DryRun_ReportsRemote(t *testing.T) {
 	if res.Remote != expectedRemote {
 		t.Errorf("Remote = %q, want %q", res.Remote, expectedRemote)
 	}
-	if res.Tag != "v0.1.0" {
-		t.Errorf("Tag = %q, want v0.1.0", res.Tag)
+	// Nested (multi-skill) registry publish namespaces the tag per skill (#152).
+	if res.Tag != "demo/v0.1.0" {
+		t.Errorf("Tag = %q, want demo/v0.1.0 (per-skill namespaced)", res.Tag)
 	}
 	// Lock entry must NOT have been mutated by a dry run.
 	if entry.Mode != model.ModeEdit {

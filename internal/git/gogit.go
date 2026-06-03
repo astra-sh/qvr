@@ -16,6 +16,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 var (
@@ -574,6 +575,61 @@ func (g *GoGitClient) ListTree(repoPath, ref, path string) ([]TreeEntry, error) 
 			IsDir: entry.Mode == filemode.Dir,
 			Hash:  entry.Hash.String(),
 		})
+	}
+	return entries, nil
+}
+
+func (g *GoGitClient) ListBlobsRecursive(repoPath, ref, path string) ([]TreeEntry, error) {
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("open repo: %w", err)
+	}
+
+	hash, err := resolveRef(repo, ref)
+	if err != nil {
+		return nil, fmt.Errorf("%w: resolve ref %q: %v", ErrRefNotFound, ref, err)
+	}
+
+	commit, err := repo.CommitObject(hash)
+	if err != nil {
+		return nil, fmt.Errorf("%w: get commit: %v", ErrTreeNotFound, err)
+	}
+
+	tree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("%w: get root tree: %v", ErrTreeNotFound, err)
+	}
+
+	if path != "" {
+		tree, err = tree.Tree(path)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %s: %v", ErrTreeNotFound, path, err)
+		}
+	}
+
+	// tree.Files() yields every blob reachable from this tree, recursively,
+	// with names relative to the tree root. Prefix the base path back on so
+	// callers always get repo-root-relative paths.
+	var entries []TreeEntry
+	err = tree.Files().ForEach(func(f *object.File) error {
+		full := f.Name
+		if path != "" {
+			full = path + "/" + f.Name
+		}
+		name := full
+		if i := strings.LastIndex(full, "/"); i >= 0 {
+			name = full[i+1:]
+		}
+		entries = append(entries, TreeEntry{
+			Name:  name,
+			Path:  full,
+			IsDir: false,
+			Hash:  f.Hash.String(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("walk blobs: %w", err)
 	}
 	return entries, nil
 }

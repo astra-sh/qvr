@@ -89,7 +89,14 @@ func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdent
 	}
 
 	subTree := rootTree
+	// `path: "."` denotes the repo root — the same target as an empty subpath.
+	// strings.Trim only strips '/', so "." survives it; without this guard a
+	// root-layout skill walks into rootTree.Tree(".") and dies with "locate
+	// subtree \".\": directory not found" (issues #151/#154).
 	clean := strings.Trim(subpath, "/")
+	if clean == "." {
+		clean = ""
+	}
 	if clean != "" {
 		subTree, err = rootTree.Tree(clean)
 		if err != nil {
@@ -97,13 +104,7 @@ func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdent
 		}
 	}
 
-	type entry struct {
-		mode string
-		path string
-		hash string
-	}
-	var entries []entry
-
+	var entries []hashEntry
 	fileIter := subTree.Files()
 	err = fileIter.ForEach(func(f *object.File) error {
 		if IsExcluded(f.Name) {
@@ -113,7 +114,7 @@ func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdent
 		if herr != nil {
 			return fmt.Errorf("hash blob %s: %w", f.Name, herr)
 		}
-		entries = append(entries, entry{
+		entries = append(entries, hashEntry{
 			mode: f.Mode.String(),
 			path: f.Name,
 			hash: blobHash,
@@ -127,8 +128,26 @@ func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdent
 		return nil, errors.New("subtree contains no hashable files")
 	}
 
-	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
+	return &SubtreeIdentity{
+		SubtreeHash: digestEntries(entries),
+		TreeSHA:     subTree.Hash.String(),
+		CommitSHA:   commit.Hash.String(),
+	}, nil
+}
 
+// hashEntry is one (git mode, subtree-relative path, blob sha256) tuple fed
+// into the frozen digest. Shared by the subtree and scoped hashers so both
+// produce byte-identical input for the same content.
+type hashEntry struct {
+	mode string
+	path string
+	hash string
+}
+
+// digestEntries sorts the entries lexicographically by path and folds them
+// into the frozen `<mode>\0<path>\0<hash>\n` digest documented on HashSubtree.
+func digestEntries(entries []hashEntry) string {
+	sort.Slice(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
 	h := sha256.New()
 	for _, e := range entries {
 		_, _ = h.Write([]byte(e.mode))
@@ -138,11 +157,116 @@ func hashSubtreeFromCommit(commit *object.Commit, subpath string) (*SubtreeIdent
 		_, _ = h.Write([]byte(e.hash))
 		_, _ = h.Write([]byte{'\n'})
 	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil))
+}
+
+// HashScoped is HashSubtree for a root-layout skill that shares its repo with
+// sibling skills: instead of one contiguous subtree it hashes a SET of
+// repo-root entries (SKILL.md + the recognized content dirs, per
+// model.SkillScopePaths). The resulting paths are repo-root-relative, exactly
+// matching what HashSubtreeFromDisk produces over a worktree sparse-checked-out
+// to the same scope — so install-side and verify-side digests agree.
+//
+// An empty scope means "no narrowing" → the whole worktree, identical to
+// HashSubtree(worktreePath, "").
+func HashScoped(worktreePath string, scope []string) (*SubtreeIdentity, error) {
+	if len(scope) == 0 {
+		return HashSubtree(worktreePath, "")
+	}
+	repo, err := gogit.PlainOpen(worktreePath)
+	if err != nil {
+		return nil, fmt.Errorf("open worktree: %w", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("resolve HEAD: %w", err)
+	}
+	commit, err := repo.CommitObject(head.Hash())
+	if err != nil {
+		return nil, fmt.Errorf("load commit %s: %w", head.Hash(), err)
+	}
+	return hashScopedFromCommit(commit, scope)
+}
+
+// HashScopedAtCommit is HashScoped pinned to an explicit commit, the scoped
+// analogue of HashSubtreeAtCommit. Used by `qvr lock` re-pin against a bare
+// clone with no worktree.
+func HashScopedAtCommit(repoPath, commitHash string, scope []string) (*SubtreeIdentity, error) {
+	if len(scope) == 0 {
+		return HashSubtreeAtCommit(repoPath, commitHash, "")
+	}
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("open repo: %w", err)
+	}
+	commit, err := repo.CommitObject(plumbing.NewHash(commitHash))
+	if err != nil {
+		return nil, fmt.Errorf("load commit %s: %w", commitHash, err)
+	}
+	return hashScopedFromCommit(commit, scope)
+}
+
+// hashScopedFromCommit hashes the union of the given repo-root scope entries
+// within commit. Each scope entry may be a file (e.g. "SKILL.md") or a
+// directory (e.g. "references"); a directory contributes all of its blobs
+// recursively, with repo-root-relative paths. Scope entries that don't exist
+// in the tree (e.g. an absent "assets") are silently skipped, mirroring a
+// sparse checkout that simply materializes nothing for them.
+func hashScopedFromCommit(commit *object.Commit, scope []string) (*SubtreeIdentity, error) {
+	rootTree, err := commit.Tree()
+	if err != nil {
+		return nil, fmt.Errorf("load tree: %w", err)
+	}
+
+	var entries []hashEntry
+	for _, raw := range scope {
+		p := strings.Trim(raw, "/")
+		if p == "" || p == "." {
+			continue
+		}
+		// A scope entry is either a blob (SKILL.md) or a subtree (references/).
+		if f, ferr := rootTree.File(p); ferr == nil {
+			if IsExcluded(p) {
+				continue
+			}
+			blobHash, herr := blobSHA256(f)
+			if herr != nil {
+				return nil, fmt.Errorf("hash blob %s: %w", p, herr)
+			}
+			entries = append(entries, hashEntry{mode: f.Mode.String(), path: p, hash: blobHash})
+			continue
+		}
+		sub, terr := rootTree.Tree(p)
+		if terr != nil {
+			continue // absent scope entry — nothing to checkout, nothing to hash
+		}
+		walkErr := sub.Files().ForEach(func(f *object.File) error {
+			full := p + "/" + f.Name
+			if IsExcluded(full) {
+				return nil
+			}
+			blobHash, herr := blobSHA256(f)
+			if herr != nil {
+				return fmt.Errorf("hash blob %s: %w", full, herr)
+			}
+			entries = append(entries, hashEntry{mode: f.Mode.String(), path: full, hash: blobHash})
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("subtree contains no hashable files")
+	}
 
 	return &SubtreeIdentity{
-		SubtreeHash: "sha256:" + hex.EncodeToString(h.Sum(nil)),
-		TreeSHA:     subTree.Hash.String(),
-		CommitSHA:   commit.Hash.String(),
+		SubtreeHash: digestEntries(entries),
+		// No single git tree object represents a scoped union; the root tree is
+		// the closest native anchor. TreeSHA is informational (info/provenance
+		// display) and never used for drift comparison.
+		TreeSHA:   rootTree.Hash.String(),
+		CommitSHA: commit.Hash.String(),
 	}, nil
 }
 

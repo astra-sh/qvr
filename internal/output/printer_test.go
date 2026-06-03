@@ -91,7 +91,7 @@ func TestTable_AwkPipelineFriendly(t *testing.T) {
 
 	p.Table(
 		[]string{"SKILL", "REGISTRY", "VERSION"},
-		[][]string{{"deploy-to-vercel", "vercel", "main"}},
+		[][]string{{"deploy-to-cloud", "acme", "main"}},
 	)
 
 	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
@@ -100,7 +100,7 @@ func TestTable_AwkPipelineFriendly(t *testing.T) {
 	}
 	// Simulate `awk 'NR>1 {print $1}'` — the second line should be real data.
 	dataFields := strings.Fields(lines[1])
-	if len(dataFields) == 0 || dataFields[0] != "deploy-to-vercel" {
+	if len(dataFields) == 0 || dataFields[0] != "deploy-to-cloud" {
 		t.Errorf("second line should hold the data row's first column, got %q", lines[1])
 	}
 }

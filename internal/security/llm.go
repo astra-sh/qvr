@@ -11,7 +11,7 @@
 // concrete LLM transport is intentionally not in this repo: it would
 // pull in provider SDKs that aren't needed for the static path, and
 // the deterministic scan must keep working offline. A future package
-// (`internal/security/llmproviders/openai`, etc.) plugs in via
+// (`internal/security/llmproviders/<name>`) plugs in via
 // [LLMProvider].
 
 package security
@@ -27,13 +27,13 @@ import (
 // return raw model output for a structured prompt; the calling
 // [LLMCheck] is responsible for parsing that output into [Finding]s.
 //
-// Methods are kept minimal so a swap from one provider (OpenAI,
-// Anthropic, vLLM, NVIDIA NIM) to another touches only this interface.
+// Methods are kept minimal so a swap from one provider to another
+// touches only this interface.
 //
 // Implementations must be safe for concurrent use.
 type LLMProvider interface {
 	// Name identifies the provider in scan output (so a user can tell
-	// which model produced a finding). Example: "anthropic/claude-4.6".
+	// which model produced a finding). Example: "provider/model-name".
 	Name() string
 
 	// Complete sends prompt to the model and returns the raw response.
@@ -58,9 +58,7 @@ type LLMCheck interface {
 const LLMCategory Category = "semantic"
 
 // EnvLLMProvider is the name of the env var the CLI inspects to pick
-// an LLM. When unset, semantic checks no-op. Mirrors SkillSpector's
-// SKILLSPECTOR_PROVIDER convention so users moving between tools can
-// reuse muscle memory.
+// an LLM. When unset, semantic checks no-op.
 const EnvLLMProvider = "QVR_LLM_PROVIDER"
 
 // LLMProviderFromEnv returns the provider named by the environment,
@@ -95,15 +93,14 @@ func RegisterLLMProvider(name string, ctor func() LLMProvider) {
 
 // ---- Built-in semantic check stubs ----
 //
-// Each stub names a slot SkillSpector covers with an LLM analyzer.
+// Each stub names a semantic-analysis slot covered by an LLM analyzer.
 // They emit no findings without a provider; with a provider, the
 // check formats the prompt, calls Complete, and parses the response
 // into Finding objects. Concrete prompt templates live in a follow-up
 // PR alongside the first provider impl.
 
 // SemanticSecurityDiscoveryCheck poses "what risks did the static
-// rules miss?" to the LLM. Maps to SkillSpector's
-// semantic_security_discovery node.
+// rules miss?" to the LLM.
 type SemanticSecurityDiscoveryCheck struct{}
 
 func (SemanticSecurityDiscoveryCheck) Name() string { return "semantic_security_discovery" }
@@ -111,15 +108,14 @@ func (SemanticSecurityDiscoveryCheck) Name() string { return "semantic_security_
 func (SemanticSecurityDiscoveryCheck) Run(_ context.Context, _ LLMProvider, _ *model.Skill, _ []FileEntry) []Finding {
 	// Stub — see package doc. A concrete implementation will:
 	//  1. Render skill body + frontmatter into a prompt.
-	//  2. Ask the model for risk categories from the SkillSpector
+	//  2. Ask the model for risk categories from the detection
 	//     taxonomy with one-line evidence pointers.
 	//  3. Parse response into Finding{Check: Name(), Category: LLMCategory}.
 	return nil
 }
 
 // SemanticDeveloperIntentCheck asks the LLM whether the skill's
-// stated intent matches its implementation. Maps to SkillSpector's
-// semantic_developer_intent.
+// stated intent matches its implementation.
 type SemanticDeveloperIntentCheck struct{}
 
 func (SemanticDeveloperIntentCheck) Name() string { return "semantic_developer_intent" }
@@ -140,9 +136,9 @@ func (SemanticQualityPolicyCheck) Run(_ context.Context, _ LLMProvider, _ *model
 }
 
 // DescriptionBehaviorMismatchCheck is the TP4 slot from the MCP
-// tool-poisoning taxonomy. SkillSpector marks it as LLM-only because
-// "does the description match the code?" requires semantic reasoning
-// that a regex can't approximate.
+// tool-poisoning taxonomy. It is LLM-only because "does the description
+// match the code?" requires semantic reasoning that a regex can't
+// approximate.
 type DescriptionBehaviorMismatchCheck struct{}
 
 func (DescriptionBehaviorMismatchCheck) Name() string { return "tp4_description_behavior_mismatch" }

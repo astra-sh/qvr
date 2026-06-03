@@ -112,6 +112,12 @@ func runSync(cmd *cobra.Command, args []string) error {
 		latestLock         *model.LockFile
 		atOrAboveThreshold map[string]security.Severity
 		driftReports       []skill.VerifyEntryResult
+		// unverifiedReports is kept separate from driftReports: an entry with no
+		// recorded subtree hash is "un-sealed", not tampered. `qvr lock verify`
+		// surfaces it as a soft warning (exit 0), so sync must agree rather than
+		// hard-fail the identical state (#154). It renders as a warning and is
+		// remediated by `qvr lock upgrade`, but never flips the exit code.
+		unverifiedReports []skill.VerifyEntryResult
 	)
 	lockErr := model.WithLock(lockPath, func() error {
 		lock, err := model.ReadLockFile(lockPath)
@@ -203,8 +209,10 @@ func runSync(cmd *cobra.Command, args []string) error {
 				}
 				r := skill.VerifySingleEntry(entry, projectRoot)
 				switch r.Status {
-				case skill.VerifyStatusDrift, skill.VerifyStatusFailed, skill.VerifyStatusUnverified:
+				case skill.VerifyStatusDrift, skill.VerifyStatusFailed:
 					driftReports = append(driftReports, r)
+				case skill.VerifyStatusUnverified:
+					unverifiedReports = append(unverifiedReports, r)
 				}
 			}
 		}
@@ -318,8 +326,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 	for _, d := range driftReports {
 		renderDriftReport(d)
 	}
+	// Un-sealed entries (no recorded hash) warn but never fail — same verdict
+	// `qvr lock verify` gives them (#154). The hint points at the now-working
+	// `qvr lock upgrade` backfill (#151), not --allow-drift.
+	for _, u := range unverifiedReports {
+		renderDriftReport(u)
+	}
 
-	if len(result.Installed)+len(result.SymlinksFixed)+len(result.Removed) == 0 && len(result.Errors) == 0 && len(atOrAboveThreshold) == 0 && len(driftReports) == 0 {
+	if len(result.Installed)+len(result.SymlinksFixed)+len(result.Removed) == 0 && len(result.Errors) == 0 && len(atOrAboveThreshold) == 0 && len(driftReports) == 0 && len(unverifiedReports) == 0 {
 		if syncCheck {
 			printer.Success("In sync with qvr.lock.")
 		} else {

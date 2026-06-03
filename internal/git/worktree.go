@@ -33,6 +33,7 @@ type WorktreeManager interface {
 	Remove(worktreePath string) error
 	List(worktreesRoot string) ([]Worktree, error)
 	SetSparseCheckout(worktreePath string, paths []string) error
+	SetSparseCheckoutPatterns(worktreePath string, patterns []string) error
 	ReapplySparseCheckout(worktreePath string) error
 	Checkout(worktreePath, ref string) error
 	CreateBranchFromHEAD(worktreePath, newBranch string) error
@@ -204,6 +205,49 @@ func (w *GoGitWorktree) SetSparseCheckout(worktreePath string, paths []string) e
 		return fmt.Errorf("apply sparse: %w", err)
 	}
 	return nil
+}
+
+// SetSparseCheckoutPatterns scopes a worktree to an explicit set of repo-root
+// patterns. Unlike SetSparseCheckout (which only expresses whole-directory
+// subtrees), each pattern here is materialised as both a literal anchor
+// (`/<p>`, matching a top-level file like SKILL.md) and a subtree glob
+// (`/<p>/**`, matching a content directory like references/). This lets a
+// caller scope a skill to e.g. {"SKILL.md","references","scripts","assets"}
+// without knowing which entries are files and which are directories.
+//
+// An empty pattern set is a no-op (everything stays checked out), matching
+// SetSparseCheckout's "nil = no narrowing" contract.
+func (w *GoGitWorktree) SetSparseCheckoutPatterns(worktreePath string, patterns []string) error {
+	cleaned := sanitizeSparsePaths(patterns)
+	if len(cleaned) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	if _, err := runGit(ctx, "-C", worktreePath, "config", "core.sparseCheckout", "true"); err != nil {
+		return fmt.Errorf("enable sparse checkout: %w", err)
+	}
+	if err := writeSparsePatternLines(worktreePath, cleaned); err != nil {
+		return err
+	}
+	if _, err := runGit(ctx, "-C", worktreePath, "read-tree", "-mu", "HEAD"); err != nil {
+		return fmt.Errorf("apply sparse: %w", err)
+	}
+	return nil
+}
+
+// writeSparsePatternLines writes, for each entry, an anchored literal pattern
+// and an anchored subtree glob so the entry is included whether it is a file
+// or a directory.
+func writeSparsePatternLines(worktreePath string, patterns []string) error {
+	dir := filepath.Join(worktreePath, ".git", "info")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create sparse info dir: %w", err)
+	}
+	var b strings.Builder
+	for _, p := range patterns {
+		fmt.Fprintf(&b, "/%s\n/%s/**\n", p, p)
+	}
+	return os.WriteFile(filepath.Join(worktreePath, ".git", "info", "sparse-checkout"), []byte(b.String()), 0o644)
 }
 
 // ReapplySparseCheckout re-runs read-tree against HEAD so files that a

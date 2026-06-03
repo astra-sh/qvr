@@ -12,4 +12,4 @@ Visually this looks like an innocuous date-formatting skill. The
 frontmatter description embeds an HTML comment with a SYSTEM
 override directive, and the metadata.notes field swaps a Latin
 letter for a Cyrillic homoglyph — both classic tool-poisoning
-patterns SkillSpector calls out as TP1 / TP2.
+patterns flagged as TP1 / TP2.

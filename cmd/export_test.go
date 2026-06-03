@@ -46,9 +46,9 @@ func seedExportLock(t *testing.T) string {
 		InstalledAt: time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
 	})
 	lock.Put(&model.LockEntry{
-		Name:        "deploy-to-vercel",
-		Registry:    "vercel-labs/agent-skills",
-		Source:      "https://github.com/vercel-labs/agent-skills.git",
+		Name:        "deploy-to-cloud",
+		Registry:    "acme-labs/agent-skills",
+		Source:      "https://github.com/acme-labs/agent-skills.git",
 		Ref:         "main",
 		Commit:      "feedface0000000000000000000000000000face",
 		SubtreeHash: "sha256:ccc",

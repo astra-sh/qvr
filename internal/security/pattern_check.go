@@ -10,7 +10,7 @@ import (
 
 // PatternsCheckName is the [Check.Name] of the unified pattern check.
 // It emits findings tagged with a category so reports can group them by
-// the SkillSpector taxonomy without re-parsing message text.
+// the detection taxonomy without re-parsing message text.
 const PatternsCheckName = "patterns"
 
 // patternCheck runs a pre-compiled [RuleSet] over every text file in a

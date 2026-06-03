@@ -340,6 +340,48 @@ func TestListTree(t *testing.T) {
 	}
 }
 
+func TestListBlobsRecursive(t *testing.T) {
+	bareDir := setupTestBareRepo(t, testSkills)
+
+	client := git.NewGoGitClient()
+	blobs, err := client.ListBlobsRecursive(bareDir, "HEAD", "")
+	if err != nil {
+		t.Fatalf("ListBlobsRecursive: %v", err)
+	}
+
+	got := make(map[string]bool)
+	for _, b := range blobs {
+		if b.IsDir {
+			t.Errorf("ListBlobsRecursive must return blobs only, got dir %q", b.Path)
+		}
+		got[b.Path] = true
+		// Name is the basename of the full path.
+		if base := b.Path[strings.LastIndex(b.Path, "/")+1:]; b.Name != base {
+			t.Errorf("entry %q has Name %q, want %q", b.Path, b.Name, base)
+		}
+	}
+	// Skills live two levels deep — the walk must descend into them and return
+	// full repo-relative paths.
+	for _, want := range []string{"skills/code-review/SKILL.md", "skills/deploy-helper/SKILL.md"} {
+		if !got[want] {
+			t.Errorf("expected blob %q in %v", want, got)
+		}
+	}
+}
+
+func TestListBlobsRecursive_Subpath(t *testing.T) {
+	bareDir := setupTestBareRepo(t, testSkills)
+
+	client := git.NewGoGitClient()
+	blobs, err := client.ListBlobsRecursive(bareDir, "HEAD", "skills/code-review")
+	if err != nil {
+		t.Fatalf("ListBlobsRecursive: %v", err)
+	}
+	if len(blobs) != 1 || blobs[0].Path != "skills/code-review/SKILL.md" {
+		t.Fatalf("scoped walk = %+v, want only skills/code-review/SKILL.md", blobs)
+	}
+}
+
 func TestListTree_NotFound(t *testing.T) {
 	bareDir := setupTestBareRepo(t, testSkills)
 

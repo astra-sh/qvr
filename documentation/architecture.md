@@ -26,17 +26,17 @@ The solution uses Git's own primitives:
 ```
 ~/.quiver/
 ├── registries/
-│   ├── vercel-labs/                       # Org parent
+│   ├── acme-labs/                       # Org parent
 │   │   └── agent-skills.git/              # Bare clone (objects + refs only)
-│   └── anthropics/
+│   └── example-org/
 │       └── skills.git/
 │
 ├── worktrees/                             # SHA-keyed, shared across projects
-│   ├── vercel-labs/
+│   ├── acme-labs/
 │   │   └── agent-skills/
 │   │       └── code-review/
 │   │           └── abc1234/               # Sparse: only skills/code-review/
-│   └── anthropics/
+│   └── example-org/
 │       └── skills/
 │           └── test-runner/
 │               └── def5678/

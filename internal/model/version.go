@@ -91,9 +91,44 @@ func ResolveVersion(vl *VersionList, ref string, defaultBranch string) (*Version
 	return nil, fmt.Errorf("%w: %q", ErrVersionNotFound, ref)
 }
 
-// IsSemverTag checks if a tag name follows semver (v?MAJOR.MINOR.PATCH with optional pre-release).
+// SkillTagSep separates the per-skill namespace from the version in a
+// multi-skill registry tag: "<skill>/vX.Y.Z". qvr namespaces version tags per
+// skill so two skills in one registry can both debut at the same semver without
+// colliding on a repo-global tag (issue #152). Single-skill (root/fork) repos
+// keep bare "vX.Y.Z" tags.
+const SkillTagSep = "/"
+
+// VersionPortion returns the version-comparable tail of a (possibly per-skill
+// namespaced) tag: "alpha/v0.1.0" → "v0.1.0", bare "v0.1.0" → "v0.1.0". Used so
+// every semver primitive treats a namespaced tag by its version part while
+// leaving bare tags untouched. Splits on the LAST separator so a skill name
+// that itself contains the separator (it can't today — names are
+// hyphen/alphanumeric) would still yield the trailing version.
+func VersionPortion(tag string) string {
+	if i := strings.LastIndex(tag, SkillTagSep); i >= 0 {
+		return tag[i+1:]
+	}
+	return tag
+}
+
+// TagBelongsToSkill reports whether a registry tag is a version of the named
+// skill: either its per-skill-namespaced tag "<skill>/..." or a bare
+// (un-namespaced) tag — the latter is what legacy single-skill repos produced
+// and stays shared across the registry's skills. A tag namespaced for a
+// different skill is excluded so two skills no longer claim each other's
+// versions (issue #152).
+func TagBelongsToSkill(tag, skill string) bool {
+	if strings.HasPrefix(tag, skill+SkillTagSep) {
+		return true
+	}
+	return !strings.Contains(tag, SkillTagSep)
+}
+
+// IsSemverTag checks if a tag name follows semver (v?MAJOR.MINOR.PATCH with
+// optional pre-release). Per-skill-namespaced tags are judged by their version
+// portion, so "alpha/v0.1.0" is semver (issue #152).
 func IsSemverTag(tag string) bool {
-	s := strings.TrimPrefix(tag, "v")
+	s := strings.TrimPrefix(VersionPortion(tag), "v")
 	parts := strings.SplitN(s, "-", 2)
 	nums := strings.Split(parts[0], ".")
 	if len(nums) < 2 || len(nums) > 3 {
@@ -123,7 +158,7 @@ func compareSemver(a, b string) int {
 }
 
 func parseSemver(s string) [3]int {
-	s = strings.TrimPrefix(s, "v")
+	s = strings.TrimPrefix(VersionPortion(s), "v")
 	parts := strings.SplitN(s, "-", 2) // strip pre-release
 	nums := strings.Split(parts[0], ".")
 	var result [3]int

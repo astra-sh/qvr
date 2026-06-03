@@ -590,3 +590,60 @@ func TestRunSync_AllowDriftDowngrades(t *testing.T) {
 		t.Errorf("runSync with --allow-drift returned %v, want nil — opt-out should keep the warn-and-continue path", err)
 	}
 }
+
+// TestRunSync_UnverifiedIsSoft pins #154: an entry with NO recorded subtree
+// hash (un-sealed, not tampered) must warn and exit 0 — the same verdict
+// `qvr lock verify` gives — rather than hard-failing the way real drift does.
+// Without --allow-drift. The on-disk content hashes fine; the only "problem"
+// is the empty recorded hash, which `qvr lock upgrade` backfills.
+func TestRunSync_UnverifiedIsSoft(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	project := t.TempDir()
+	t.Chdir(project)
+	withCapturingPrinter(t, "text")
+
+	t.Cleanup(func() {
+		syncGlobal = false
+		syncDryRun = false
+		syncKeepUntracked = false
+		syncNoScan = false
+		syncStrict = false
+		syncAllowDrift = false
+	})
+	syncNoScan = true
+
+	editRel := filepath.Join(".claude", "skills", "demo")
+	editAbs := filepath.Join(project, editRel)
+	if err := os.MkdirAll(editAbs, 0o755); err != nil {
+		t.Fatalf("mkdir edit dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(editAbs, "SKILL.md"),
+		[]byte("---\nname: demo\ndescription: unverified test\n---\n# demo\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+
+	lockPath := filepath.Join(project, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:        "demo",
+		Mode:        model.ModeEdit,
+		EditPath:    editRel,
+		Source:      "https://example.invalid/demo.git",
+		Ref:         "main",
+		SubtreeHash: "", // un-sealed: the #151/#154 state, NOT a hash mismatch
+		Targets:     []string{"claude"},
+		InstalledAt: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	if err := runSync(syncCmd, nil); err != nil {
+		t.Errorf("runSync returned %v on an un-sealed (empty-hash) entry; want nil — sync must match `qvr lock verify`'s soft treatment (#154)", err)
+	}
+}

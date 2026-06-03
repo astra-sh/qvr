@@ -47,6 +47,14 @@ type scanGateOptions struct {
 	// Blocked decisions ignore Quiet — the user needs the full picture
 	// when something refuses to install. OSS-readiness finding.
 	Quiet bool
+	// QuietHint overrides the follow-up text shown when Quiet suppresses
+	// per-finding details. Registry entries are not necessarily installed yet,
+	// so their hint differs from the default `qvr scan <skill>` path.
+	QuietHint string
+	// ReportOnlyBlocked suppresses rendering when a scan ran but no finding met
+	// the block threshold. Registry add uses this to keep source registration
+	// output focused on entries that would matter at install time.
+	ReportOnlyBlocked bool
 }
 
 // scanGateResult is the outcome of a single ScanAndGate call. Blocked is true
@@ -125,6 +133,9 @@ func ScanAndGate(ctx context.Context, skillDir string, cfg *config.Config, opts 
 	out.Result = res
 	out.Skipped = false
 	out.Blocked = exceedsThreshold(res, threshold)
+	if opts.ReportOnlyBlocked && !out.Blocked {
+		return out, nil
+	}
 
 	// WarnOnly callers (sync) never block — render the warning template even
 	// when the finding meets threshold so the surfaced wording matches what
@@ -175,7 +186,11 @@ func renderGateFindings(opts scanGateOptions, res *security.ScanResult, threshol
 	// lines and scare users off. `qvr scan` keeps Quiet=false so the
 	// full report still appears when the user explicitly asked for it.
 	if opts.Quiet && !blocked {
-		fmt.Fprintf(printer.Err, "  Run `qvr scan %s` to see the full report.\n", subject)
+		if opts.QuietHint != "" {
+			fmt.Fprintf(printer.Err, "  %s\n", opts.QuietHint)
+		} else {
+			fmt.Fprintf(printer.Err, "  Run `qvr scan %s` to see the full report.\n", subject)
+		}
 		return
 	}
 	// Render only findings at or above the threshold when blocking; otherwise

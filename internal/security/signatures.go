@@ -11,9 +11,8 @@ import (
 // SignatureCheckName is the [Check.Name] of the signature check.
 const SignatureCheckName = "signatures"
 
-// SignatureFamily groups signatures by what they detect. Mirrors
-// SkillSpector's YARA rule files: malware, webshells, cryptominers,
-// hacktools.
+// SignatureFamily groups signatures by what they detect: malware,
+// webshells, cryptominers, hacktools.
 type SignatureFamily string
 
 const (
@@ -36,8 +35,8 @@ type Signature struct {
 	Patterns    []*regexp.Regexp
 }
 
-// builtinSignatures is the pure-Go signature set. Patterns are
-// adapted from public YARA rule families and chosen for high
+// builtinSignatures is the pure-Go signature set. Patterns target
+// well-known malicious-code families and are chosen for high
 // specificity. Each Signature has a one-line Description that surfaces
 // in finding messages.
 var builtinSignatures = []Signature{

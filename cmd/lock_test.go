@@ -136,3 +136,80 @@ func TestLockUpgrade_RepopulatesVerificationScanAndSubtreeHash(t *testing.T) {
 		t.Errorf("scan ref missing ScannerVersion")
 	}
 }
+
+// TestLockUpgrade_BackfillsRootLayoutHash is the direct #151/#154 repro: a
+// root-layout entry (path ".") with an empty SubtreeHash used to make
+// `qvr lock upgrade` die with "canonical hash: locate subtree \".\":
+// directory not found" and never fill the hash. It must now backfill cleanly.
+func TestLockUpgrade_BackfillsRootLayoutHash(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("save cfg: %v", err)
+	}
+
+	reg, name, commit := "rootreg", "solo", "abc1234"
+	worktree := registry.WorktreePath(reg, name, registry.ShortSHA(commit))
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	// SKILL.md at the worktree ROOT — the path:"." layout.
+	if err := os.WriteFile(filepath.Join(worktree, "SKILL.md"),
+		[]byte("---\nname: solo\ndescription: root skill.\n---\nbody\n"), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	repo, err := gogit.PlainInit(worktree, false)
+	if err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	wt, _ := repo.Worktree()
+	if _, err := wt.Add("SKILL.md"); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := wt.Commit("init", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "t", Email: "t@t", When: time.Unix(0, 0).UTC()},
+	}); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+
+	project := t.TempDir()
+	lockPath := filepath.Join(project, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:     name,
+		Registry: reg,
+		Source:   "git@example.test:" + reg + ".git",
+		Path:     ".", // root layout — the broken case
+		Ref:      "main",
+		Commit:   commit,
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock: %v", err)
+	}
+
+	withCapturingPrinter(t, "text")
+	lockUpgradeDryRun = false
+	t.Cleanup(func() { lockUpgradeDryRun = false })
+
+	out, err := lockUpgradeInternal(lockPath)
+	if err != nil {
+		t.Fatalf("lockUpgradeInternal: %v", err)
+	}
+	for _, row := range out.Entries {
+		if row.Name == name && row.Status == "skipped" {
+			t.Fatalf("root-layout upgrade skipped (#151 dead-end): %s", row.Message)
+		}
+	}
+
+	reread, err := model.ReadLockFile(lockPath)
+	if err != nil {
+		t.Fatalf("reread lock: %v", err)
+	}
+	entry, err := reread.Get(name)
+	if err != nil {
+		t.Fatalf("get entry: %v", err)
+	}
+	if entry.SubtreeHash == "" {
+		t.Error("upgrade did not backfill SubtreeHash for a path:'.' entry")
+	}
+}

@@ -263,6 +263,61 @@ func TestWorktree_SetSparseCheckout(t *testing.T) {
 	}
 }
 
+// TestWorktree_ScopeMultiSkillRepo is the #153 scan/install-scope regression:
+// in a repo with a root SKILL.md, sibling <name>/SKILL.md skills, and unrelated
+// app code (bin/, test/ fixtures), a non-root skill must scope to its own
+// subtree and a root-with-siblings skill must scope to SKILL.md + content dirs —
+// neither may drag in bin/ or the test/ fixture that carries a "secret".
+func TestWorktree_ScopeMultiSkillRepo(t *testing.T) {
+	bare := seedBareFromFiles(t, map[string]string{
+		"SKILL.md":                "---\nname: root-app\ndescription: root.\n---\n",
+		"references/guide.md":     "# guide\n",
+		"a/SKILL.md":              "---\nname: a\ndescription: sibling.\n---\n",
+		"b/SKILL.md":              "---\nname: b\ndescription: sibling.\n---\n",
+		"bin/app.sh":              "#!/bin/sh\necho hi\n",
+		"test/fixtures/creds.env": "SECRET=AKIAIOSFODNN7EXAMPLE\n",
+	})
+
+	w := git.NewGoGitWorktree()
+
+	// --- non-root sibling skill: only its subtree survives ---
+	sibWt := filepath.Join(t.TempDir(), "sib")
+	if err := w.Add(bare, sibWt, "main"); err != nil {
+		t.Fatalf("Add sibling: %v", err)
+	}
+	if err := w.SetSparseCheckout(sibWt, []string{"a"}); err != nil {
+		t.Fatalf("SetSparseCheckout: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sibWt, "a", "SKILL.md")); err != nil {
+		t.Errorf("sibling 'a' SKILL.md missing: %v", err)
+	}
+	for _, gone := range []string{"b", "bin", "test", "SKILL.md"} {
+		if _, err := os.Stat(filepath.Join(sibWt, gone)); !os.IsNotExist(err) {
+			t.Errorf("sibling scope leaked %q into scan dir (err=%v)", gone, err)
+		}
+	}
+
+	// --- root-with-siblings skill: SKILL.md + content dirs, no app code ---
+	rootWt := filepath.Join(t.TempDir(), "root")
+	if err := w.Add(bare, rootWt, "main"); err != nil {
+		t.Fatalf("Add root: %v", err)
+	}
+	if err := w.SetSparseCheckoutPatterns(rootWt, []string{"SKILL.md", "references", "scripts", "assets"}); err != nil {
+		t.Fatalf("SetSparseCheckoutPatterns: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootWt, "SKILL.md")); err != nil {
+		t.Errorf("root SKILL.md missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rootWt, "references", "guide.md")); err != nil {
+		t.Errorf("root references/ missing: %v", err)
+	}
+	for _, gone := range []string{"a", "b", "bin", "test"} {
+		if _, err := os.Stat(filepath.Join(rootWt, gone)); !os.IsNotExist(err) {
+			t.Errorf("root scope leaked %q (the over-scan #153 bug) into scan dir (err=%v)", gone, err)
+		}
+	}
+}
+
 // TestWorktree_SetSparseCheckout_CleanGitStatus pins the bug #13 fix: after
 // setting a sparse checkout, `git status` must be clean. The pre-fix code
 // wrote .git/info/sparse-checkout and deleted files on disk without setting

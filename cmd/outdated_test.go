@@ -192,10 +192,10 @@ func TestRemoteURLFor_RegistrySourceMissing(t *testing.T) {
 func TestRemoteURLFor_UsesSourceURL(t *testing.T) {
 	cfg := config.Default()
 	url, err := remoteURLFor(&model.LockEntry{
-		Registry: "github.com--mattpocock--skills",
-		Source:   "https://github.com/mattpocock/skills.git",
+		Registry: "github.com--acme--skills",
+		Source:   "https://github.com/acme/skills.git",
 	}, cfg)
-	if err != nil || url != "https://github.com/mattpocock/skills.git" {
+	if err != nil || url != "https://github.com/acme/skills.git" {
 		t.Errorf("source URL: got (%q, %v)", url, err)
 	}
 }

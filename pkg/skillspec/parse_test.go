@@ -263,7 +263,7 @@ Body.
 // TestParse_UnquotedColonInDescription verifies the lenient fallback that
 // accepts SKILL.md files whose author wrote `description: TL;DR: foo`
 // without realizing YAML's colon-in-scalar rule. Strict YAML rejects these,
-// but they're common enough in shipped skills (openclaw/skills, others)
+// but they're common enough in shipped skills (acme/skills, others)
 // that we auto-quote on the second pass.
 func TestParse_UnquotedColonInDescription(t *testing.T) {
 	content := `---

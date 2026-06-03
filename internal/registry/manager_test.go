@@ -695,8 +695,8 @@ func TestInferRegistryName(t *testing.T) {
 		url  string
 		want string
 	}{
-		{"https://github.com/vercel-labs/agent-skills", "vercel-labs/agent-skills"},
-		{"https://github.com/vercel-labs/agent-skills.git", "vercel-labs/agent-skills"},
+		{"https://github.com/acme-labs/agent-skills", "acme-labs/agent-skills"},
+		{"https://github.com/acme-labs/agent-skills.git", "acme-labs/agent-skills"},
 		{"https://github.com/Org/Repo", "org/repo"},
 		{"git@github.com:org/repo.git", "org/repo"},
 		{"ssh://git@gitlab.com/org/repo.git", "org/repo"},

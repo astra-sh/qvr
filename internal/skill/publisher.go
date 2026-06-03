@@ -16,6 +16,7 @@ import (
 
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
+	"github.com/raks097/quiver/internal/model"
 	"github.com/raks097/quiver/internal/registry"
 )
 
@@ -179,7 +180,7 @@ func (p *Publisher) Publish(ctx context.Context, req PublishRequest) (*PublishRe
 			Skill:    skill.Frontmatter.Name,
 			Registry: regName,
 			Branch:   branch,
-			Tag:      req.Tag,
+			Tag:      skillVersionTag(skill.Frontmatter.Name, req.Tag),
 			DryRun:   true,
 		}, nil
 	}
@@ -211,27 +212,34 @@ func (p *Publisher) Publish(ctx context.Context, req PublishRequest) (*PublishRe
 	// Create the tag locally before pushing so branch + tag go upstream in one
 	// atomic push. If the tag push fails we roll back the local tag to avoid
 	// leaving the working repo in a half-released state.
-	if req.Tag != "" {
-		tagRef := plumbing.NewTagReferenceName(req.Tag)
+	//
+	// Greenfield publish always lands the skill nested under skills/<name>/, so
+	// the version tag is namespaced per skill (`<name>/<tag>`) — two skills in
+	// one registry can both debut at the same semver without colliding on a
+	// repo-global tag (issue #152). `qvr add <name>@<tag>` maps back to it
+	// transparently via resolveSkillRef.
+	tagName := skillVersionTag(skill.Frontmatter.Name, req.Tag)
+	if tagName != "" {
+		tagRef := plumbing.NewTagReferenceName(tagName)
 		if _, err := repo.Reference(tagRef, false); err == nil {
-			return nil, fmt.Errorf("tag %s already exists on the target registry", req.Tag)
+			return nil, fmt.Errorf("tag %s already exists on the target registry — bump --tag for this skill", tagName)
 		}
-		if _, err := repo.CreateTag(req.Tag, commit, &gogit.CreateTagOptions{
+		if _, err := repo.CreateTag(tagName, commit, &gogit.CreateTagOptions{
 			Tagger: &object.Signature{
 				Name:  author,
 				Email: authorEmail,
 				When:  time.Now(),
 			},
-			Message: fmt.Sprintf("Release %s", req.Tag),
+			Message: fmt.Sprintf("Release %s %s", skill.Frontmatter.Name, req.Tag),
 		}); err != nil {
 			return nil, fmt.Errorf("create tag: %w", err)
 		}
-		refSpecs = append(refSpecs, fmt.Sprintf("refs/tags/%s:refs/tags/%s", req.Tag, req.Tag))
+		refSpecs = append(refSpecs, fmt.Sprintf("refs/tags/%s:refs/tags/%s", tagName, tagName))
 	}
 
 	if err := p.Git.Push(ctx, stageDir, "origin", refSpecs); err != nil {
-		if req.Tag != "" {
-			_ = repo.DeleteTag(req.Tag)
+		if tagName != "" {
+			_ = repo.DeleteTag(tagName)
 		}
 		return nil, fmt.Errorf("push: %w", err)
 	}
@@ -243,9 +251,20 @@ func (p *Publisher) Publish(ctx context.Context, req PublishRequest) (*PublishRe
 		Skill:    skill.Frontmatter.Name,
 		Registry: regName,
 		Branch:   branch,
-		Tag:      req.Tag,
+		Tag:      tagName,
 		Commit:   commit.String(),
 	}, nil
+}
+
+// skillVersionTag returns the git tag for publishing skillName at tag into a
+// nested (multi-skill) registry layout: the per-skill namespaced form
+// "<skill>/<tag>" so two skills can share a semver without colliding on a
+// repo-global tag (issue #152). An empty tag yields "" (no tag requested).
+func skillVersionTag(skillName, tag string) string {
+	if tag == "" {
+		return ""
+	}
+	return skillName + model.SkillTagSep + tag
 }
 
 // checkoutPublishBranch puts the worktree on branch, creating a local

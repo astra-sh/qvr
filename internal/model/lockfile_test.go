@@ -58,6 +58,51 @@ func TestLockFile_WriteRead(t *testing.T) {
 	}
 }
 
+// TestLockFile_RootCoexistsRoundTrips ensures the scope flag survives a
+// write/read cycle so a reproducible restore can honor it.
+func TestLockFile_RootCoexistsRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), model.LockFileName)
+	l := model.NewLockFile(path)
+	l.Put(&model.LockEntry{
+		Name: "root-app", Registry: "multi", Source: "https://x/y.git",
+		Path: ".", RootCoexists: true, Ref: "main", Commit: "abc123",
+		SubtreeHash: "sha256:deadbeef", Targets: []string{"claude"},
+	})
+	if err := l.Write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	loaded, err := model.ReadLockFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	entry, err := loaded.Get("root-app")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if !entry.RootCoexists {
+		t.Error("RootCoexists did not survive the write/read cycle")
+	}
+}
+
+func TestSkillScopePaths(t *testing.T) {
+	if got := model.SkillScopePaths("browse", false); len(got) != 1 || got[0] != "browse" {
+		t.Errorf("non-root = %v, want [browse]", got)
+	}
+	if got := model.SkillScopePaths(".", false); got != nil {
+		t.Errorf("lone root = %v, want nil", got)
+	}
+	got := model.SkillScopePaths(".", true)
+	want := map[string]bool{"SKILL.md": true, "references": true, "scripts": true, "assets": true}
+	if len(got) != len(want) {
+		t.Fatalf("root-coexists = %v, want the 4 content patterns", got)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("unexpected scope path %q", p)
+		}
+	}
+}
+
 // TestLockFile_NameNotSerialized confirms the in-memory Name field
 // (json:"-") never leaks onto disk. The map key on disk is authoritative.
 func TestLockFile_NameNotSerialized(t *testing.T) {

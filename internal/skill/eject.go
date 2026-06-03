@@ -277,6 +277,25 @@ func pickCanonicalTarget(targets []string) string {
 // captures the current upstream content and stamps the provenance reference
 // in its message so `git log` shows where this fork originated.
 func initEjectRepo(dir string, e *model.LockEntry, author, authorEmail string) error {
+	upstreamRef := e.Source
+	if upstreamRef == "" {
+		upstreamRef = "<unknown>"
+	}
+	short := e.Commit
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	msg := fmt.Sprintf("Eject %s from %s@%s", e.Name, upstreamRef, short)
+	return InitRepoWithCommit(dir, msg, author, authorEmail)
+}
+
+// InitRepoWithCommit initializes a fresh git repo at dir, stages everything,
+// and writes a single commit. Shared by the worktree-eject path and `qvr init`
+// so every mode:edit skill is backed by a real repo from birth — without this
+// an `qvr init`'d skill had no .git/ and `qvr publish --fork` aborted with the
+// opaque "open: repository does not exist" (issue #150). author/authorEmail
+// fall back to quiver defaults when blank. Errors if dir is already a repo.
+func InitRepoWithCommit(dir, message, author, authorEmail string) error {
 	if author == "" {
 		author = "quiver"
 	}
@@ -294,16 +313,7 @@ func initEjectRepo(dir string, e *model.LockEntry, author, authorEmail string) e
 	if err := wt.AddWithOptions(&gogit.AddOptions{All: true}); err != nil {
 		return fmt.Errorf("stage: %w", err)
 	}
-	upstreamRef := e.Source
-	if upstreamRef == "" {
-		upstreamRef = "<unknown>"
-	}
-	short := e.Commit
-	if len(short) > 7 {
-		short = short[:7]
-	}
-	msg := fmt.Sprintf("Eject %s from %s@%s", e.Name, upstreamRef, short)
-	if _, err := wt.Commit(msg, &gogit.CommitOptions{
+	if _, err := wt.Commit(message, &gogit.CommitOptions{
 		Author: &object.Signature{Name: author, Email: authorEmail, When: time.Now()},
 	}); err != nil {
 		return fmt.Errorf("commit: %w", err)

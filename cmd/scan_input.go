@@ -19,7 +19,7 @@ import (
 var scanInputCleanup func() error
 
 // maybeResolveExternalInput handles inputs that aren't a local
-// directory and extends the SkillSpector input matrix:
+// directory and extends the accepted input matrix:
 //
 //   - git URL (`https://github.com/owner/repo`, `git@…`, `ssh://`)
 //     → shallow clone into a temp directory

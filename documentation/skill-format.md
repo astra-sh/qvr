@@ -141,7 +141,7 @@ Additional documentation agents read on demand:
 
 Static resources: templates, images, data files, schemas.
 
-## Complex Skills (Vercel Pattern)
+## Complex Skills (Multi-Rule Pattern)
 
 For skills with many rules, compile them into AGENTS.md:
 

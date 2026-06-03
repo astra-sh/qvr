@@ -15,9 +15,9 @@ import (
 const MCPToolPoisoningCheckName = "mcp_tool_poisoning"
 
 // Frontmatter fields are the public surface of the skill that an LLM
-// caller may consume to decide whether to invoke it. SkillSpector calls
-// out four poisoning techniques (TP1-TP4) that hide an instruction or
-// confuse the LLM by smuggling content into these fields.
+// caller may consume to decide whether to invoke it. Four known
+// poisoning techniques (TP1-TP4) hide an instruction or confuse the LLM
+// by smuggling content into these fields.
 //
 // Issue #38 extends the check to also scan SKILL.md / references body
 // text for imperative tool-call hijacking instructions (TP5) and the

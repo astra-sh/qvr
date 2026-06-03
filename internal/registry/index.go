@@ -3,6 +3,7 @@ package registry
 import (
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 
@@ -26,6 +27,18 @@ type SkillIndexEntry struct {
 	Path        string            `json:"path"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
 	Versions    SkillVersionInfo  `json:"versions"`
+	// RootCoexists is true only for a root-layout skill (Path ".") that shares
+	// the repo with sibling skill directories. It tells the scan gate and
+	// installer to scope this skill to its own content rather than the whole
+	// repo (which would also pull in the siblings and unrelated app code).
+	RootCoexists bool `json:"rootCoexists,omitempty"`
+}
+
+// SkillScopePaths returns the repo-relative paths that make up a skill's
+// installable and scannable content. It delegates to model.SkillScopePaths, the
+// single source of truth also used by the installer (off the lock entry).
+func SkillScopePaths(e SkillIndexEntry) []string {
+	return model.SkillScopePaths(e.Path, e.RootCoexists)
 }
 
 // SkippedSkill is re-exported from internal/model so registry consumers don't
@@ -56,84 +69,118 @@ func NewIndexer(gitClient git.GitClient) *Indexer {
 // SKILL.md, parse error, etc). The skipped list is informational — BuildIndex
 // only returns an error for repo-level failures, not per-skill ones.
 func (idx *Indexer) BuildIndex(repoPath string) ([]SkillIndexEntry, []SkippedSkill, error) {
-	defaultBranch, err := idx.Git.DefaultBranch(repoPath)
+	blobs, err := idx.Git.ListBlobsRecursive(repoPath, "HEAD", "")
 	if err != nil {
-		defaultBranch = "main"
+		// Unreadable or empty repo — nothing to index. Per-repo discovery
+		// failures are not fatal: callers treat an empty index as "no skills".
+		return []SkillIndexEntry{}, nil, nil
 	}
 
-	// Try skills/ subdirectory first
-	entries, err := idx.Git.ListTree(repoPath, "HEAD", "skills")
-	if err != nil {
-		// No skills/ directory — try root-level SKILL.md
-		return idx.buildFromRoot(repoPath, defaultBranch)
-	}
-
-	var skills []SkillIndexEntry
-	var skipped []SkippedSkill
-	for _, entry := range entries {
-		if !entry.IsDir {
+	// 1. Every SKILL.md anywhere in the tree maps to its containing directory
+	//    ("." for a root SKILL.md). This is the "search all SKILL.md files" pass.
+	var skillDirs []string
+	for _, b := range blobs {
+		if path.Base(b.Path) != "SKILL.md" {
 			continue
 		}
-		skillMDPath := fmt.Sprintf("skills/%s/SKILL.md", entry.Name)
-		blob, err := idx.Git.ReadBlob(repoPath, "HEAD", skillMDPath)
+		skillDirs = append(skillDirs, path.Dir(b.Path))
+	}
+	// Sort so any ancestor directory precedes its descendants — required for the
+	// single-pass prune below to be correct and deterministic.
+	sort.Strings(skillDirs)
+
+	// 2. Prune nested skills. A SKILL.md inside another skill's subtree is that
+	//    skill's own asset (references/, scripts/, examples, …), not a separate
+	//    skill. The repo ROOT is the sole exception: it may itself be a skill yet
+	//    still parents sibling skills, so it never prunes its children.
+	var kept []string
+	for _, d := range skillDirs {
+		if d == "." {
+			kept = append(kept, d)
+			continue
+		}
+		nested := false
+		for _, k := range kept {
+			if k == "." {
+				continue
+			}
+			if d == k || strings.HasPrefix(d, k+"/") {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			kept = append(kept, d)
+		}
+	}
+
+	// 3. Parse, validate, and dedup the kept skill directories.
+	var skills []SkillIndexEntry
+	var skipped []SkippedSkill
+	seen := make(map[string]string) // skill name -> path of first occurrence
+	for _, d := range kept {
+		mdPath := "SKILL.md"
+		if d != "." {
+			mdPath = d + "/SKILL.md"
+		}
+		blob, err := idx.Git.ReadBlob(repoPath, "HEAD", mdPath)
 		if err != nil {
-			skipped = append(skipped, SkippedSkill{
-				Name:   entry.Name,
-				Path:   fmt.Sprintf("skills/%s", entry.Name),
-				Reason: "missing SKILL.md",
-			})
+			skipped = append(skipped, SkippedSkill{Name: path.Base(d), Path: mdPath, Reason: "missing SKILL.md"})
 			continue
 		}
 
 		parsed, err := skillspec.Parse(string(blob))
 		if err != nil {
+			skipped = append(skipped, SkippedSkill{Name: path.Base(d), Path: mdPath, Reason: err.Error()})
+			continue
+		}
+
+		// A non-root skill must live in a directory matching its frontmatter
+		// name, otherwise the install-time validator (validateNameDirMatch)
+		// would reject it. Surface the mismatch instead of indexing a skill that
+		// can never install. The root is exempt — its directory basename is the
+		// staging/worktree dir, and the installer overrides the name from the
+		// canonical index entry before validation.
+		if d != "." && parsed.Frontmatter.Name != path.Base(d) {
 			skipped = append(skipped, SkippedSkill{
-				Name:   entry.Name,
-				Path:   skillMDPath,
-				Reason: err.Error(),
+				Name:   parsed.Frontmatter.Name,
+				Path:   mdPath,
+				Reason: fmt.Sprintf("frontmatter name %q does not match directory %q", parsed.Frontmatter.Name, path.Base(d)),
 			})
 			continue
 		}
 
+		if prior, ok := seen[parsed.Frontmatter.Name]; ok {
+			skipped = append(skipped, SkippedSkill{
+				Name:   parsed.Frontmatter.Name,
+				Path:   mdPath,
+				Reason: fmt.Sprintf("duplicate skill name (already indexed at %s)", prior),
+			})
+			continue
+		}
+		seen[parsed.Frontmatter.Name] = d
+
 		skills = append(skills, SkillIndexEntry{
 			Name:        parsed.Frontmatter.Name,
 			Description: parsed.Frontmatter.Description,
-			Path:        fmt.Sprintf("skills/%s", entry.Name),
+			Path:        d,
 			Metadata:    parsed.Frontmatter.Metadata,
 		})
 	}
 
-	// Populate version info
+	// 4. Flag a root skill that coexists with siblings so scan/install can scope
+	//    it to its own content rather than the entire repository.
+	if len(skills) > 1 {
+		for i := range skills {
+			if skills[i].Path == "." {
+				skills[i].RootCoexists = true
+			}
+		}
+	}
+
 	idx.populateVersions(repoPath, skills)
 
 	return skills, skipped, nil
-}
-
-func (idx *Indexer) buildFromRoot(repoPath, defaultBranch string) ([]SkillIndexEntry, []SkippedSkill, error) {
-	blob, err := idx.Git.ReadBlob(repoPath, "HEAD", "SKILL.md")
-	if err != nil {
-		return []SkillIndexEntry{}, nil, nil
-	}
-
-	parsed, err := skillspec.Parse(string(blob))
-	if err != nil {
-		return nil, []SkippedSkill{{
-			Name:   ".",
-			Path:   "SKILL.md",
-			Reason: err.Error(),
-		}}, fmt.Errorf("%w: parse root SKILL.md: %v", ErrIndexBuildFailed, err)
-	}
-
-	skills := []SkillIndexEntry{{
-		Name:        parsed.Frontmatter.Name,
-		Description: parsed.Frontmatter.Description,
-		Path:        ".",
-		Metadata:    parsed.Frontmatter.Metadata,
-	}}
-
-	idx.populateVersions(repoPath, skills)
-
-	return skills, nil, nil
 }
 
 func (idx *Indexer) populateVersions(repoPath string, skills []SkillIndexEntry) {
@@ -152,9 +199,25 @@ func (idx *Indexer) populateVersions(repoPath string, skills []SkillIndexEntry) 
 	for i := range skills {
 		skills[i].Versions = SkillVersionInfo{
 			Branches: branchNames,
-			Tags:     tagNames,
+			Tags:     tagsForSkill(skills[i].Name, tagNames),
 		}
 	}
+}
+
+// tagsForSkill returns the tags that belong to a given skill in a (possibly
+// multi-skill) registry: its per-skill-namespaced tags "<name>/<v>" plus any
+// bare (un-namespaced) tags — the latter are what legacy single-skill repos
+// produced and remain shared. A tag namespaced for ANOTHER skill ("beta/v1")
+// is excluded so two skills no longer claim each other's versions (issue #152).
+// Full ref names are preserved so resolution can check them out directly.
+func tagsForSkill(name string, all []string) []string {
+	out := make([]string, 0, len(all))
+	for _, t := range all {
+		if model.TagBelongsToSkill(t, name) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // SearchFilter bundles the user's search intent. At least one of Query,
@@ -261,7 +324,7 @@ func entryHasAllTags(entry SkillIndexEntry, required map[string]struct{}) bool {
 	return true
 }
 
-// parseTags splits "deploy, demo , vercel" into ["deploy", "demo", "vercel"]
+// parseTags splits "deploy, demo , acme" into ["deploy", "demo", "acme"]
 // with trimming and lowercasing. Used by Search and directly testable.
 func parseTags(s string) []string {
 	if s == "" {

@@ -34,7 +34,7 @@ The name is inferred from the URL and stored flat at
 (corrected in issue #89). Override with --name when two repos share the
 same inferred name, or when the URL doesn't carry a usable last segment.
 
-  qvr registry add https://github.com/vercel-labs/agent-skills
+  qvr registry add https://github.com/acme-labs/agent-skills
   qvr registry add git@github.com:org/repo.git --name internal-tools
 
 GitHub /tree/<ref>/<path> and /blob/<ref>/<path> web URLs are rejected with
@@ -135,10 +135,12 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("add registry: %w", err)
 	}
 
-	// Security gate. Materialise each indexed skill into a throwaway worktree
-	// and scan it. Any skill exceeding cfg.Security.BlockSeverity rolls back
-	// the registry add — the user shouldn't be left with a configured but
-	// dangerous source they didn't know about.
+	// Registry-source scan. Materialise each indexed skill into a throwaway
+	// worktree and scan it so users see risky entries early. This is advisory:
+	// registering a source does not install or execute any skill, and blocking
+	// the entire registry because one large repo has fixtures/vendor code is too
+	// coarse. The hard gate still runs when a specific skill is installed.
+	var flaggedByScan []string
 	if gateAvailable(cfg, registryAddNoScan) {
 		skills, _, ixerr := mgr.Index(reg.Name, registry.RegistryPath(reg.Name))
 		if ixerr == nil && len(skills) > 0 {
@@ -146,13 +148,9 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 			if gateErr != nil {
 				printer.Warning(fmt.Sprintf("registry %s: scan pass failed (%v); registry kept — rerun `qvr scan <skill>` per-skill to retry", reg.Name, gateErr))
 			} else if len(blockedSkills) > 0 {
-				// Roll back the registry add so the user isn't left with a
-				// configured source whose contents we just refused to install.
-				if rmErr := mgr.Remove(reg.Name); rmErr != nil {
-					printer.Error(fmt.Sprintf("registry %s: scan blocked %d skill(s); rollback also failed (%v); run `qvr registry remove %s` to clean up", reg.Name, len(blockedSkills), rmErr, reg.Name))
-				}
-				return fmt.Errorf("registry %s: scan blocked %d skill(s) (%s); registry not added — see findings above or pass --no-scan to override",
-					reg.Name, len(blockedSkills), strings.Join(blockedSkills, ", "))
+				flaggedByScan = blockedSkills
+				printer.Warning(fmt.Sprintf("registry %s: scan flagged %d skill(s) at/above the install block threshold (%s); registry kept — `qvr add` will re-scan and gate the selected skill",
+					reg.Name, len(blockedSkills), strings.Join(blockedSkills, ", ")))
 			}
 		}
 	}
@@ -168,6 +166,9 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	if reg.SkippedCount > 0 {
 		msg += fmt.Sprintf(" (%d skipped — run `qvr registry update %s --verbose` for reasons)",
 			reg.SkippedCount, reg.Name)
+	}
+	if len(flaggedByScan) > 0 {
+		msg += fmt.Sprintf(" (%d scan-flagged)", len(flaggedByScan))
 	}
 	printer.Success(msg)
 	return nil
@@ -207,21 +208,34 @@ func scanRegistrySkillsBeforeAdd(ctx context.Context, reg *model.Registry, skill
 			printer.Warning(fmt.Sprintf("scan %s: could not materialise (%v); skipping gate", s.Name, err))
 			continue
 		}
-		// Sparse-checkout to just this skill's subpath to keep walks bounded.
-		subpath := s.Path
-		if subpath == "" {
-			subpath = "."
-		}
-		if err := worktreeMgr.SetSparseCheckout(stage, []string{subpath}); err != nil {
-			printer.Warning(fmt.Sprintf("scan %s: sparse-checkout failed (%v); scanning full clone", s.Name, err))
-		}
+		// Scope the scan to just this skill's content so a multi-purpose repo's
+		// app code / test fixtures never gate a skill that doesn't ship them.
+		//   - non-root skill → its own subtree (scan dir is that subtree)
+		//   - lone root skill → the whole repo (no narrowing; it IS the skill)
+		//   - root skill with siblings → SKILL.md + recognized content dirs only
+		scopePaths := registry.SkillScopePaths(s)
 		skillDir := stage
-		if subpath != "" && subpath != "." {
-			skillDir = filepath.Join(stage, subpath)
+		switch {
+		case len(scopePaths) == 1 && scopePaths[0] == s.Path && s.Path != "" && s.Path != ".":
+			if err := worktreeMgr.SetSparseCheckout(stage, scopePaths); err != nil {
+				printer.Warning(fmt.Sprintf("scan %s: sparse-checkout failed (%v); scanning full clone", s.Name, err))
+			}
+			skillDir = filepath.Join(stage, s.Path)
+		case len(scopePaths) > 0:
+			// root-with-siblings: explicit content patterns, scan from repo root
+			if err := worktreeMgr.SetSparseCheckoutPatterns(stage, scopePaths); err != nil {
+				printer.Warning(fmt.Sprintf("scan %s: sparse-checkout failed (%v); scanning full clone", s.Name, err))
+			}
+		default:
+			// lone root skill: scan the full clone (matches what gets installed)
 		}
 		gate, gerr := ScanAndGate(ctx, skillDir, cfg, scanGateOptions{
-			Action:  "registry add",
-			Subject: s.Name,
+			Action:            "registry add",
+			Subject:           s.Name,
+			WarnOnly:          true,
+			Quiet:             true,
+			QuietHint:         fmt.Sprintf("Run `qvr add %s` to re-scan and apply the install gate for this skill.", s.Name),
+			ReportOnlyBlocked: true,
 		})
 		if gerr != nil {
 			printer.Warning(fmt.Sprintf("scan %s: %v; skipping gate", s.Name, gerr))

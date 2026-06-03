@@ -76,6 +76,12 @@ func runVersionList(cmd *cobra.Command, args []string) error {
 		})
 	}
 	for _, tag := range tags {
+		// In a multi-skill registry, only this skill's tags (its namespaced
+		// "<skill>/<v>" plus any bare legacy tags) belong here — not siblings'
+		// versions (issue #152).
+		if !model.TagBelongsToSkill(tag.Name, skillName) {
+			continue
+		}
 		vl.Tags = append(vl.Tags, model.Version{
 			Ref:       tag.Name,
 			Kind:      model.VersionKindTag,
@@ -99,7 +105,9 @@ func runVersionList(cmd *cobra.Command, args []string) error {
 			if tag.IsCurrent {
 				marker = "* "
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s%s\t%s\n", marker, tag.Ref, shortHash(tag.Commit))
+			// Show the bare version (v0.1.0), not the namespaced ref
+			// (alpha/v0.1.0) — the prefix is just registry bookkeeping (#152).
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s%s\t%s\n", marker, model.VersionPortion(tag.Ref), shortHash(tag.Commit))
 		}
 	}
 	if len(vl.Branches) > 0 {

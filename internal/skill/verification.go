@@ -76,6 +76,47 @@ func ComputeSubtreeIdentity(worktreePath, subpath string) (*canonical.SubtreeIde
 	return id, nil
 }
 
+// ComputeEntryIdentity computes the canonical identity of a lock entry's
+// content from the git tree at worktreePath's HEAD, honoring root-coexist
+// scoping. A rootCoexists entry (path ".", sharing its repo with sibling
+// skills) is hashed over SKILL.md + the recognized content dirs only — the
+// same scope the sparse worktree carries, so this digest matches the verifier's
+// disk hash. Every other entry hashes its path subtree (or the whole repo for a
+// lone root, via the "." → "" normalization in canonical). Issues #151/#154.
+func ComputeEntryIdentity(worktreePath, path string, rootCoexists bool) (*canonical.SubtreeIdentity, error) {
+	var (
+		id  *canonical.SubtreeIdentity
+		err error
+	)
+	if rootCoexists {
+		id, err = canonical.HashScoped(worktreePath, model.SkillScopePaths(path, true))
+	} else {
+		id, err = canonical.HashSubtree(worktreePath, path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("canonical hash: %w", err)
+	}
+	return id, nil
+}
+
+// ComputeEntryIdentityAtCommit is ComputeEntryIdentity pinned to an explicit
+// commit in a bare clone (no worktree) — used by `qvr lock` re-pin.
+func ComputeEntryIdentityAtCommit(repoPath, commit, path string, rootCoexists bool) (*canonical.SubtreeIdentity, error) {
+	var (
+		id  *canonical.SubtreeIdentity
+		err error
+	)
+	if rootCoexists {
+		id, err = canonical.HashScopedAtCommit(repoPath, commit, model.SkillScopePaths(path, true))
+	} else {
+		id, err = canonical.HashSubtreeAtCommit(repoPath, commit, path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("canonical hash: %w", err)
+	}
+	return id, nil
+}
+
 // EntryWorktreePath returns the on-disk worktree path for a lock entry by
 // re-deriving it from its registry / name / install-commit via
 // registry.WorktreePath. Link installs return their Source (the absolute
@@ -125,11 +166,11 @@ func RefreshSubtreeHash(entry *model.LockEntry) error {
 		return nil
 	}
 	worktreePath := EntryWorktreePath(entry)
-	hash, err := ComputeSubtreeHash(worktreePath, entry.Path)
+	id, err := ComputeEntryIdentity(worktreePath, entry.Path, entry.RootCoexists)
 	if err != nil {
 		return err
 	}
-	entry.SubtreeHash = hash
+	entry.SubtreeHash = id.SubtreeHash
 	return nil
 }
 

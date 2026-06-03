@@ -39,7 +39,7 @@ type mcpLeastPrivilegeCheck struct{}
 // permissions declared in SKILL.md frontmatter (allowed-tools +
 // metadata.permissions) and emits findings when they disagree.
 //
-// Rule IDs follow SkillSpector:
+// Rule IDs:
 //
 //   - LP1: code exercises a capability not covered by declared
 //     permissions (skill does more than it claims)

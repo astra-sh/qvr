@@ -8,12 +8,16 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// LockSentinelSuffix is the suffix appended to a lock file's path to derive
-// the flock sentinel — qvr.lock → qvr.lock.lock. The sentinel sits next to
+// LockSentinelSuffix is the suffix used to derive the hidden flock sentinel
+// beside a lock file: qvr.lock -> .qvr.lock.flock. The sentinel sits next to
 // the lock file so cross-process exclusion doesn't fight LockFile.Write's
 // atomic tmp+rename (which would invalidate any flock held on qvr.lock
 // itself once the file inode is replaced).
-const LockSentinelSuffix = ".lock"
+const LockSentinelSuffix = ".flock"
+
+func lockSentinelPath(path string) string {
+	return filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+LockSentinelSuffix)
+}
 
 // WithLock acquires an exclusive, blocking flock on the sentinel beside path,
 // runs fn, then releases. Concurrent callers serialise — the second writer
@@ -38,15 +42,17 @@ func WithLock(path string, fn func() error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create lock dir: %w", err)
 	}
-	fl := flock.New(path + LockSentinelSuffix)
+	sentinel := lockSentinelPath(path)
+	fl := flock.New(sentinel)
 	if err := fl.Lock(); err != nil {
-		return fmt.Errorf("acquire %s%s: %w", filepath.Base(path), LockSentinelSuffix, err)
+		return fmt.Errorf("acquire %s: %w", filepath.Base(sentinel), err)
 	}
 	defer func() { _ = fl.Unlock() }()
 	return fn()
 }
 
-// WithPublishLock acquires an exclusive, blocking flock at <quiverHome>/qvr.lock.lock
+// WithPublishLock acquires an exclusive, blocking flock at
+// <quiverHome>/.qvr.lock.flock
 // for the duration of fn. Unlike WithLock (which is keyed by a specific lock
 // file path), this is a single user-machine-wide gate for any publish — so
 // two concurrent `qvr publish` invocations (greenfield or installed, same
@@ -63,7 +69,7 @@ func WithPublishLock(quiverHome string, fn func() error) error {
 	if err := os.MkdirAll(quiverHome, 0o755); err != nil {
 		return fmt.Errorf("create quiver home: %w", err)
 	}
-	gatePath := filepath.Join(quiverHome, "qvr.lock.lock")
+	gatePath := lockSentinelPath(filepath.Join(quiverHome, LockFileName))
 	fl := flock.New(gatePath)
 	if err := fl.Lock(); err != nil {
 		return fmt.Errorf("acquire publish lock %s: %w", gatePath, err)

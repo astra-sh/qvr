@@ -119,14 +119,14 @@ func TestBuildSkillInfo_BrokenSymlinkReportsError(t *testing.T) {
 // came back empty for every multi-skill registry.
 func TestBuildSkillInfo_LoadsFrontmatterFromSkillPath(t *testing.T) {
 	t.Setenv("QUIVER_HOME", t.TempDir())
-	reg, name, commit := "vercel", "deploy-to-vercel", "abc1234"
+	reg, name, commit := "acme", "deploy-to-cloud", "abc1234"
 	worktree := registry.WorktreePath(reg, name, registry.ShortSHA(commit))
-	skillRel := filepath.Join("skills", "deploy-to-vercel")
+	skillRel := filepath.Join("skills", "deploy-to-cloud")
 	skillDir := filepath.Join(worktree, skillRel)
 	if err := os.MkdirAll(skillDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	body := "---\nname: deploy-to-vercel\ndescription: Deploy to Vercel\n---\n# deploy\n"
+	body := "---\nname: deploy-to-cloud\ndescription: Deploy to Acme\n---\n# deploy\n"
 	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
 		t.Fatalf("write skill: %v", err)
 	}
@@ -144,8 +144,8 @@ func TestBuildSkillInfo_LoadsFrontmatterFromSkillPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSkillInfo: %v", err)
 	}
-	if info.Description != "Deploy to Vercel" {
-		t.Errorf("description = %q, want %q", info.Description, "Deploy to Vercel")
+	if info.Description != "Deploy to Acme" {
+		t.Errorf("description = %q, want %q", info.Description, "Deploy to Acme")
 	}
 }
 

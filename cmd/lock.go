@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/raks097/quiver/internal/canonical"
 	"github.com/raks097/quiver/internal/config"
 	"github.com/raks097/quiver/internal/git"
 	"github.com/raks097/quiver/internal/model"
@@ -296,7 +295,7 @@ func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutp
 			// stale hash.
 			entry.Commit = newCommit
 			entry.InstallCommit = registry.ShortSHA(newCommit)
-			if id, herr := canonical.HashSubtreeAtCommit(registry.RegistryPath(entry.Registry), newCommit, entry.Path); herr == nil {
+			if id, herr := skill.ComputeEntryIdentityAtCommit(registry.RegistryPath(entry.Registry), newCommit, entry.Path, entry.RootCoexists); herr == nil {
 				entry.SubtreeHash = id.SubtreeHash
 				entry.TreeOID = id.TreeSHA
 			} else {
@@ -677,8 +676,8 @@ func lockUpgradeInternal(lockPath string) (*UpgradeOutput, error) {
 				row.Message = "would compute subtree hash"
 			} else {
 				worktreePath := skill.EntryWorktreePath(entry)
-				hash, err := skill.ComputeSubtreeHash(worktreePath, entry.Path)
-				if err != nil || hash == "" {
+				id, err := skill.ComputeEntryIdentity(worktreePath, entry.Path, entry.RootCoexists)
+				if err != nil || id == nil || id.SubtreeHash == "" {
 					row.Status = "skipped"
 					if err != nil {
 						row.Message = err.Error()
@@ -686,7 +685,7 @@ func lockUpgradeInternal(lockPath string) (*UpgradeOutput, error) {
 						row.Message = "could not compute subtree hash"
 					}
 				} else {
-					entry.SubtreeHash = hash
+					entry.SubtreeHash = id.SubtreeHash
 					row.Status = "upgraded"
 					changed = true
 				}

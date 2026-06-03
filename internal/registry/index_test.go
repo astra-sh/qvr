@@ -3,6 +3,7 @@ package registry_test
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -87,6 +88,34 @@ func (m *mockGitClient) ListTree(repoPath, ref, path string) ([]git.TreeEntry, e
 		return nil, fmt.Errorf("%w: %s", git.ErrTreeNotFound, path)
 	}
 	return entries, nil
+}
+
+// ListBlobsRecursive derives the recursive blob list from the configured
+// blobs map (keyed "ref:filepath"), filtering to those under `path`. This
+// mirrors the real client: every file the test registers is discoverable.
+func (m *mockGitClient) ListBlobsRecursive(repoPath, ref, path string) ([]git.TreeEntry, error) {
+	prefix := ref + ":"
+	var subdir string
+	if path != "" {
+		subdir = strings.TrimSuffix(path, "/") + "/"
+	}
+	var out []git.TreeEntry
+	for key := range m.blobs {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		fp := key[len(prefix):]
+		if subdir != "" && !strings.HasPrefix(fp, subdir) {
+			continue
+		}
+		name := fp
+		if i := strings.LastIndex(fp, "/"); i >= 0 {
+			name = fp[i+1:]
+		}
+		out = append(out, git.TreeEntry{Name: name, Path: fp})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out, nil
 }
 
 func TestBuildIndex_SkillsDir(t *testing.T) {
@@ -252,18 +281,15 @@ description: A skill.
 	}
 }
 
-func TestBuildIndex_NoSkillMDSkipped(t *testing.T) {
+func TestBuildIndex_NoSkillMDDirInvisible(t *testing.T) {
 	mock := newMockGitClient()
-	mock.trees["HEAD:skills"] = []git.TreeEntry{
-		{Name: "has-skill", Path: "skills/has-skill", IsDir: true},
-		{Name: "no-skill", Path: "skills/no-skill", IsDir: true},
-	}
 	mock.blobs["HEAD:skills/has-skill/SKILL.md"] = []byte(`---
 name: has-skill
 description: Has a SKILL.md.
 ---
 `)
-	// no-skill has no SKILL.md blob
+	// no-skill is a directory with files but no SKILL.md.
+	mock.blobs["HEAD:skills/no-skill/README.md"] = []byte("not a skill")
 
 	indexer := registry.NewIndexer(mock)
 	skills, skipped, err := indexer.BuildIndex("/fake/path")
@@ -271,14 +297,14 @@ description: Has a SKILL.md.
 		t.Fatalf("BuildIndex: %v", err)
 	}
 
-	if len(skills) != 1 {
-		t.Errorf("expected 1 skill, got %d", len(skills))
+	// Under recursive discovery a directory without a SKILL.md is not a skill
+	// candidate at all — it is invisible, not "skipped" (consistent with how
+	// non-SKILL.md files are treated).
+	if len(skills) != 1 || skills[0].Name != "has-skill" {
+		t.Errorf("expected only has-skill, got %+v", skills)
 	}
-	if len(skipped) != 1 || skipped[0].Name != "no-skill" {
-		t.Errorf("expected no-skill in skipped list, got %+v", skipped)
-	}
-	if skipped[0].Reason != "missing SKILL.md" {
-		t.Errorf("reason = %q, want %q", skipped[0].Reason, "missing SKILL.md")
+	if len(skipped) != 0 {
+		t.Errorf("a dir without SKILL.md should not be reported as skipped, got %+v", skipped)
 	}
 }
 
@@ -315,6 +341,151 @@ allowed-tools:
 	}
 	if len(skipped) != 0 {
 		t.Errorf("array form should not be skipped, got %+v", skipped)
+	}
+}
+
+// TestBuildIndex_RootWithSiblings covers the core #153 layout: a root SKILL.md
+// coexisting with several <name>/SKILL.md sibling directories at the repo root.
+// All of them must be indexed, and the root entry flagged RootCoexists so the
+// scan/install path scopes it to its own content.
+func TestBuildIndex_RootWithSiblings(t *testing.T) {
+	mock := newMockGitClient()
+	mock.blobs["HEAD:SKILL.md"] = []byte("---\nname: root-app\ndescription: The whole-repo skill.\n---\n")
+	mock.blobs["HEAD:a/SKILL.md"] = []byte("---\nname: a\ndescription: Sibling a.\n---\n")
+	mock.blobs["HEAD:b/SKILL.md"] = []byte("---\nname: b\ndescription: Sibling b.\n---\n")
+	mock.blobs["HEAD:c/SKILL.md"] = []byte("---\nname: c\ndescription: Sibling c.\n---\n")
+	// App code / fixtures that must NOT be mistaken for skills.
+	mock.blobs["HEAD:bin/app.sh"] = []byte("#!/bin/sh\n")
+	mock.blobs["HEAD:test/fixtures/creds.env"] = []byte("AKIA...\n")
+
+	skills, skipped, err := registry.NewIndexer(mock).BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("expected 0 skipped, got %+v", skipped)
+	}
+
+	byName := map[string]registry.SkillIndexEntry{}
+	for _, s := range skills {
+		byName[s.Name] = s
+	}
+	if len(skills) != 4 {
+		t.Fatalf("expected 4 skills (root + a/b/c), got %d: %+v", len(skills), skills)
+	}
+	if byName["root-app"].Path != "." {
+		t.Errorf("root path = %q, want '.'", byName["root-app"].Path)
+	}
+	if !byName["root-app"].RootCoexists {
+		t.Error("root-app should be flagged RootCoexists when siblings exist")
+	}
+	for _, n := range []string{"a", "b", "c"} {
+		if byName[n].Path != n {
+			t.Errorf("%s path = %q, want %q", n, byName[n].Path, n)
+		}
+		if byName[n].RootCoexists {
+			t.Errorf("sibling %s should not be flagged RootCoexists", n)
+		}
+	}
+}
+
+// TestBuildIndex_NestedSkillPruned verifies a SKILL.md inside another skill's
+// subtree is treated as that skill's asset, not a separate skill.
+func TestBuildIndex_NestedSkillPruned(t *testing.T) {
+	mock := newMockGitClient()
+	mock.blobs["HEAD:a/SKILL.md"] = []byte("---\nname: a\ndescription: Outer skill.\n---\n")
+	mock.blobs["HEAD:a/references/SKILL.md"] = []byte("---\nname: example\ndescription: An embedded example, not a skill.\n---\n")
+
+	skills, skipped, err := registry.NewIndexer(mock).BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "a" {
+		t.Fatalf("expected only outer skill 'a', got %+v", skills)
+	}
+	if len(skipped) != 0 {
+		t.Errorf("nested SKILL.md is an asset, not a skipped skill, got %+v", skipped)
+	}
+	if skills[0].RootCoexists {
+		t.Error("single non-root skill should not be RootCoexists")
+	}
+}
+
+// TestBuildIndex_ArbitraryDepth verifies skills are discovered at any depth.
+func TestBuildIndex_ArbitraryDepth(t *testing.T) {
+	mock := newMockGitClient()
+	mock.blobs["HEAD:category/sub/foo/SKILL.md"] = []byte("---\nname: foo\ndescription: Deeply nested.\n---\n")
+
+	skills, _, err := registry.NewIndexer(mock).BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Path != "category/sub/foo" {
+		t.Fatalf("expected one skill at category/sub/foo, got %+v", skills)
+	}
+}
+
+// TestBuildIndex_NameDirMismatchSkipped verifies a non-root skill whose
+// frontmatter name disagrees with its directory is surfaced as skipped (it
+// could never pass install-time validation).
+func TestBuildIndex_NameDirMismatchSkipped(t *testing.T) {
+	mock := newMockGitClient()
+	mock.blobs["HEAD:browse/SKILL.md"] = []byte("---\nname: not-browse\ndescription: Misnamed.\n---\n")
+
+	skills, skipped, err := registry.NewIndexer(mock).BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skills) != 0 {
+		t.Errorf("expected 0 indexed skills, got %+v", skills)
+	}
+	if len(skipped) != 1 || skipped[0].Name != "not-browse" {
+		t.Fatalf("expected mismatch skipped, got %+v", skipped)
+	}
+	if !strings.Contains(skipped[0].Reason, "does not match directory") {
+		t.Errorf("reason = %q, want a name/dir mismatch", skipped[0].Reason)
+	}
+}
+
+// TestBuildIndex_DuplicateNameSkipped verifies two skills resolving to the same
+// name keep the first (by sorted path) and skip the rest.
+func TestBuildIndex_DuplicateNameSkipped(t *testing.T) {
+	mock := newMockGitClient()
+	// Same frontmatter name "dup" from two directories. Only "dup" (sorts before
+	// "z-dup") can match its own dir, so use a layout where both can be valid:
+	// skills/dup and dup both have name "dup".
+	mock.blobs["HEAD:dup/SKILL.md"] = []byte("---\nname: dup\ndescription: First.\n---\n")
+	mock.blobs["HEAD:skills/dup/SKILL.md"] = []byte("---\nname: dup\ndescription: Second.\n---\n")
+
+	skills, skipped, err := registry.NewIndexer(mock).BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Path != "dup" {
+		t.Fatalf("expected first-by-sorted-path 'dup' kept, got %+v", skills)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0].Reason, "duplicate skill name") {
+		t.Fatalf("expected duplicate skipped, got %+v", skipped)
+	}
+}
+
+// TestSkillScopePaths covers the scope helper that scan + install both use.
+func TestSkillScopePaths(t *testing.T) {
+	if got := registry.SkillScopePaths(registry.SkillIndexEntry{Path: "browse"}); len(got) != 1 || got[0] != "browse" {
+		t.Errorf("non-root scope = %v, want [browse]", got)
+	}
+	if got := registry.SkillScopePaths(registry.SkillIndexEntry{Path: "."}); got != nil {
+		t.Errorf("lone root scope = %v, want nil (whole repo)", got)
+	}
+	got := registry.SkillScopePaths(registry.SkillIndexEntry{Path: ".", RootCoexists: true})
+	want := map[string]bool{"SKILL.md": true, "references": true, "scripts": true, "assets": true}
+	if len(got) != len(want) {
+		t.Fatalf("root-coexists scope = %v, want the 4 content patterns", got)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Errorf("unexpected scope path %q", p)
+		}
 	}
 }
 
@@ -373,7 +544,7 @@ func TestSubstringSearch_Scoring(t *testing.T) {
 
 func TestSearch_TagFilter(t *testing.T) {
 	entries := []registry.SkillIndexEntry{
-		{Name: "deploy-vercel", Description: "deploy", Metadata: map[string]string{"tags": "deploy, vercel"}},
+		{Name: "deploy-cloud", Description: "deploy", Metadata: map[string]string{"tags": "deploy, acme"}},
 		{Name: "deploy-aws", Description: "deploy", Metadata: map[string]string{"tags": "deploy, aws"}},
 		{Name: "review-bot", Description: "reviews", Metadata: map[string]string{"tags": "review"}},
 	}
@@ -387,19 +558,19 @@ func TestSearch_TagFilter(t *testing.T) {
 		}
 	}
 
-	res = registry.Search(registry.SearchFilter{Tags: []string{"deploy", "vercel"}}, entries)
-	if len(res) != 1 || res[0].Name != "deploy-vercel" {
+	res = registry.Search(registry.SearchFilter{Tags: []string{"deploy", "acme"}}, entries)
+	if len(res) != 1 || res[0].Name != "deploy-cloud" {
 		t.Errorf("multi-tag filter should AND tags; got %v", res)
 	}
 }
 
 func TestSearch_AuthorFilter(t *testing.T) {
 	entries := []registry.SkillIndexEntry{
-		{Name: "skill-a", Description: "x", Metadata: map[string]string{"author": "vercel"}},
-		{Name: "skill-b", Description: "x", Metadata: map[string]string{"author": "Vercel"}},
+		{Name: "skill-a", Description: "x", Metadata: map[string]string{"author": "acme"}},
+		{Name: "skill-b", Description: "x", Metadata: map[string]string{"author": "Acme"}},
 		{Name: "skill-c", Description: "x", Metadata: map[string]string{"author": "other"}},
 	}
-	res := registry.Search(registry.SearchFilter{Author: "vercel"}, entries)
+	res := registry.Search(registry.SearchFilter{Author: "acme"}, entries)
 	if len(res) != 2 {
 		t.Fatalf("expected 2 results (case-insensitive), got %d", len(res))
 	}
@@ -412,16 +583,16 @@ func TestSearch_AuthorFilter(t *testing.T) {
 
 func TestSearch_QueryPlusTagAndAuthor(t *testing.T) {
 	entries := []registry.SkillIndexEntry{
-		{Name: "deploy-vercel", Description: "ship apps fast", Metadata: map[string]string{"author": "vercel", "tags": "deploy"}},
+		{Name: "deploy-cloud", Description: "ship apps fast", Metadata: map[string]string{"author": "acme", "tags": "deploy"}},
 		{Name: "deploy-aws", Description: "ship apps fast", Metadata: map[string]string{"author": "aws", "tags": "deploy"}},
 	}
 	res := registry.Search(registry.SearchFilter{
 		Query:  "ship",
 		Tags:   []string{"deploy"},
-		Author: "vercel",
+		Author: "acme",
 	}, entries)
-	if len(res) != 1 || res[0].Name != "deploy-vercel" {
-		t.Errorf("expected only deploy-vercel, got %v", res)
+	if len(res) != 1 || res[0].Name != "deploy-cloud" {
+		t.Errorf("expected only deploy-cloud, got %v", res)
 	}
 }
 
@@ -435,12 +606,12 @@ func TestSearch_EmptyFilterReturnsNothing(t *testing.T) {
 
 func TestSearch_FilterOnlyReturnsAllMatches(t *testing.T) {
 	entries := []registry.SkillIndexEntry{
-		{Name: "z-skill", Metadata: map[string]string{"author": "vercel"}},
-		{Name: "a-skill", Metadata: map[string]string{"author": "vercel"}},
+		{Name: "z-skill", Metadata: map[string]string{"author": "acme"}},
+		{Name: "a-skill", Metadata: map[string]string{"author": "acme"}},
 	}
-	res := registry.Search(registry.SearchFilter{Author: "vercel"}, entries)
+	res := registry.Search(registry.SearchFilter{Author: "acme"}, entries)
 	if len(res) != 2 {
-		t.Fatalf("expected both vercel skills, got %d", len(res))
+		t.Fatalf("expected both acme skills, got %d", len(res))
 	}
 	if res[0].Name != "a-skill" {
 		t.Errorf("filter-only matches should sort by name; got %s first", res[0].Name)
@@ -496,7 +667,7 @@ func TestValidateRegistryName(t *testing.T) {
 		{"reg_1", false},
 		{"a", false},
 		// v0.5 nested `<org>/<repo>` shape produced by InferRegistryName.
-		{"vercel-labs/agent-skills", false},
+		{"acme-labs/agent-skills", false},
 		{"foo/bar", false},
 		// Rejections.
 		{"", true},

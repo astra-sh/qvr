@@ -38,7 +38,7 @@ func writeTestSkillMD(t *testing.T, dir, name string) {
 }
 
 // TestScanGlobalNestedRegistryResolves is the regression guard for
-// issue #42 case 2. The mattpocock layout stores the per-skill SKILL.md
+// issue #42 case 2. This nested layout stores the per-skill SKILL.md
 // under skills/<category>/<name>/. Before the fix, --global resolved
 // to the worktree root and failed with "SKILL.md not found".
 func TestScanGlobalNestedRegistryResolves(t *testing.T) {
@@ -48,7 +48,7 @@ func TestScanGlobalNestedRegistryResolves(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("QUIVER_HOME", home)
 
-	reg, name, commit := "github.com--mattpocock--skills", "diagnose", "abc1234"
+	reg, name, commit := "github.com--acme--skills", "diagnose", "abc1234"
 	worktree := registry.WorktreePath(reg, name, registry.ShortSHA(commit))
 	subpath := "skills/engineering/diagnose"
 	writeTestSkillMD(t, filepath.Join(worktree, subpath), "diagnose")
@@ -56,7 +56,7 @@ func TestScanGlobalNestedRegistryResolves(t *testing.T) {
 		"diagnose": {
 			Name:        name,
 			Registry:    reg,
-			Source:      "https://github.com/mattpocock/skills.git",
+			Source:      "https://github.com/acme/skills.git",
 			Path:        subpath,
 			Ref:         "main",
 			Commit:      commit,

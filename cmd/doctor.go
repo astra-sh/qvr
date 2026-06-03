@@ -351,7 +351,10 @@ func checkSymlink(e *model.LockEntry, target, projectRoot string, global bool) (
 		c.Message = "disabled (no symlink expected)"
 		return c, linkPath
 	}
-	expected := skill.EffectiveTarget(e, projectRoot)
+	// A consumed root-layout skill's symlink points at the sanitized agent
+	// view, not the worktree root (issue #154) — verify against that so doctor
+	// doesn't flag the intended target as drift.
+	expected := skill.AgentLinkTarget(e, projectRoot)
 	if expected == "" {
 		c.Message = "no worktree to verify against"
 		return c, linkPath

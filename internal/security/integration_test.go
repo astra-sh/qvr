@@ -13,7 +13,7 @@ import (
 // TestScannerEndToEndOverFixtures runs the full New() pipeline against
 // every malicious-skill-* fixture under testdata and asserts the
 // expected rule IDs are present. This is the canonical regression test
-// for SkillSpector-parity coverage: if a rule disappears from the
+// for full detection coverage: if a rule disappears from the
 // detection set, this test fails.
 func TestScannerEndToEndOverFixtures(t *testing.T) {
 	type expect struct {

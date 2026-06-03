@@ -201,6 +201,15 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	}
 	if version == "" {
 		version = resolveDefaultRef(loc, in.Git)
+	} else if !req.Frozen {
+		// Map an explicit per-skill version to its namespaced tag when the
+		// registry namespaces versions per skill (#152): `qvr add alpha@v0.1.0`
+		// transparently resolves to the tag `alpha/v0.1.0` if that's how it was
+		// published. Falls through unchanged for branches, SHAs, and bare
+		// single-skill tags.
+		if eff, ok := resolveSkillRef(in.Git, loc.RepoPath, loc.Entry.Name, version); ok {
+			version = eff
+		}
 	}
 
 	// --frozen pins to the lockfile: the entry must exist and its recorded
@@ -281,6 +290,24 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	stagingPath := finalPath + ".staging"
 	_ = os.RemoveAll(stagingPath) // clear any stale staging from a prior crash
 
+	// Decide the content scope. Normally taken from the freshly-resolved index
+	// entry, but a reproducible restore (`qvr sync` via PinCommit) materializes
+	// the LOCKED commit while the index reflects HEAD — so honor the scope
+	// recorded in the lock at original install time, which can't drift if
+	// upstream later changed the sibling layout. See model.SkillScopePaths.
+	rootCoexists := loc.Entry.RootCoexists
+	if req.PinCommit != "" {
+		lp := req.LockPath
+		if lp == "" {
+			lp = model.DefaultLockPath(req.ProjectRoot, quiverHome(), req.Global)
+		}
+		if el, lerr := model.ReadLockFile(lp); lerr == nil {
+			if prev, gerr := el.Get(localName); gerr == nil {
+				rootCoexists = prev.RootCoexists
+			}
+		}
+	}
+
 	if _, err := os.Stat(finalPath); err == nil {
 		// Worktree already exists — reuse it. This makes `qvr install` idempotent
 		// across multiple agent targets (install once, add cursor target, rerun
@@ -290,7 +317,16 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 			_ = os.RemoveAll(stagingPath)
 			return nil, fmt.Errorf("create worktree: %w", err)
 		}
-		if err := in.Worktree.SetSparseCheckout(stagingPath, []string{loc.Entry.Path}); err != nil {
+		// Scope the checkout to the skill's own content so what we install
+		// matches what the scan gate inspected. A root skill that coexists with
+		// sibling skills is narrowed to SKILL.md + recognized content dirs; a
+		// non-root skill to its subtree; a lone root skill keeps the whole repo.
+		if scope := model.SkillScopePaths(loc.Entry.Path, rootCoexists); rootCoexists {
+			if err := in.Worktree.SetSparseCheckoutPatterns(stagingPath, scope); err != nil {
+				_ = os.RemoveAll(stagingPath)
+				return nil, fmt.Errorf("sparse checkout: %w", err)
+			}
+		} else if err := in.Worktree.SetSparseCheckout(stagingPath, []string{loc.Entry.Path}); err != nil {
 			_ = os.RemoveAll(stagingPath)
 			return nil, fmt.Errorf("sparse checkout: %w", err)
 		}
@@ -339,6 +375,20 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 	// also prevents one project's edit from silently mutating another's.
 	setSubtreeReadOnly(skillDir)
 
+	// The agent-facing symlink points at the skill content. For a root-layout
+	// skill (the whole worktree IS the skill) that content root carries the
+	// live .git/, so we expose a sanitized view (under .git/, mirroring the
+	// content minus .git) instead — an agent reading the skill never sees repo
+	// internals (issue #154). Subdir skills already point at a clean subtree.
+	linkTarget := skillDir
+	if IsRootLayoutPath(loc.Entry.Path) {
+		view, verr := buildAgentViewAt(finalPath)
+		if verr != nil {
+			return nil, fmt.Errorf("agent view: %w", verr)
+		}
+		linkTarget = view
+	}
+
 	// Create symlinks for every target. If any fails, roll back previously
 	// created symlinks for this install to leave the filesystem consistent.
 	var created []string
@@ -348,7 +398,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 			rollbackLinks(created)
 			return nil, err
 		}
-		if err := CreateSymlink(linkPath, skillDir); err != nil {
+		if err := CreateSymlink(linkPath, linkTarget); err != nil {
 			rollbackLinks(created)
 			return nil, fmt.Errorf("symlink %s: %w", t, err)
 		}
@@ -382,7 +432,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		}
 	}
 	var subtreeHash, treeOID string
-	if id, hashErr := ComputeSubtreeIdentity(finalPath, loc.Entry.Path); hashErr == nil {
+	if id, hashErr := ComputeEntryIdentity(finalPath, loc.Entry.Path, rootCoexists); hashErr == nil {
 		subtreeHash = id.SubtreeHash
 		treeOID = id.TreeSHA
 	}
@@ -406,6 +456,7 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		Registry:      loc.RegistryName,
 		Source:        loc.RegistryURL,
 		Path:          loc.Entry.Path,
+		RootCoexists:  rootCoexists,
 		Ref:           version,
 		Commit:        commit,
 		InstallCommit: commit,
@@ -514,7 +565,9 @@ func (in *Installer) resolveSkill(name, version, registryName string) (*registry
 	// silently picked alphabetical with no warning (issue #106).
 	var matched []*registry.SkillLocation
 	for _, l := range locs {
-		if _, rerr := in.Git.ResolveRef(l.RepoPath, version); rerr == nil {
+		// Match via resolveSkillRef so a per-skill-namespaced version
+		// (`alpha@v0.1.0` → tag `alpha/v0.1.0`) counts as present (#152).
+		if _, ok := resolveSkillRef(in.Git, l.RepoPath, l.Entry.Name, version); ok {
 			matched = append(matched, l)
 		}
 	}
@@ -876,7 +929,10 @@ func mergeTargets(existing, add []string) []string {
 // user-global (`~/.claude/skills/`) symlink targets — derive from the
 // lock file's location via LockFile.IsGlobal.
 func ApplySwitch(entry *model.LockEntry, projectRoot string, global bool) error {
-	skillDir := EffectiveTarget(entry, projectRoot)
+	skillDir, err := MaterializeAgentView(entry, projectRoot)
+	if err != nil {
+		return fmt.Errorf("agent view: %w", err)
+	}
 	for _, target := range entry.Targets {
 		linkPath, err := ResolveTargetPath(target, entry.Name, projectRoot, global)
 		if err != nil {
@@ -915,6 +971,28 @@ func resolveDefaultRef(loc *registry.SkillLocation, gc git.GitClient) string {
 		return tag
 	}
 	return loc.DefaultBranch
+}
+
+// resolveSkillRef returns the git ref to check out for a requested
+// (skillName, version) in repoPath, transparently mapping a per-skill version
+// to its namespaced tag (issue #152). It prefers the namespaced tag
+// "<skill>/<version>" when that ref exists (the multi-skill case), else the
+// bare ref — a branch, a commit SHA, or a legacy single-skill tag. Returns
+// ("", false) when version is empty or neither form resolves.
+func resolveSkillRef(gc git.GitClient, repoPath, skillName, version string) (string, bool) {
+	if version == "" || gc == nil {
+		return "", false
+	}
+	if skillName != "" {
+		ns := skillName + model.SkillTagSep + version
+		if _, err := gc.ResolveRef(repoPath, ns); err == nil {
+			return ns, true
+		}
+	}
+	if _, err := gc.ResolveRef(repoPath, version); err == nil {
+		return version, true
+	}
+	return "", false
 }
 
 // LatestSemverTag returns the highest-sorted semver tag from the given list,

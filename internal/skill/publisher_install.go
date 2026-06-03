@@ -184,6 +184,22 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 	if layout != "root" && layout != "nested" {
 		return nil, fmt.Errorf("publish: invalid --layout %q (want root|nested)", layout)
 	}
+	// The version tag to create/report: namespaced per skill for a nested
+	// (multi-skill) registry, bare for a root (single-skill / --fork) repo so
+	// two skills can debut at the same semver without colliding (issue #152).
+	tagName := req.Tag
+	if layout == "nested" {
+		tagName = skillVersionTag(e.Name, req.Tag)
+	}
+
+	// A mode:edit dir scaffolded by `qvr init` (or one created by an older
+	// binary that didn't init git) may have no .git/ yet. Publish needs a repo
+	// to read dirty-status and stamp the source commit, so initialize it in
+	// place instead of aborting with the opaque "open: repository does not
+	// exist" (issue #150).
+	if err := ensureEditRepo(editAbs, e.Name); err != nil {
+		return nil, err
+	}
 
 	// Dirty-WD guard (issue #83). Refuse to silently absorb uncommitted
 	// edits in the eject dir unless --auto-commit. Runs BEFORE any stage
@@ -241,7 +257,7 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 			Skill:        e.Name,
 			Remote:       remoteURL,
 			Branch:       branch,
-			Tag:          req.Tag,
+			Tag:          tagName,
 			DryRun:       true,
 			ForkedFrom:   forkedFromValue,
 			UpstreamPath: editAbs,
@@ -443,23 +459,23 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 	// through the older non-atomic protocol for compatibility.
 	refSpecs := []string{fmt.Sprintf("refs/heads/%s:refs/heads/%s", branch, branch)}
 	var tagCreated bool
-	if req.Tag != "" {
-		tagRef := plumbing.NewTagReferenceName(req.Tag)
+	if tagName != "" {
+		tagRef := plumbing.NewTagReferenceName(tagName)
 		if _, err := stagedRepo.Reference(tagRef, false); err == nil {
-			return nil, fmt.Errorf("tag %s already exists on remote", req.Tag)
+			return nil, fmt.Errorf("tag %s already exists on remote — bump --tag for this skill", tagName)
 		}
-		if _, err := stagedRepo.CreateTag(req.Tag, commitHash, &gogit.CreateTagOptions{
+		if _, err := stagedRepo.CreateTag(tagName, commitHash, &gogit.CreateTagOptions{
 			Tagger:  &object.Signature{Name: author, Email: email, When: time.Now()},
-			Message: fmt.Sprintf("Release %s", req.Tag),
+			Message: fmt.Sprintf("Release %s", tagName),
 		}); err != nil {
 			return nil, fmt.Errorf("create tag: %w", err)
 		}
 		tagCreated = true
-		refSpecs = append(refSpecs, fmt.Sprintf("refs/tags/%s:refs/tags/%s", req.Tag, req.Tag))
+		refSpecs = append(refSpecs, fmt.Sprintf("refs/tags/%s:refs/tags/%s", tagName, tagName))
 	}
 	if err := p.Git.Push(ctx, stageDir, "origin", refSpecs); err != nil {
 		if tagCreated {
-			_ = stagedRepo.DeleteTag(req.Tag)
+			_ = stagedRepo.DeleteTag(tagName)
 		}
 		return nil, fmt.Errorf("push: %w", err)
 	}
@@ -496,7 +512,7 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		Skill:            e.Name,
 		Remote:           remoteURL,
 		Branch:           branch,
-		Tag:              req.Tag,
+		Tag:              tagName,
 		Commit:           commitHash.String(),
 		ForkedFrom:       forkedFromValue,
 		UpstreamPath:     stageDir,
@@ -629,6 +645,23 @@ func wipeStageContents(dir string) error {
 		if rerr := os.RemoveAll(filepath.Join(dir, ent.Name())); rerr != nil {
 			return fmt.Errorf("remove %s: %w", ent.Name(), rerr)
 		}
+	}
+	return nil
+}
+
+// ensureEditRepo guarantees the mode:edit dir is a git repo before publish.
+// PlainOpen only inspects dir/.git (no parent search), so an `qvr init`'d dir
+// nested inside a project repo is correctly seen as un-initialized and gets its
+// own repo + initial commit rather than borrowing the project's. A pre-existing
+// repo is left untouched. Issue #150.
+func ensureEditRepo(dir, name string) error {
+	if _, err := gogit.PlainOpen(dir); err == nil {
+		return nil
+	} else if !errors.Is(err, gogit.ErrRepositoryNotExists) {
+		return fmt.Errorf("open edit repo %s: %w", dir, err)
+	}
+	if err := InitRepoWithCommit(dir, fmt.Sprintf("Initialize skill %s", name), "", ""); err != nil {
+		return fmt.Errorf("initialize edit repo %s: %w", dir, err)
 	}
 	return nil
 }

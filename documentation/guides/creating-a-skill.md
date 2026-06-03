@@ -150,7 +150,7 @@ qvr publish --registry team
 
 ## Complex Skills (Rule-Based)
 
-For skills with many rules (like Vercel's react-best-practices):
+For skills with many rules (like a large multi-rule skill):
 
 ```bash
 qvr init my-complex-skill --type complex

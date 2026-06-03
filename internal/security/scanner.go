@@ -121,7 +121,7 @@ type Scanner struct {
 //   - secrets — high-precision credential prefixes (AWS, GitHub, JWT, …)
 //   - unicode — zero-width / bidi-override / tag chars + homoglyphs
 //   - permissions — allowed-tools, executable bit, dangerous shell
-//   - patterns — every other rule in the SkillSpector-parity registry:
+//   - patterns — every other rule in the detection registry:
 //     data exfiltration, privilege escalation, supply chain (pattern
 //     subset), excessive agency, output handling, memory poisoning,
 //     tool misuse, rogue agent, harmful content, trigger abuse

@@ -1,13 +1,13 @@
 package security
 
-// BuiltinRules returns the deterministic detection rule set, mirroring
-// SkillSpector's static_patterns_* analyzers in a single registry. The
-// IDs follow SkillSpector's taxonomy so cross-tool reporting stays
-// readable.
+// BuiltinRules returns the deterministic detection rule set, consolidating
+// every static-pattern analyzer in a single registry. The rule IDs are stable
+// so findings stay readable across reports and releases.
 //
 // Conventions:
 //   - all multi-word phrases use `(?i)` for case-insensitivity
-//   - regexes are RE2 (no lookarounds) — adapted from PCRE where needed
+//   - regexes are RE2 (no lookarounds); lookaround-dependent patterns are
+//     rewritten into RE2-safe forms
 //   - severity reflects deployed risk; confidence is exposed on findings
 //     for downstream weighting but does not feed --severity / --fail-on
 //   - SkipPattern lets a rule stay quiet on doc-about-the-pattern lines
@@ -45,10 +45,10 @@ var codeFileGlobs = []string{
 
 // Pattern category: Prompt Injection (P-series).
 //
-// SkillSpector ships these as static_patterns_prompt_injection. Quiver
-// already had a smaller prompt_injection check covering similar
-// ground; the patterns here are additive and graded across the same
-// taxonomy so findings can be filtered uniformly.
+// These are the prompt-injection static patterns. An earlier, smaller
+// prompt_injection check covered similar ground; the patterns here are
+// additive and graded across the same taxonomy so findings can be filtered
+// uniformly.
 var promptInjectionRules = RuleSet{
 	{
 		ID: "P1", Category: CategoryPromptInjection, Severity: SeverityWarning, Confidence: 0.8,
@@ -516,7 +516,7 @@ var rogueAgentRules = RuleSet{
 
 // Pattern category: Harmful Content (P5).
 //
-// We mirror SkillSpector's narrow CRITICAL list (actionable instructions
+// We keep a deliberately narrow CRITICAL list (actionable instructions
 // to produce harmful outcomes). The SkipPattern guards against benign
 // mentions in educational / warning contexts.
 var harmfulContentRules = RuleSet{

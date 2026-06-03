@@ -512,8 +512,10 @@ func TestPublish_WithTag_CreatesAndPushesTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
-	if result.Tag != "v2.0.0" {
-		t.Errorf("result.Tag = %q, want v2.0.0", result.Tag)
+	// Greenfield publish lands the skill nested under skills/<name>/, so the
+	// version tag is namespaced per skill (#152).
+	if result.Tag != "code-review/v2.0.0" {
+		t.Errorf("result.Tag = %q, want code-review/v2.0.0 (per-skill namespaced)", result.Tag)
 	}
 
 	tags, err := git.NewGoGitClient().ListTags(registry.RegistryPath("acme"))
@@ -522,16 +524,16 @@ func TestPublish_WithTag_CreatesAndPushesTag(t *testing.T) {
 	}
 	var found bool
 	for _, tag := range tags {
-		if tag.Name == "v2.0.0" {
+		if tag.Name == "code-review/v2.0.0" {
 			found = true
 			if tag.Hash == "" {
-				t.Errorf("tag v2.0.0 has empty hash")
+				t.Errorf("tag code-review/v2.0.0 has empty hash")
 			}
 			break
 		}
 	}
 	if !found {
-		t.Errorf("tag v2.0.0 not in registry after publish; got %+v", tags)
+		t.Errorf("tag code-review/v2.0.0 not in registry after publish; got %+v", tags)
 	}
 }
 

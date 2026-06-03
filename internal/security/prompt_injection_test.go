@@ -11,7 +11,7 @@ import (
 
 // TestPromptInjectionPositives exercises every prompt-injection /
 // system-prompt-leakage rule with at least one positive sample so the
-// check stays sensitive to the SkillSpector-parity taxonomy.
+// check stays sensitive to the full detection taxonomy.
 //
 // expectRule, when non-empty, asserts that a finding with that rule ID
 // is present (we may also see overlapping rules — that is fine).

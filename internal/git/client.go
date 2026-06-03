@@ -100,4 +100,11 @@ type GitClient interface {
 
 	// ListTree lists entries in a tree at a given ref and path.
 	ListTree(repoPath, ref, path string) ([]TreeEntry, error)
+
+	// ListBlobsRecursive returns every blob (file) reachable from `path` at
+	// `ref`, with full repo-root-relative paths, descending into all subtrees.
+	// Unlike ListTree (immediate children only), this walks the whole subtree.
+	// Returned entries always have IsDir=false. An empty/blobless tree yields an
+	// empty slice (not an error).
+	ListBlobsRecursive(repoPath, ref, path string) ([]TreeEntry, error)
 }

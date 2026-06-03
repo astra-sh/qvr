@@ -2,6 +2,7 @@ package model_test
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -85,5 +86,20 @@ func TestWithLock_CreatesParentDir(t *testing.T) {
 	}
 	if !called {
 		t.Fatal("closure was not invoked")
+	}
+}
+
+func TestWithLock_UsesHiddenSentinel(t *testing.T) {
+	dir := t.TempDir()
+	lockPath := filepath.Join(dir, "qvr.lock")
+
+	if err := model.WithLock(lockPath, func() error { return nil }); err != nil {
+		t.Fatalf("WithLock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "qvr.lock.lock")); !os.IsNotExist(err) {
+		t.Fatalf("visible qvr.lock.lock sentinel exists or stat failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".qvr.lock.flock")); err != nil {
+		t.Fatalf("hidden sentinel missing: %v", err)
 	}
 }
