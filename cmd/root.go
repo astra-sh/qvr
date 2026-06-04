@@ -13,7 +13,7 @@ import (
 var (
 	outputFormat string
 	printer      *output.Printer
-	version      = "0.10.3"
+	version      = "0.10.4"
 )
 
 // errJSONHandled signals to Execute() that the command has already emitted a
@@ -61,6 +61,18 @@ var rootCmd = &cobra.Command{
 	SilenceErrors: true,
 }
 
+// rejectUnknownSubcommand is the RunE for a pure parent command (one with no
+// standalone behavior of its own). With no positional args it prints help; a
+// positional means a typo'd subcommand (e.g. `qvr registry ad`), which must
+// exit non-zero instead of silently printing help with exit 0 — otherwise a
+// CI/script reads the typo as success while nothing ran (issues #120, #169).
+func rejectUnknownSubcommand(cmd *cobra.Command, args []string) error {
+	if len(args) > 0 {
+		return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
+	}
+	return cmd.Help()
+}
+
 func Execute() {
 	assignCommandGroups(rootCmd)
 	err := rootCmd.Execute()
@@ -94,12 +106,7 @@ func init() {
 	rootCmd.InitDefaultCompletionCmd()
 	for _, c := range rootCmd.Commands() {
 		if c.Name() == "completion" {
-			c.RunE = func(cmd *cobra.Command, args []string) error {
-				if len(args) > 0 {
-					return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
-				}
-				return cmd.Help()
-			}
+			c.RunE = rejectUnknownSubcommand
 			break
 		}
 	}

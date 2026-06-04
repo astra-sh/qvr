@@ -442,3 +442,60 @@ func TestSkillInfoJSONShape_MatchesListSchema(t *testing.T) {
 		t.Errorf("targetDetails = %+v, want one entry for claude", got.TargetDetails)
 	}
 }
+
+// TestBuildSkillInfo_RootLayoutHonorsAgentView is the #170 regression: a
+// consumed root-layout skill (path=".") legitimately symlinks the sanitized
+// .git/qvr-view, not the worktree root (issue #154). doctor/status/list/lock
+// verify honor that redirect; info verified against the bare worktree and
+// false-flagged every such install as "symlink target mismatch". buildSkillInfo
+// must verify against AgentLinkTarget so the target reads OK, while still
+// loading frontmatter from the real worktree root.
+func TestBuildSkillInfo_RootLayoutHonorsAgentView(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	reg, name, commit := "acme", "root-demo", "abc1234"
+	worktree := registry.WorktreePath(reg, name, registry.ShortSHA(commit))
+
+	// Worktree root IS the skill (SKILL.md at top) — path=".".
+	if err := os.MkdirAll(worktree, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	body := "---\nname: root-demo\ndescription: Root layout skill\n---\n# root-demo\n"
+	if err := os.WriteFile(filepath.Join(worktree, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+	// The sanitized agent view the installer points the symlink at.
+	view := filepath.Join(worktree, ".git", "qvr-view")
+	if err := os.MkdirAll(view, 0o755); err != nil {
+		t.Fatalf("mkdir view: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(view, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write view skill: %v", err)
+	}
+
+	entry := &model.LockEntry{
+		Name:          name,
+		Registry:      reg,
+		Commit:        commit,
+		InstallCommit: commit,
+		Path:          ".",
+		Ref:           "main",
+		Targets:       []string{"claude"},
+	}
+
+	project := t.TempDir()
+	linkSkillInto(t, project, ".claude/skills", name, view)
+
+	info, err := buildSkillInfo(entry, project, false)
+	if err != nil {
+		t.Fatalf("buildSkillInfo: %v", err)
+	}
+	if len(info.TargetDetails) != 1 {
+		t.Fatalf("expected 1 target detail, got %d", len(info.TargetDetails))
+	}
+	if !info.TargetDetails[0].OK {
+		t.Errorf("root-layout target should verify against .git/qvr-view, got %+v (issue #170)", info.TargetDetails[0])
+	}
+	if info.Description != "Root layout skill" {
+		t.Errorf("description = %q, want frontmatter loaded from the worktree root", info.Description)
+	}
+}

@@ -158,11 +158,18 @@ func runRepoint(cmd *cobra.Command, mode repointMode, name, ref string) error {
 	}
 	lockPath := model.DefaultLockPath(projectRoot, config.Dir(), repointGlobal)
 
+	// The user-facing verb tracks the alias the user actually typed, not the
+	// resolved mode: `qvr switch foo --latest` reports "switched", while
+	// `qvr upgrade foo` reports "upgraded". Pre-fix modeLatest always said
+	// "upgraded", leaking the alias wording into a plain `switch` invocation.
+	// `action` (error-message + registry-refresh label) follows suit.
 	action := "switch"
 	verb := "switched"
-	if mode == modeLatest {
-		action = "upgrade"
-		verb = "upgraded"
+	switch cmd.CalledAs() {
+	case "upgrade":
+		action, verb = "upgrade", "upgraded"
+	case "pull":
+		action, verb = "pull", "pulled"
 	}
 
 	var (

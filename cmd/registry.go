@@ -21,6 +21,10 @@ import (
 var registryCmd = &cobra.Command{
 	Use:   "registry",
 	Short: "Manage skill registries",
+	// Reject a typo'd subcommand (`qvr registry ad <url>`) with a non-zero exit
+	// instead of silently printing help (issue #169 — the #120 fix missed this
+	// parent, and registry's subcommands mutate config). No args still prints help.
+	RunE: rejectUnknownSubcommand,
 }
 
 var registryAddCmd = &cobra.Command{
@@ -271,15 +275,24 @@ func sanitizeForFs(s string) string {
 }
 
 func runRegistryRemove(cmd *cobra.Command, args []string) error {
+	// Resolve a bare leaf (e.g. `gstack` → `garrytan/gstack`) up front so the
+	// confirmation/echo reports the actual registry removed, not the shorthand.
+	name := args[0]
+	if cfg, cerr := config.Load(); cerr == nil {
+		if resolved, rerr := registry.ResolveName(cfg, name); rerr == nil {
+			name = resolved
+		}
+	}
+
 	mgr := newRegistryManager(git.NewGoGitClient())
-	if err := mgr.Remove(args[0]); err != nil {
+	if err := mgr.Remove(name); err != nil {
 		return fmt.Errorf("remove registry: %w", err)
 	}
 
 	if printer.Format == output.FormatJSON {
-		return printer.JSON(map[string]string{"removed": args[0]})
+		return printer.JSON(map[string]string{"removed": name})
 	}
-	printer.Success(fmt.Sprintf("Removed registry %q", args[0]))
+	printer.Success(fmt.Sprintf("Removed registry %q", name))
 	return nil
 }
 

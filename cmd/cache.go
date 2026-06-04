@@ -62,13 +62,8 @@ var cacheCmd = &cobra.Command{
   qvr cache clean            wipe ALL worktrees (then re-run qvr sync)`,
 	// Mirror lockCmd's "unknown subcommand" handling so a typo'd subcommand
 	// (e.g. muscle-memory from npm/cargo) exits non-zero instead of printing
-	// help with exit 0 — same shape as `qvr lock <typo>`. Issue #120.
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) > 0 {
-			return fmt.Errorf("unknown command %q for %q", args[0], cmd.CommandPath())
-		}
-		return cmd.Help()
-	},
+	// help with exit 0 — same shape as `qvr lock <typo>`. Issues #120, #169.
+	RunE: rejectUnknownSubcommand,
 }
 
 var (

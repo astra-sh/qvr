@@ -201,7 +201,12 @@ func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*s
 	// TargetDetails carries the per-target link verification info
 	// kept under a distinct key after #116.
 	info.Targets = append([]string(nil), entry.Targets...)
-	expectedTarget := skillDir
+	// The agent symlink for a consumed root-layout (path=".") skill legitimately
+	// points at the sanitized .git/qvr-view, not the worktree root — verify
+	// against AgentLinkTarget like doctor/status/list/lock verify do (issue
+	// #170). skillDir (EffectiveTarget) stays the *content* path used above for
+	// frontmatter/file loading; only the symlink-verification target differs.
+	expectedTarget := skill.AgentLinkTarget(entry, projectRoot)
 	for _, t := range entry.Targets {
 		linkPath, err := skill.ResolveTargetPath(t, entry.Name, projectRoot, global)
 		ts := targetStatus{Target: t, Path: linkPath}

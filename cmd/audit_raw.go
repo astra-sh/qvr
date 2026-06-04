@@ -21,8 +21,9 @@ var (
 )
 
 var auditRawCmd = &cobra.Command{
-	Use:   "raw",
-	Short: "Print captured traces exactly as the agent produced them",
+	Use:    "raw",
+	Hidden: true, // low-level plumbing — see `qvr audit --help`
+	Short:  "Print captured traces exactly as the agent produced them",
 	Long: `Emit the raw, verbatim trace rows — the agent's own transcript lines and
 hook payloads, byte-for-byte, with no parsing or normalization. In text mode the
 native JSONL is reproduced line by line (so you get back exactly what the agent
@@ -32,8 +33,9 @@ wrote); --output json wraps each row with its capture metadata.`,
 }
 
 var auditSpansCmd = &cobra.Command{
-	Use:   "spans",
-	Short: "Derive OpenTelemetry spans from captured raw traces",
+	Use:    "spans",
+	Hidden: true, // low-level plumbing — see `qvr audit --help`
+	Short:  "Derive OpenTelemetry spans from captured raw traces",
 	Long: `Project the raw traces of a session into OpenTelemetry spans
 (Turn / Tool / Skill), using gen_ai.* semantic conventions plus a skill.name
 tag. This is a regenerable view over the raw bytes — it never re-captures. Use

@@ -23,8 +23,9 @@ const defaultRawRetention = 30 * 24 * time.Hour
 const skilllessGrace = time.Hour
 
 var auditGCCmd = &cobra.Command{
-	Use:   "gc",
-	Short: "Prune captured raw traces older than a cutoff",
+	Use:    "gc",
+	Hidden: true, // maintenance plumbing — see `qvr audit --help`
+	Short:  "Prune captured raw traces older than a cutoff",
 	Long: `Delete raw trace rows (and their derived spans become stale) captured
 before a cutoff, to bound the local database size. Defaults to pruning anything
 older than 30 days; override with --older-than.`,
