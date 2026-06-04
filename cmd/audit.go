@@ -24,11 +24,24 @@ import (
 // capture, wiring agent hooks, and querying the recorded events.
 var auditCmd = &cobra.Command{
 	Use:   "audit",
-	Short: "Record and query skill-attributed agent activity",
-	Long: `Audit captures an atomic trace of every tool, file, and command an
-agent runs — attributed to the skill that was active — into a local SQLite
-database. Wire an agent's hooks with 'qvr audit install-hooks', then query
-with 'qvr audit logs' / 'qvr audit sessions'.`,
+	Short: "[experimental] Record and query skill-attributed agent activity",
+	Long: `[EXPERIMENTAL] The audit subsystem is opt-in and its command surface,
+storage format, and output shapes may change without notice. It is disabled by
+default; nothing is captured until you run 'qvr audit enable' and wire an
+agent's hooks with 'qvr audit install-hooks'.
+
+Audit captures an atomic trace of every tool, file, and command an agent runs
+— attributed to the skill that was active — into a local SQLite database. Once
+enabled, query it with 'qvr audit logs' / 'qvr audit sessions'.
+
+The everyday surface is enable/disable, install-hooks/uninstall-hooks, status,
+logs, sessions, and export. The remaining subcommands (ingest, raw, spans,
+rederive, gc) are low-level plumbing the hooks and maintenance paths use and
+are hidden from this list.`,
+	// Reject a typo'd subcommand (`qvr audit enabel`) with a non-zero exit
+	// instead of silently printing help (issue #169 — the #120 fix missed this
+	// parent). No args still prints help.
+	RunE: rejectUnknownSubcommand,
 }
 
 func init() {

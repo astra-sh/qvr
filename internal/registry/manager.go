@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/raks097/quiver/internal/config"
@@ -158,8 +159,12 @@ func (m *Manager) Remove(name string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	if _, exists := cfg.Registries[name]; !exists {
-		return fmt.Errorf("%w: %s", ErrRegistryNotFound, name)
+	// Accept a bare leaf (e.g. `skills` -> `acme/skills`). ResolveName
+	// returns ErrRegistryNotFound for an unknown name (same sentinel callers
+	// already check) or an ambiguity error when a leaf matches several.
+	name, err = ResolveName(cfg, name)
+	if err != nil {
+		return err
 	}
 
 	// Remove from config first — re-adding is easy, recovering deleted files is not
@@ -247,6 +252,10 @@ func (m *Manager) Update(ctx context.Context, name string) ([]model.RegistryStat
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
+	name, err = resolveForBatch(cfg, name)
+	if err != nil {
+		return nil, err
+	}
 	names := registryNames(cfg, name)
 
 	var results []model.RegistryStatus
@@ -298,6 +307,10 @@ func (m *Manager) Check(ctx context.Context, name string) ([]model.RegistryStatu
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 
+	name, err = resolveForBatch(cfg, name)
+	if err != nil {
+		return nil, err
+	}
 	names := registryNames(cfg, name)
 
 	var results []model.RegistryStatus
@@ -397,13 +410,22 @@ func (m *Manager) ListSkills(names []string) ([]RegistrySkills, error) {
 
 	out := make([]RegistrySkills, 0, len(names))
 	for _, name := range names {
-		r := RegistrySkills{Name: name}
-		if _, ok := cfg.Registries[name]; !ok {
-			r.Error = "registry not found"
+		// Accept a bare leaf (e.g. `skills` -> `acme/skills`). Resolution
+		// failures stay per-entry so a bad name in a multi-name list doesn't
+		// abort the rest; the resolved full name is what we display.
+		resolved, rerr := ResolveName(cfg, name)
+		if rerr != nil {
+			r := RegistrySkills{Name: name}
+			if errors.Is(rerr, ErrRegistryNotFound) {
+				r.Error = "registry not found"
+			} else {
+				r.Error = rerr.Error()
+			}
 			out = append(out, r)
 			continue
 		}
-		skills, _, err := m.Index(name, RegistryPath(name))
+		r := RegistrySkills{Name: resolved}
+		skills, _, err := m.Index(resolved, RegistryPath(resolved))
 		if err != nil {
 			r.Error = err.Error()
 			out = append(out, r)
@@ -447,14 +469,20 @@ func (m *Manager) FindSkillIn(skillName, registryName string) (*SkillLocation, e
 	}
 
 	if registryName != "" {
-		regCfg, ok := cfg.Registries[registryName]
-		if !ok {
-			return nil, fmt.Errorf("registry %q is not configured — run `qvr registry list`", registryName)
+		// Accept a bare leaf (e.g. `skills` for `acme/skills`) so
+		// `qvr add --registry skills` doesn't force the org segment.
+		resolved, rerr := ResolveName(cfg, registryName)
+		if rerr != nil {
+			if errors.Is(rerr, ErrRegistryNotFound) {
+				return nil, fmt.Errorf("registry %q is not configured — run `qvr registry list`", registryName)
+			}
+			return nil, rerr
 		}
-		if loc := m.findSkillInRegistry(skillName, registryName, regCfg.URL); loc != nil {
+		regCfg := cfg.Registries[resolved]
+		if loc := m.findSkillInRegistry(skillName, resolved, regCfg.URL); loc != nil {
 			return loc, nil
 		}
-		return nil, fmt.Errorf("skill %q not found in registry %q", skillName, registryName)
+		return nil, fmt.Errorf("skill %q not found in registry %q", skillName, resolved)
 	}
 
 	for _, regName := range registryNames(cfg, "") {
@@ -512,6 +540,74 @@ func (m *Manager) findSkillInRegistry(skillName, regName, regURL string) *SkillL
 		}
 	}
 	return nil
+}
+
+// ResolveName maps a possibly-abbreviated registry name to the full
+// `<org>/<repo>` name recorded in config. An exact match always wins. Failing
+// that, the input is treated as a leaf — the `<repo>` half of an `<org>/<repo>`
+// name — and matched against every configured registry:
+//
+//   - exactly one leaf match resolves to that registry's full name,
+//   - no match returns ErrRegistryNotFound (wrapped, with the input name),
+//   - more than one match returns an ambiguity error naming the candidates.
+//
+// This is what lets `qvr registry update skills`, `qvr registry list skills`,
+// and `qvr add --registry skills` work when only `acme/skills` is
+// configured, without forcing the user to type the org segment. The empty
+// string resolves to itself (callers treat "" as "all registries").
+func ResolveName(cfg *config.Config, name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	if _, ok := cfg.Registries[name]; ok {
+		return name, nil
+	}
+	var matches []string
+	for full := range cfg.Registries {
+		if registryLeaf(full) == name {
+			matches = append(matches, full)
+		}
+	}
+	sort.Strings(matches)
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", fmt.Errorf("%w: %s", ErrRegistryNotFound, name)
+	default:
+		return "", fmt.Errorf("registry name %q is ambiguous — it matches %s; use the full <org>/<repo> name",
+			name, strings.Join(matches, ", "))
+	}
+}
+
+// resolveForBatch is the leniency wrapper Update/Check use on their optional
+// single-name argument. An empty name (operate on all) passes through. A leaf
+// that resolves to exactly one registry is expanded to its full name. A leaf
+// that matches nothing is returned unchanged so the per-name loop still reports
+// it as the registry's own "not found" result (preserving the JSON shape and
+// per-entry error). Only an ambiguous leaf is fatal — guessing one of several
+// registries would silently fetch/check the wrong source.
+func resolveForBatch(cfg *config.Config, name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	resolved, err := ResolveName(cfg, name)
+	if err != nil {
+		if errors.Is(err, ErrRegistryNotFound) {
+			return name, nil // let the loop surface the not-found per entry
+		}
+		return "", err // ambiguous — fail loudly
+	}
+	return resolved, nil
+}
+
+// registryLeaf returns the last `/`-separated segment of a registry name —
+// the `<repo>` half of `<org>/<repo>`, or the whole name when it's flat.
+func registryLeaf(name string) string {
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func registryNames(cfg *config.Config, name string) []string {

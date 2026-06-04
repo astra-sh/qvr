@@ -161,3 +161,73 @@ func TestRunAdd_EmptyAs_NotPassed_AllowsThrough(t *testing.T) {
 		t.Error("Flags().Changed(\"as\") = true with no parsing; production check would wrongly reject")
 	}
 }
+
+// TestParseRemoteSkillSpec covers the one-step install spec parser: when an
+// `qvr add` arg is a remote clone path it must split into (clone URL, skill
+// name, ref); when it's a plain skill name it must report ok=false so the arg
+// flows through normal registry resolution.
+func TestParseRemoteSkillSpec(t *testing.T) {
+	tests := []struct {
+		in        string
+		wantOK    bool
+		wantURL   string
+		wantSkill string
+		wantRef   string
+	}{
+		// Plain skill names — NOT remote specs.
+		{in: "tdd", wantOK: false},
+		{in: "tdd@v2", wantOK: false},
+		{in: "", wantOK: false},
+		// A hostless org/repo/skill is NOT treated as remote (no dotted host)
+		// so it can never silently clone a nonexistent remote.
+		{in: "myorg/myskill", wantOK: false},
+
+		// HTTPS-shaped, schemeless host.
+		{in: "github.com/org/repo/tdd", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "tdd"},
+		{in: "github.com/org/repo/tdd@v2", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "tdd", wantRef: "v2"},
+		// Bare repo — no skill segment (sole-skill resolution happens later).
+		{in: "github.com/org/repo", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: ""},
+		{in: "github.com/org/repo@v2", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "", wantRef: "v2"},
+
+		// Explicit scheme.
+		{in: "https://github.com/org/repo/tdd", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "tdd"},
+		{in: "https://github.com/org/repo.git/tdd", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "tdd"},
+
+		// scp-style SSH — the user@ must NOT be mistaken for a ref.
+		{in: "git@github.com:org/repo/tdd", wantOK: true,
+			wantURL: "git@github.com:org/repo.git", wantSkill: "tdd"},
+		{in: "git@github.com:org/repo/tdd@v2", wantOK: true,
+			wantURL: "git@github.com:org/repo.git", wantSkill: "tdd", wantRef: "v2"},
+
+		// Deep skill path — the deepest segment names the skill.
+		{in: "github.com/org/repo/sub/dir/tdd", wantOK: true,
+			wantURL: "https://github.com/org/repo.git", wantSkill: "tdd"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			url, skill, ref, ok := parseRemoteSkillSpec(tt.in)
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v (url=%q skill=%q ref=%q)", ok, tt.wantOK, url, skill, ref)
+			}
+			if !ok {
+				return
+			}
+			if url != tt.wantURL {
+				t.Errorf("url = %q, want %q", url, tt.wantURL)
+			}
+			if skill != tt.wantSkill {
+				t.Errorf("skill = %q, want %q", skill, tt.wantSkill)
+			}
+			if ref != tt.wantRef {
+				t.Errorf("ref = %q, want %q", ref, tt.wantRef)
+			}
+		})
+	}
+}

@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,6 +23,10 @@ import (
 var registryCmd = &cobra.Command{
 	Use:   "registry",
 	Short: "Manage skill registries",
+	// Reject a typo'd subcommand (`qvr registry ad <url>`) with a non-zero exit
+	// instead of silently printing help (issue #169 — the #120 fix missed this
+	// parent, and registry's subcommands mutate config). No args still prints help.
+	RunE: rejectUnknownSubcommand,
 }
 
 var registryAddCmd = &cobra.Command{
@@ -122,6 +128,9 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 	if cerr != nil {
 		return fmt.Errorf("load config: %w", cerr)
 	}
+	if err := enforceScanPolicy(cfg, registryAddNoScan); err != nil {
+		return err
+	}
 
 	gc := git.NewGoGitClient()
 	mgr := newRegistryManager(gc)
@@ -172,7 +181,130 @@ func runRegistryAdd(cmd *cobra.Command, args []string) error {
 		msg += fmt.Sprintf(" (%d scan-flagged)", len(flaggedByScan))
 	}
 	printer.Success(msg)
+	printer.Info(registryTrustSummary(reg, cfg, fetchRegistryOwnerSignals(cmd.Context(), reg, cfg)))
 	return nil
+}
+
+type registryOwnerSignals struct {
+	AccountAge   string
+	LastActivity string
+	Followers    string
+	PublicRepos  string
+}
+
+func registryTrustSummary(reg *model.Registry, cfg *config.Config, signals registryOwnerSignals) string {
+	name := ""
+	if reg != nil {
+		name = reg.Name
+	}
+	owner := name
+	if i := strings.Index(name, "/"); i > 0 {
+		owner = name[:i]
+	}
+	if owner == "" {
+		owner = "unknown"
+	}
+	skills := "unknown"
+	if reg != nil {
+		skills = fmt.Sprintf("%d", reg.SkillCount)
+	}
+	if signals.AccountAge == "" {
+		signals.AccountAge = "unknown"
+	}
+	if signals.LastActivity == "" {
+		signals.LastActivity = "unknown"
+	}
+	if signals.Followers == "" {
+		signals.Followers = "unknown"
+	}
+	if signals.PublicRepos == "" {
+		signals.PublicRepos = "unknown"
+	}
+	scans := "enabled"
+	signatures := "optional"
+	if cfg != nil {
+		switch {
+		case cfg.Security.RequireScan:
+			scans = "required"
+		case !cfg.Security.ScanOnInstall:
+			scans = "disabled"
+		}
+		if cfg.Security.RequireSigned {
+			signatures = "required"
+		}
+	}
+	return fmt.Sprintf("Trust: owner %s; account age %s; last activity %s; followers %s; public repos %s; skills %s; scans %s; signatures %s",
+		owner, signals.AccountAge, signals.LastActivity, signals.Followers, signals.PublicRepos, skills, scans, signatures)
+}
+
+func fetchRegistryOwnerSignals(ctx context.Context, reg *model.Registry, cfg *config.Config) registryOwnerSignals {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	owner := githubOwner(reg)
+	if owner == "" {
+		return registryOwnerSignals{}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/users/"+owner, nil)
+	if err != nil {
+		return registryOwnerSignals{}
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	if cfg != nil && cfg.GithubToken != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.GithubToken)
+	}
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Do(req)
+	if err != nil {
+		return registryOwnerSignals{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return registryOwnerSignals{}
+	}
+	var body struct {
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Followers   int       `json:"followers"`
+		PublicRepos int       `json:"public_repos"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return registryOwnerSignals{}
+	}
+	out := registryOwnerSignals{
+		Followers:   fmt.Sprintf("%d", body.Followers),
+		PublicRepos: fmt.Sprintf("%d", body.PublicRepos),
+	}
+	if !body.CreatedAt.IsZero() {
+		out.AccountAge = body.CreatedAt.Format("2006-01-02")
+	}
+	if !body.UpdatedAt.IsZero() {
+		out.LastActivity = body.UpdatedAt.Format("2006-01-02")
+	}
+	return out
+}
+
+func githubOwner(reg *model.Registry) string {
+	if reg == nil {
+		return ""
+	}
+	if u, err := url.Parse(reg.URL); err == nil && strings.EqualFold(u.Host, "github.com") {
+		parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" {
+			return parts[0]
+		}
+	}
+	if strings.HasPrefix(reg.URL, "git@github.com:") {
+		rest := strings.TrimPrefix(reg.URL, "git@github.com:")
+		parts := strings.Split(strings.Trim(rest, "/"), "/")
+		if len(parts) >= 2 && parts[0] != "" {
+			return parts[0]
+		}
+	}
+	if i := strings.Index(reg.Name, "/"); i > 0 {
+		return reg.Name[:i]
+	}
+	return ""
 }
 
 // scanRegistrySkillsBeforeAdd materialises each indexed skill into a throwaway
@@ -271,15 +403,24 @@ func sanitizeForFs(s string) string {
 }
 
 func runRegistryRemove(cmd *cobra.Command, args []string) error {
+	// Resolve a bare leaf (e.g. `skills` -> `acme/skills`) up front so the
+	// confirmation/echo reports the actual registry removed, not the shorthand.
+	name := args[0]
+	if cfg, cerr := config.Load(); cerr == nil {
+		if resolved, rerr := registry.ResolveName(cfg, name); rerr == nil {
+			name = resolved
+		}
+	}
+
 	mgr := newRegistryManager(git.NewGoGitClient())
-	if err := mgr.Remove(args[0]); err != nil {
+	if err := mgr.Remove(name); err != nil {
 		return fmt.Errorf("remove registry: %w", err)
 	}
 
 	if printer.Format == output.FormatJSON {
-		return printer.JSON(map[string]string{"removed": args[0]})
+		return printer.JSON(map[string]string{"removed": name})
 	}
-	printer.Success(fmt.Sprintf("Removed registry %q", args[0]))
+	printer.Success(fmt.Sprintf("Removed registry %q", name))
 	return nil
 }
 

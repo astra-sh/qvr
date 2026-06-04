@@ -17,8 +17,9 @@ var (
 )
 
 var auditRederiveCmd = &cobra.Command{
-	Use:   "rederive",
-	Short: "Regenerate persisted spans from captured raw traces",
+	Use:    "rederive",
+	Hidden: true, // low-level plumbing — see `qvr audit --help`
+	Short:  "Regenerate persisted spans from captured raw traces",
 	Long: `Replay the span projection over already-captured raw traces and persist
 the result, so the derived views ('qvr audit logs', the UI timeline) reflect the
 current deriver. Capture derives spans inline as it tails a transcript; this

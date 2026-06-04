@@ -17,8 +17,9 @@ var (
 )
 
 var auditIngestCmd = &cobra.Command{
-	Use:   "ingest <transcript|rollout|dir> [more...]",
-	Short: "Record a session from an existing transcript, no live hook",
+	Use:    "ingest <transcript|rollout|dir> [more...]",
+	Hidden: true, // low-level plumbing — see `qvr audit --help`
+	Short:  "Record a session from an existing transcript, no live hook",
 	Long: `Capture one or more already-produced transcripts as audit sessions WITHOUT
 installing hooks into a live agent config. This is the qvr-native path for
 QA / CI / sandboxed capture: a hook firing only points qvr at the agent's
