@@ -16,10 +16,10 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // seedTaggedPullRemote stands up a bare remote with a single skill on `main`

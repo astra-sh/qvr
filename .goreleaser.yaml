@@ -29,9 +29,9 @@ builds:
     # `make build`. CommitDate (not the build clock) keeps it reproducible.
     ldflags:
       - -s -w
-      - -X github.com/quiver-cli/qvr/cmd.version={{ .Version }}
-      - -X github.com/quiver-cli/qvr/cmd.commit={{ .ShortCommit }}
-      - -X github.com/quiver-cli/qvr/cmd.date={{ .CommitDate }}
+      - -X github.com/astra-sh/qvr/cmd.version={{ .Version }}
+      - -X github.com/astra-sh/qvr/cmd.commit={{ .ShortCommit }}
+      - -X github.com/astra-sh/qvr/cmd.date={{ .CommitDate }}
     mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - linux
@@ -72,7 +72,7 @@ changelog:
 
 release:
   github:
-    owner: quiver-cli
+    owner: astra-sh
     name: qvr
   draft: false
   prerelease: auto

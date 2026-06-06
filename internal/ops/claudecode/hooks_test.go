@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // setupHome points $HOME and $QVR_HOME at temp dirs so Detect (which reads

@@ -8,9 +8,9 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // scaffoldEditDirNoGit writes a minimal mode:edit skill dir WITHOUT a .git/ —

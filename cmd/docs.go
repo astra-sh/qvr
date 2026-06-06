@@ -7,10 +7,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/skill"
 	"github.com/spf13/cobra"
 )
 
@@ -76,7 +76,7 @@ func writeAgentsMD(outPath string, entries []*model.LockEntry) error {
 
 	var b strings.Builder
 	b.WriteString("# Agents\n\n")
-	b.WriteString("Skills available to agents in this project. Managed by [Quiver](https://github.com/quiver-cli/qvr).\n\n")
+	b.WriteString("Skills available to agents in this project. Managed by [Quiver](https://github.com/astra-sh/qvr).\n\n")
 	if len(entries) == 0 {
 		b.WriteString("_No skills installed._\n")
 	} else {

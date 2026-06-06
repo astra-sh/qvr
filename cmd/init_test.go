@@ -7,9 +7,9 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
 )
 
 // TestRunInit_StandaloneCreatesGitRepo pins #150 at the init side: a

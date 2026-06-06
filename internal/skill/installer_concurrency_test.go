@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // TestInstaller_ConcurrentInstallSerialisesUnderWithLock reproduces the

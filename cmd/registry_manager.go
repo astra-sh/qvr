@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/registry"
 )
 
 // newRegistryManager wires a Manager with the configured cache TTL applied.

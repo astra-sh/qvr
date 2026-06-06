@@ -7,7 +7,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/config"
 )
 
 // Backup helpers shared by every HookInstaller. The on-disk layout is:

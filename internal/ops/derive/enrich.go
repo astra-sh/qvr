@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/ops"
-	reg "github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/ops"
+	reg "github.com/astra-sh/qvr/internal/registry"
 )
 
 // EnrichSkillIdentity promotes full skill identity onto SKILL/TOOL spans that

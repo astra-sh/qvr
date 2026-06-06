@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
 )
 
 // RawSession is a per-session summary computed on the fly from raw_traces.

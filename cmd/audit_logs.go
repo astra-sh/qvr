@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/ops/store"
 	"github.com/spf13/cobra"
 )
 

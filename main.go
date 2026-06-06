@@ -1,6 +1,6 @@
 package main
 
-import "github.com/quiver-cli/qvr/cmd"
+import "github.com/astra-sh/qvr/cmd"
 
 func main() {
 	cmd.Execute()

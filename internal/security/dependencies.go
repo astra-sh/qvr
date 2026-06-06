@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // DependencyCheckName is the [Check.Name] of the dependency check.

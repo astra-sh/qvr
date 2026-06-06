@@ -3,8 +3,8 @@ package cmd
 import (
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 func TestVerifyTrustEntry_TrustedAuthor(t *testing.T) {

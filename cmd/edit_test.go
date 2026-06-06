@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
 )
 
 // writeSingleSkillLock seeds a lock file at path with a single skill entry.

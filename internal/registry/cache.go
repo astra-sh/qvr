@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/config"
 )
 
 // DefaultCacheTTL is how long an index cache entry is considered fresh before

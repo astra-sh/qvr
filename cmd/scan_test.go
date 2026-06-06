@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/security"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/security"
 )
 
 // withScanPrinter replaces the package-level printer with one that

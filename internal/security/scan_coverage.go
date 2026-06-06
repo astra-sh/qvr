@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // CoverageCheckName is the [Check.Name] of the scan-coverage check. It

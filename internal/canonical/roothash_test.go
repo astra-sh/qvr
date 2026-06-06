@@ -3,7 +3,7 @@ package canonical_test
 import (
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/canonical"
+	"github.com/astra-sh/qvr/internal/canonical"
 )
 
 // TestHashSubtree_dotPathIsRepoRoot is the unit-level guard for #151/#154: a

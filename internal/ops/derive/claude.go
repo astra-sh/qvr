@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 func init() { Register("claude-code", claudeDeriver{}) }

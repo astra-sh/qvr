@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/security"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/security"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // scannerVersion is the qvr release whose rule set produced a ScanRef.

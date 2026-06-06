@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/derive"
 )
 
 // writeLock writes a qvr.lock at dir/qvr.lock holding one code-review entry

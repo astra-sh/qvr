@@ -35,7 +35,7 @@ import (
 // Repo is the GitHub "owner/name" the binaries are published under. It mirrors
 // install.sh's REPO and .goreleaser.yaml's release.github block — the single
 // place to change if the project ever moves again.
-const Repo = "quiver-cli/qvr"
+const Repo = "astra-sh/qvr"
 
 const (
 	// defaultAPIBase is GitHub's REST API host (releases metadata).

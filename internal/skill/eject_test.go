@@ -8,8 +8,8 @@ import (
 
 	gogit "github.com/go-git/go-git/v5"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // seedSharedWorktree fakes the on-disk state of a shared-mode install: a

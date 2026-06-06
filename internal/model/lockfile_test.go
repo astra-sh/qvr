@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 func TestLockFile_WriteRead(t *testing.T) {

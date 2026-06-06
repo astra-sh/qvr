@@ -12,8 +12,8 @@ import (
 	"context"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
 )
 
 // Store is the raw-only persistence contract. Every method takes ctx so

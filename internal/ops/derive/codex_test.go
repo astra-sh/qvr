@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/derive"
 )
 
 // codexRow builds a transcript RawTrace from a verbatim rollout JSONL line.

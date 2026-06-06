@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/security"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/security"
 )
 
 // writeCleanSkill writes a minimal valid skill that scans clean.
