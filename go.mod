@@ -1,4 +1,4 @@
-module github.com/quiver-cli/qvr
+module github.com/astra-sh/qvr
 
 go 1.25.0
 

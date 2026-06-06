@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/registry"
 )
 
 func setupCacheTest(t *testing.T) string {

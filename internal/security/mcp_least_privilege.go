@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // MCPLeastPrivilegeCheckName is the [Check.Name] of the MCP

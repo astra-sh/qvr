@@ -5,8 +5,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/ops/rawtrace"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/ops/rawtrace"
 	"github.com/spf13/cobra"
 )
 

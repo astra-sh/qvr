@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/git"
 )
 
 // requireSystemGit skips the test when the `git` binary isn't available on

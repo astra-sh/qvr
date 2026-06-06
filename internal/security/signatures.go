@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // SignatureCheckName is the [Check.Name] of the signature check.

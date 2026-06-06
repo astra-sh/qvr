@@ -13,17 +13,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
+	"github.com/astra-sh/qvr/internal/ops/store"
+	"github.com/astra-sh/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/security"
+	"github.com/astra-sh/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/ui"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/derive"
-	"github.com/quiver-cli/qvr/internal/ops/store"
-	"github.com/quiver-cli/qvr/internal/registry"
-	"github.com/quiver-cli/qvr/internal/security"
-	"github.com/quiver-cli/qvr/internal/skill"
-	"github.com/quiver-cli/qvr/internal/ui"
 )
 
 // uiServer is the read-only HTTP backend for `qvr ui`. Every handler reuses the

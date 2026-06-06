@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/canonical"
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/canonical"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // captureSyncStderr swaps the package printer for one with a stderr buffer

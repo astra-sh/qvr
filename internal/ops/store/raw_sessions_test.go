@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // seedSession writes a transcript row (so the session exists) and one span,

@@ -13,8 +13,8 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/registry"
 )
 
 // setupTestSourceRepo creates a non-bare repo with skills, returns its path.

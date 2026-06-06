@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 // readLinkedDirNames lists the entries an agent sees when it opens the skill's

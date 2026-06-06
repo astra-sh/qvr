@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/canonical"
+	"github.com/astra-sh/qvr/internal/canonical"
 )
 
 // The disk hasher and the git-tree hasher must agree on a freshly-checked-out

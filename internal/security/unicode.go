@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // UnicodeCheckName is the [Check.Name] of the unicode check.

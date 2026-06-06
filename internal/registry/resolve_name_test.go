@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/registry"
 )
 
 func cfgWith(names ...string) *config.Config {

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/output"
 )
 
 // writeTreeLock writes a v5 project lock at project/qvr.lock with the given

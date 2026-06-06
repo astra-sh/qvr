@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 //go:embed quiver.js

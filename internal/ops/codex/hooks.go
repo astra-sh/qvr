@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // hookTypes are the Codex CLI hook events Quiver captures.

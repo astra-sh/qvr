@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/config"
 )
 
 func TestDefault(t *testing.T) {

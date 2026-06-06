@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // configDir returns the Claude Code config directory, honoring

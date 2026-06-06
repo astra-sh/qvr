@@ -10,12 +10,12 @@ Install via `go install` or build from source:
 
 ```bash
 # from source
-git clone https://github.com/quiver-cli/qvr.git
+git clone https://github.com/astra-sh/qvr.git
 cd quiver
 make install            # -> /usr/local/bin/qvr
 
 # or directly
-go install github.com/quiver-cli/qvr@latest
+go install github.com/astra-sh/qvr@latest
 ```
 
 ## Quick Start

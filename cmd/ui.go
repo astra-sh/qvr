@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/ui"
+	"github.com/astra-sh/qvr/internal/ui"
 	"github.com/spf13/cobra"
 )
 

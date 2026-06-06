@@ -22,11 +22,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
+	"github.com/astra-sh/qvr/internal/ops/redact"
+	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/derive"
-	"github.com/quiver-cli/qvr/internal/ops/redact"
-	"github.com/quiver-cli/qvr/internal/ops/store"
 )
 
 // Store is the persistence surface capture needs (defined here, the consumer,

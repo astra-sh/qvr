@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/pkg/secretpatterns"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/pkg/secretpatterns"
 )
 
 // SecretsCheckName is the [Check.Name] of [secretsCheck]. Exported so

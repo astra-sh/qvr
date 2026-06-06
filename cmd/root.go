@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/quiver-cli/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/output"
 	"github.com/spf13/cobra"
 )
 

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/skill"
+	"github.com/astra-sh/qvr/internal/skill"
 )
 
 func TestLoadFromPath_ValidSkill(t *testing.T) {

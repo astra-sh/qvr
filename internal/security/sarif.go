@@ -150,7 +150,7 @@ func ToSARIF(result *ScanResult) SarifReport {
 			Tool: SarifTool{
 				Driver: SarifDriver{
 					Name:           "qvr",
-					InformationURI: "https://github.com/quiver-cli/qvr",
+					InformationURI: "https://github.com/astra-sh/qvr",
 					Rules:          rules,
 				},
 			},

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops/store/migrations"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops/store/migrations"
 
 	_ "modernc.org/sqlite"
 )

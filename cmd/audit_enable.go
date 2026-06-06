@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/store"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/spf13/cobra"
 )
 

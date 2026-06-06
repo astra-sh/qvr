@@ -19,16 +19,16 @@
 
 # Quiver
 
-An extremely fast, Git-native package manager for agent skills, written in Go.
+An extremely fast skills manager for coding agents, written in Go.
 
 </div>
 
 <p align="center">
-  <a href="https://github.com/quiver-cli/qvr/releases"><img src="https://img.shields.io/github/v/release/quiver-cli/qvr?color=a3e635" alt="Release" /></a>
-  <a href="https://github.com/quiver-cli/qvr/releases"><img src="https://img.shields.io/github/downloads/quiver-cli/qvr/total.svg?color=a3e635" alt="Downloads" /></a>
-  <a href="https://github.com/quiver-cli/qvr/stargazers"><img src="https://img.shields.io/github/stars/quiver-cli/qvr.svg?style=social" alt="GitHub stars" /></a>
+  <a href="https://github.com/astra-sh/qvr/releases"><img src="https://img.shields.io/github/v/release/astra-sh/qvr?color=a3e635" alt="Release" /></a>
+  <a href="https://github.com/astra-sh/qvr/releases"><img src="https://img.shields.io/github/downloads/astra-sh/qvr/total.svg?color=a3e635" alt="Downloads" /></a>
+  <a href="https://github.com/astra-sh/qvr/stargazers"><img src="https://img.shields.io/github/stars/astra-sh/qvr.svg?style=social" alt="GitHub stars" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="MIT License" /></a>
-  <a href="https://github.com/quiver-cli/qvr/actions/workflows/ci.yml"><img src="https://github.com/quiver-cli/qvr/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/astra-sh/qvr/actions/workflows/ci.yml"><img src="https://github.com/astra-sh/qvr/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="go.mod"><img src="https://img.shields.io/badge/Go-%E2%89%A5%201.25-00ADD8.svg?logo=go&logoColor=white" alt="Go" /></a>
 </p>
 
@@ -52,13 +52,6 @@ Quiver is to agent skills what `uv` is to Python packages: a Git-native,
 zero-service CLI to install, version, scan, and govern [agent skills] across
 every coding agent — Claude Code, Cursor, Copilot, Codex, Windsurf, anything
 that reads skills from a directory.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/quiver-cli/qvr/main/install.sh | sh
-
-qvr registry add https://github.com/acme-labs/agent-skills   # point at a source
-qvr add code-review                                          # scan, lock, install
-```
 
 ---
 
@@ -157,12 +150,12 @@ required.
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/quiver-cli/qvr/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/astra-sh/qvr/main/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-irm https://raw.githubusercontent.com/quiver-cli/qvr/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/astra-sh/qvr/main/install.ps1 | iex
 ```
 
 The installer detects your OS/arch, downloads the matching release, verifies its
@@ -186,7 +179,7 @@ For contributors, or to build the latest `main`. Requires **Go 1.25+** and
 **Node 20+**.
 
 ```bash
-git clone https://github.com/quiver-cli/qvr.git
+git clone https://github.com/astra-sh/qvr.git
 cd qvr
 make build-all      # builds the React UI, then embeds it into the binary
 make install        # -> /usr/local/bin/qvr  (use sudo if needed)

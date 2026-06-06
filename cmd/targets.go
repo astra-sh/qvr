@@ -1,6 +1,6 @@
 package cmd
 
-import "github.com/quiver-cli/qvr/internal/config"
+import "github.com/astra-sh/qvr/internal/config"
 
 // orderedTargets returns the target search order: configured defaults first
 // (in the order the user listed them), then the remaining built-in targets

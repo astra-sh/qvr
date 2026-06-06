@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // scopedLock pairs a loaded lock file with its scope label ("project" or

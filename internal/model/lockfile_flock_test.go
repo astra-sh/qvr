@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // TestWithLock_SerialisesConcurrentReadModifyWrite is the regression test for

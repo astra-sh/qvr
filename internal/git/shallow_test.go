@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/git"
 )
 
 // buildVersionedRepo creates a source repo (via system git) with tagged

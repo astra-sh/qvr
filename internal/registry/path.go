@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/config"
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // registryNameSegmentRe is the per-segment shape: lowercase alphanumeric

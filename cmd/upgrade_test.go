@@ -16,8 +16,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/output"
-	"github.com/quiver-cli/qvr/internal/selfupdate"
+	"github.com/astra-sh/qvr/internal/output"
+	"github.com/astra-sh/qvr/internal/selfupdate"
 )
 
 // captureUpgrade wires the package-global printer to buffers and returns them so

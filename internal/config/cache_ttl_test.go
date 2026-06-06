@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/quiver-cli/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/config"
 )
 
 func TestParseCacheTTL(t *testing.T) {

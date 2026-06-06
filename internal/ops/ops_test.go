@@ -3,7 +3,7 @@ package ops
 import (
 	"testing"
 
-	"github.com/quiver-cli/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/config"
 )
 
 func TestEnabled_NilConfigReturnsFalse(t *testing.T) {

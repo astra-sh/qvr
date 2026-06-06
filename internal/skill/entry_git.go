@@ -10,8 +10,8 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
-	"github.com/quiver-cli/qvr/internal/git"
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/git"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // ResolveSkillRepoPath returns the on-disk path to the git repository that

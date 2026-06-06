@@ -20,7 +20,7 @@ import (
 	"context"
 	"os"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // LLMProvider is the transport layer for an LLM. Implementations

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/model"
 )
 
 // PatternsCheckName is the [Check.Name] of the unified pattern check.

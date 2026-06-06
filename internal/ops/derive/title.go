@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // FirstPrompt returns a human-friendly session title: the first prompt the user

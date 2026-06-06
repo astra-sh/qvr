@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
+	"github.com/astra-sh/qvr/internal/registry"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/derive"
-	"github.com/quiver-cli/qvr/internal/registry"
 )
 
 // writeGlobalLock writes a code-review entry into the user-global lock (under

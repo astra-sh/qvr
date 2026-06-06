@@ -8,8 +8,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/quiver-cli/qvr/internal/model"
-	"github.com/quiver-cli/qvr/internal/registry"
+	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/registry"
 )
 
 // Reconciler drives `qvr sync`: re-materializes anything in the lock that's

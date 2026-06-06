@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/rawtrace"
+	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
-	"github.com/quiver-cli/qvr/internal/ops/rawtrace"
-	"github.com/quiver-cli/qvr/internal/ops/store"
 )
 
 // newStore opens a throwaway SQLite store under t.TempDir().

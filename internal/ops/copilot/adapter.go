@@ -10,7 +10,7 @@
 package copilot
 
 import (
-	"github.com/quiver-cli/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops"
 )
 
 // AgentName is the dispatch key: `qvr _hook copilot <type>`.

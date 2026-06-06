@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/astra-sh/qvr/internal/ops"
 	"github.com/google/uuid"
-	"github.com/quiver-cli/qvr/internal/ops"
 )
 
 // RawCursor records how far into a transcript file capture has consumed.
