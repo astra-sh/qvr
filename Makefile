@@ -74,17 +74,26 @@ ui-dev:
 # running poisons its code-signing vnode on macOS/Apple Silicon — the kernel
 # then SIGKILLs every later exec ("Killed: 9"). A rename gives the new binary a
 # fresh inode and leaves any running process on its old, still-valid one.
+#
+# Install-dir resolution MIRRORS scripts/install.sh so `make install` and the
+# curl|sh installer ALWAYS land in the same place (no split-brain where one
+# writes /usr/local/bin and the other ~/.local/bin, leaving stale shadows):
+# use INSTALL_DIR (default /usr/local/bin) when it's a writable dir; else create
+# it if its parent is writable; else fall back to ~/.local/bin. No sudo — a
+# user-local install is preferred over prompting. Override with
+# `make install INSTALL_DIR=/somewhere`.
 # Ends with `verify` so a stale copy elsewhere on PATH can't hide.
 install: build
 	@src="$(BIN)"; \
-	dst="$(INSTALL_DIR)/$(BINARY)"; \
-	tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-	if [ -w "$(INSTALL_DIR)" ]; then \
-		cp "$$src" "$$tmp" && mv -f "$$tmp" "$$dst" || { rm -f "$$tmp"; exit 1; }; \
-	else \
-		sudo cp "$$src" "$$tmp" && sudo mv -f "$$tmp" "$$dst" || { sudo rm -f "$$tmp"; exit 1; }; \
-	fi
-	@echo "installed $(VERSION) → $(INSTALL_DIR)/$(BINARY)"
+	dir="$(INSTALL_DIR)"; \
+	if [ ! -d "$$dir" ] || [ ! -w "$$dir" ]; then \
+		if [ -w "$${dir%/*}" ] 2>/dev/null; then mkdir -p "$$dir"; \
+		else dir="$(HOME)/.local/bin"; mkdir -p "$$dir"; fi; \
+	fi; \
+	dst="$$dir/$(BINARY)"; \
+	tmp="$$dir/.$(BINARY).tmp.$$$$"; \
+	cp "$$src" "$$tmp" && mv -f "$$tmp" "$$dst" || { rm -f "$$tmp"; exit 1; }; \
+	echo "installed $(VERSION) → $$dst"
 	@$(MAKE) -s verify
 
 # verify → zero-staleness check: the binary you just built vs the qvr actually
