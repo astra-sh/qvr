@@ -74,14 +74,20 @@ func WriteCache(c *IndexCache) error {
 	if c == nil || c.Registry == "" {
 		return errors.New("cache: registry name required")
 	}
-	if err := os.MkdirAll(CacheDir(), 0o755); err != nil {
+	final := CachePath(c.Registry)
+	// A namespaced registry name (e.g. "anthropics/skills") puts the cache file
+	// in a nested dir (cache/index/anthropics/skills.json), so create the file's
+	// PARENT — not just CacheDir() — or the write below fails with ENOENT. Before
+	// this, a slashed name's cache never persisted, so every Index() rebuilt the
+	// full index from scratch; on `qvr add --all` that meant one tree-walk +
+	// parse-every-SKILL.md per skill (~Nx), the dominant whole-repo cost.
+	if err := os.MkdirAll(filepath.Dir(final), 0o755); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal cache: %w", err)
 	}
-	final := CachePath(c.Registry)
 	tmp := final + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("write cache tmp: %w", err)

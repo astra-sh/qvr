@@ -62,6 +62,35 @@ func TestCache_WriteAndRead_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestCache_WriteAndRead_NamespacedName guards the namespaced-registry cache
+// bug: a name with a slash (e.g. "anthropics/skills") puts the cache file in a
+// nested dir (cache/index/anthropics/skills.json). WriteCache must create that
+// parent dir — before the fix it only made cache/index/, so the write failed
+// with ENOENT, the index never persisted, and every Index() rebuilt the full
+// index from scratch (the dominant `qvr add --all` cost for namespaced sources).
+func TestCache_WriteAndRead_NamespacedName(t *testing.T) {
+	setupCacheTest(t)
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := registry.WriteCache(sampleCache("anthropics/skills", now)); err != nil {
+		t.Fatalf("WriteCache namespaced: %v", err)
+	}
+
+	out, err := registry.ReadCache("anthropics/skills")
+	if err != nil {
+		t.Fatalf("ReadCache namespaced (cache did not persist — the bug): %v", err)
+	}
+	if out.Registry != "anthropics/skills" {
+		t.Errorf("Registry = %q, want anthropics/skills", out.Registry)
+	}
+	if !out.Generated.Equal(now) {
+		t.Errorf("Generated = %v, want %v", out.Generated, now)
+	}
+	if len(out.Skills) != 2 {
+		t.Fatalf("Skills len = %d, want 2", len(out.Skills))
+	}
+}
+
 func TestCache_Read_MissIsSentinel(t *testing.T) {
 	setupCacheTest(t)
 
