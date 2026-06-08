@@ -569,7 +569,7 @@ func scanProjectFileDrift(lock *model.LockFile, projPath string) []doctorCheck {
 
 	var checks []doctorCheck
 	for _, coord := range proj.SkillCoordinates() {
-		ref := proj.Skills[coord]
+		ref := proj.SkillRef(coord)
 		e, ok := lockByCoord[coord]
 		if !ok {
 			checks = append(checks, doctorCheck{
@@ -586,7 +586,7 @@ func scanProjectFileDrift(lock *model.LockFile, projPath string) []doctorCheck {
 		}
 	}
 	for _, coord := range lockCoords {
-		if _, ok := proj.Skills[coord]; !ok {
+		if !proj.HasSkill(coord) {
 			checks = append(checks, doctorCheck{
 				Type: "project-file-drift", Skill: coord, OK: true,
 				Message: "in qvr.lock but not qvr.toml — run `qvr sync` to record it",

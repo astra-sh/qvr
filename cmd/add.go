@@ -377,7 +377,7 @@ func setProjectFileSkillRef(projPath, coord, ref string) error {
 	if err != nil {
 		return err
 	}
-	if cur, ok := proj.Skills[coord]; ok && cur == ref {
+	if cur, ok := proj.Skill(coord); ok && cur.Ref == ref {
 		return nil // already correct — quiet diff
 	}
 	proj.PutSkill(coord, ref)
@@ -414,43 +414,114 @@ func dropProjectFileSkills(projPath string, coords []string) error {
 	return proj.Write()
 }
 
-// unionLockTargets returns the sorted, deduplicated union of every installed
-// skill's agent targets. This is a faithful reconstruction of the project's
-// routing policy (`[project].default-targets`) when qvr.toml has been lost —
-// every skill records the targets it was installed into, so their union is the
-// set of agents the project routes to.
-func unionLockTargets(lock *model.LockFile) []string {
-	seen := map[string]struct{}{}
+// modeLockTargets reconstructs the project's routing policy
+// (`[project].default-targets`) from the lock when qvr.toml has been lost. It
+// returns the MODE — the single most common target set across installed skills —
+// not the union: skill-A→[claude] + skill-B→[cursor] must rebuild a default of
+// the dominant set, with the outlier carried as a per-skill override, NOT the
+// widened union [claude,cursor] that would silently re-route every future bare
+// `qvr add` into both (#230). Ties break deterministically on the joined set so
+// the result is stable. Edit/link/local entries (no portable coordinate) are
+// excluded — they aren't representable in qvr.toml and so don't vote on routing.
+func modeLockTargets(lock *model.LockFile) []string {
+	counts := map[string]int{}    // key -> occurrences
+	sets := map[string][]string{} // key -> the canonical target set
 	for _, e := range lock.Entries() {
-		for _, t := range e.Targets {
-			if t != "" {
-				seen[t] = struct{}{}
-			}
+		if model.SkillCoordinate(e) == "" {
+			continue
+		}
+		set := normalizeTargetSet(e.Targets)
+		if len(set) == 0 {
+			continue
+		}
+		key := strings.Join(set, "\x00")
+		counts[key]++
+		sets[key] = set
+	}
+	bestKey, bestCount := "", 0
+	for key, c := range counts {
+		if c > bestCount || (c == bestCount && key < bestKey) {
+			bestKey, bestCount = key, c
 		}
 	}
-	if len(seen) == 0 {
+	if bestKey == "" {
 		return nil
 	}
-	out := make([]string, 0, len(seen))
-	for t := range seen {
+	return sets[bestKey]
+}
+
+// normalizeTargetSet returns a sorted, de-duplicated copy of a target set with
+// empties dropped — the canonical form used to compare two target sets.
+func normalizeTargetSet(targets []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(targets))
+	for _, t := range targets {
+		if t == "" {
+			continue
+		}
+		if _, ok := seen[t]; ok {
+			continue
+		}
+		seen[t] = struct{}{}
 		out = append(out, t)
 	}
 	sort.Strings(out)
 	return out
 }
 
+// sameTargetSet reports whether two target sets are equal as sets.
+func sameTargetSet(a, b []string) bool {
+	na, nb := normalizeTargetSet(a), normalizeTargetSet(b)
+	if len(na) != len(nb) {
+		return false
+	}
+	for i := range na {
+		if na[i] != nb[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// skillTargetOverride returns the per-skill target set to record in qvr.toml for
+// a lock entry: nil when the entry's targets match the project default-targets
+// (so it stays a bare-string entry), or the entry's targets when they differ (so
+// the inline-table form pins the override and a front-door regenerate keeps the
+// routing — #228).
+func skillTargetOverride(entryTargets, defaultTargets []string) []string {
+	if sameTargetSet(entryTargets, defaultTargets) {
+		return nil
+	}
+	return normalizeTargetSet(entryTargets)
+}
+
+// canonicalizeTargetsQuiet canonicalizes target names best-effort, dropping any
+// that don't resolve. Used where targets are already canonical (lock entries,
+// qvr.toml default-targets) and a hard error would be inappropriate.
+func canonicalizeTargetsQuiet(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if c, ok := model.CanonicalTarget(strings.TrimSpace(n)); ok {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // seedSynthesizedProjectMeta fills the [project] block of a qvr.toml being
 // CREATED fresh from the lock (a lost or never-adopted qvr.toml). Routing policy
-// is the load-bearing part: default-targets is reconstructed from the union of
-// every installed skill's targets so a dropped qvr.toml doesn't silently
-// degrade `qvr add` routing to the machine-local default. name/version aren't
-// recorded in the lock, so they get init-style defaults rather than an empty,
-// misleading [project] block. Only ever called when synthesising a new file, so
-// it never overwrites a user's hand-set metadata.
+// is the load-bearing part: default-targets is reconstructed from the MODE of
+// every installed skill's targets (modeLockTargets) so a dropped qvr.toml doesn't
+// silently degrade `qvr add` routing to the machine-local default — while
+// outliers are recorded as per-skill overrides by the caller rather than widening
+// the default (#230). name/version aren't recorded in the lock, so they get
+// init-style defaults rather than an empty, misleading [project] block. Only ever
+// called when synthesising a new file, so it never overwrites a user's hand-set
+// metadata.
 func seedSynthesizedProjectMeta(proj *model.ProjectFile, lock *model.LockFile, projPath string) {
 	if len(proj.Project.DefaultTargets) == 0 {
-		if union := unionLockTargets(lock); len(union) > 0 {
-			proj.Project.DefaultTargets = union
+		if mode := modeLockTargets(lock); len(mode) > 0 {
+			proj.Project.DefaultTargets = mode
 		}
 	}
 	if proj.Project.Name == "" {
@@ -483,14 +554,24 @@ func syncProjectFileFromLock(projPath string, lock *model.LockFile, installed []
 	if err != nil {
 		return err
 	}
-	// Authoritative ref for everything installed in this batch.
+	// Reconstruct the [project] block first when creating qvr.toml fresh, so
+	// routing policy (default-targets) survives a lost qvr.toml instead of
+	// degrading — and so the per-skill override decision below has a default to
+	// compare each entry's targets against.
+	if !existed {
+		seedSynthesizedProjectMeta(proj, lock, projPath)
+	}
+	defaults := canonicalizeTargetsQuiet(proj.Project.DefaultTargets)
+	// Authoritative ref + per-skill targets for everything installed in this
+	// batch. Targets matching default-targets stay bare; an override (e.g. a
+	// `qvr add --target`) is pinned inline so it survives a regenerate (#228).
 	for _, r := range installed {
 		entry, gerr := lock.Get(r.Name)
 		if gerr != nil {
 			continue
 		}
 		if coord := model.SkillCoordinate(entry); coord != "" {
-			proj.PutSkill(coord, entry.Ref)
+			proj.PutSkillSpec(coord, entry.Ref, skillTargetOverride(entry.Targets, defaults))
 		}
 	}
 	// Back-fill: synthesize entries for portable lock skills qvr.toml omits.
@@ -499,14 +580,9 @@ func syncProjectFileFromLock(projPath string, lock *model.LockFile, installed []
 		if coord == "" {
 			continue
 		}
-		if _, ok := proj.Skills[coord]; !ok {
-			proj.PutSkill(coord, entry.Ref)
+		if !proj.HasSkill(coord) {
+			proj.PutSkillSpec(coord, entry.Ref, skillTargetOverride(entry.Targets, defaults))
 		}
-	}
-	// Reconstruct the [project] block when creating qvr.toml fresh, so routing
-	// policy (default-targets) survives a lost qvr.toml instead of degrading.
-	if !existed {
-		seedSynthesizedProjectMeta(proj, lock, projPath)
 	}
 	next, err := model.MarshalProjectFile(proj)
 	if err != nil {

@@ -175,6 +175,89 @@ func TestSkillCoordinate(t *testing.T) {
 	}
 }
 
+// TestProjectFile_PerSkillTargets_RoundTrip is the #228 schema guard: a qvr.toml
+// [skills] value may be a bare ref (uses default-targets) OR an inline table with
+// a per-skill targets override, and both survive a parse → marshal → parse
+// round-trip with the override intact.
+func TestProjectFile_PerSkillTargets_RoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), model.ProjectFileName)
+	raw := `[project]
+default-targets = ["claude"]
+
+[skills]
+"acme/foo" = "main"
+"acme/tdd" = { ref = "v1.2.0", targets = ["cursor", "codex"] }
+`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := model.ReadProjectFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	// Bare entry → ref only, no override (follows default-targets).
+	if got := proj.SkillRef("acme/foo"); got != "main" {
+		t.Errorf("foo ref = %q, want main", got)
+	}
+	if tg := proj.SkillTargets("acme/foo"); len(tg) != 0 {
+		t.Errorf("foo targets = %v, want none (bare)", tg)
+	}
+	// Inline entry → ref + per-skill override.
+	if got := proj.SkillRef("acme/tdd"); got != "v1.2.0" {
+		t.Errorf("tdd ref = %q, want v1.2.0", got)
+	}
+	if tg := proj.SkillTargets("acme/tdd"); len(tg) != 2 || tg[0] != "cursor" || tg[1] != "codex" {
+		t.Errorf("tdd targets = %v, want [cursor codex]", tg)
+	}
+
+	// Marshal must keep the bare/inline split and be idempotent on reload.
+	if err := proj.Write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	first, _ := os.ReadFile(path)
+	reloaded, err := model.ReadProjectFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if tg := reloaded.SkillTargets("acme/tdd"); len(tg) != 2 {
+		t.Errorf("override lost on round-trip: %v", tg)
+	}
+	if reloaded.SkillRef("acme/foo") != "main" {
+		t.Errorf("bare entry lost on round-trip")
+	}
+	if err := reloaded.Write(); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	second, _ := os.ReadFile(path)
+	if !bytes.Equal(first, second) {
+		t.Fatalf("marshal not idempotent across reload:\n%s\n---\n%s", first, second)
+	}
+}
+
+// TestProjectFile_PutSkillPreservesTargets confirms PutSkill (ref-only upsert)
+// keeps an existing per-skill override, while PutSkillSpec sets/clears it.
+func TestProjectFile_PutSkillPreservesTargets(t *testing.T) {
+	p := model.NewProjectFile("")
+	p.PutSkillSpec("acme/tdd", "main", []string{"cursor"})
+	if tg := p.SkillTargets("acme/tdd"); len(tg) != 1 || tg[0] != "cursor" {
+		t.Fatalf("PutSkillSpec targets = %v, want [cursor]", tg)
+	}
+	// Ref-only upsert must not clobber the override.
+	p.PutSkill("acme/tdd", "v2")
+	if got := p.SkillRef("acme/tdd"); got != "v2" {
+		t.Errorf("ref = %q, want v2", got)
+	}
+	if tg := p.SkillTargets("acme/tdd"); len(tg) != 1 || tg[0] != "cursor" {
+		t.Errorf("PutSkill dropped override: %v", tg)
+	}
+	// PutSkillSpec with empty targets drops back to the bare form.
+	p.PutSkillSpec("acme/tdd", "v3", nil)
+	if tg := p.SkillTargets("acme/tdd"); len(tg) != 0 {
+		t.Errorf("PutSkillSpec(nil) should clear override, got %v", tg)
+	}
+}
+
 func TestProjectFile_RemoveSkillIdempotent(t *testing.T) {
 	p := model.NewProjectFile("")
 	p.PutSkill("org/repo/a", "main")

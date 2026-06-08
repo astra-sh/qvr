@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/astra-sh/qvr/internal/config"
 	"github.com/astra-sh/qvr/internal/git"
 	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/registry"
 	"github.com/astra-sh/qvr/internal/skill"
 )
 
@@ -205,6 +207,125 @@ func TestRunLock_DryRunDoesNotWrite(t *testing.T) {
 	if string(before) != string(after) {
 		t.Errorf("--dry-run mutated qvr.lock:\nbefore=%s\nafter=%s", before, after)
 	}
+}
+
+// TestRunLock_FromTomlRemovesDeletedSkill is the #229 guard: deleting a skill
+// from qvr.toml and running `qvr lock --from-toml` removes the lock entry AND
+// tears down its install (symlink + worktree) — the toml-authoritative deletion
+// the additive `qvr sync` and refs-only old `--from-toml` both failed to honor.
+func TestRunLock_FromTomlRemovesDeletedSkill(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	installBranchPinned(t, "acme", "demo")
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+
+	// The skill is installed: lock entry + symlink exist.
+	if _, err := lockEntryGet(t, lockPath, "demo"); err != nil {
+		t.Fatalf("precondition: demo should be installed: %v", err)
+	}
+	link := filepath.Join(project, ".claude", "skills", "demo")
+	if _, err := os.Lstat(link); err != nil {
+		t.Fatalf("precondition: symlink should exist: %v", err)
+	}
+
+	// qvr.toml EXISTS but does not declare acme/demo → it's a deletion.
+	projPath := model.DefaultProjectPath(project)
+	if err := os.WriteFile(projPath, []byte("[project]\ndefault-targets = ['claude']\n"), 0o644); err != nil {
+		t.Fatalf("write qvr.toml: %v", err)
+	}
+
+	lockResolveFromToml = true
+	t.Cleanup(func() { lockResolveFromToml = false })
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock --from-toml: %v", err)
+	}
+
+	// Lock entry gone, symlink torn down.
+	lock, _ := model.ReadLockFile(lockPath)
+	if _, err := lock.Get("demo"); err == nil {
+		t.Errorf("demo should be removed from the lock (absent from qvr.toml)")
+	}
+	if _, err := os.Lstat(link); !os.IsNotExist(err) {
+		t.Errorf("symlink should be torn down, stat err = %v", err)
+	}
+}
+
+// TestRunLock_FromTomlAbsentTomlIsNoop is the safety guard for the deletion
+// path: an ABSENT qvr.toml (the lock's self-sufficient default state) must NOT
+// be read as "nothing declared" and tear down every skill. It's a no-op.
+func TestRunLock_FromTomlAbsentTomlIsNoop(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	installBranchPinned(t, "acme", "demo")
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+
+	// No qvr.toml on disk.
+	if _, err := os.Stat(model.DefaultProjectPath(project)); !os.IsNotExist(err) {
+		t.Fatalf("precondition: qvr.toml must be absent, stat err = %v", err)
+	}
+
+	lockResolveFromToml = true
+	t.Cleanup(func() { lockResolveFromToml = false })
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock --from-toml: %v", err)
+	}
+
+	lock, _ := model.ReadLockFile(lockPath)
+	if _, err := lock.Get("demo"); err != nil {
+		t.Errorf("absent qvr.toml must be a no-op; demo should survive, got %v", err)
+	}
+}
+
+// TestRunLock_RecordsProject confirms `qvr lock` re-asserts the project in
+// projects.json (mirroring add/sync/remove), so reachability and the
+// shared-worktree teardown gate (#232) stay accurate for a project last touched
+// via lock.
+func TestRunLock_RecordsProject(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	installBranchPinned(t, "acme", "demo")
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+
+	// Simulate the record being lost (e.g. pruned), then run `qvr lock`.
+	registry.ForgetProject(lockPath)
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock: %v", err)
+	}
+
+	pf, _ := registry.ReadProjects()
+	if _, ok := pf.Projects[lockPath]; !ok {
+		t.Errorf("`qvr lock` should record the project in projects.json")
+	}
+}
+
+func lockEntryGet(t *testing.T, lockPath, name string) (*model.LockEntry, error) {
+	t.Helper()
+	lock, err := model.ReadLockFile(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	return lock.Get(name)
 }
 
 // TestRunLock_PackageSelectsSingleSkill confirms -P re-pins only the named

@@ -732,12 +732,17 @@ func (in *Installer) RemoveFrom(name string, req InstallRequest, lock *model.Loc
 		}
 	}
 
-	// Pass 2: drop the shared worktree for non-edit, non-link entries.
-	// Mode:edit entries never had a shared worktree to clean; link
-	// installs point at user-owned dirs we don't touch.
+	// Pass 2: drop the shared worktree for non-edit, non-link entries — but ONLY
+	// if no one else still references it. Worktrees are global and content-keyed
+	// (`<registry>/<skill>/<sha>`), so the same skill@sha installed in another
+	// project (or twice in this one via `--as`) shares one on-disk worktree.
+	// Deleting it on a single project's `qvr remove` / `lock --from-toml` teardown
+	// would break every sibling that still points at it (data loss #232).
+	// Mode:edit entries never had a shared worktree to clean; link installs point
+	// at user-owned dirs we don't touch.
 	if !entry.IsLink() && !entry.IsEdit() {
 		worktreePath := EntryWorktreePath(entry)
-		if worktreePath != "" {
+		if worktreePath != "" && !worktreeStillReferenced(lock, name, worktreePath, req) {
 			if err := in.Worktree.Remove(worktreePath); err != nil && !errors.Is(err, git.ErrWorktreeNotFound) {
 				return fmt.Errorf("remove %s: drop worktree: %w", name, err)
 			}
@@ -750,6 +755,32 @@ func (in *Installer) RemoveFrom(name string, req InstallRequest, lock *model.Loc
 		return fmt.Errorf("remove %s: drop lock entry: %w", name, err)
 	}
 	return nil
+}
+
+// worktreeStillReferenced reports whether the SHA-keyed worktree at worktreePath
+// is still needed by anyone other than the entry being removed — a sibling entry
+// in the SAME (in-memory) lock (e.g. an `--as` alias of the same skill@sha), or
+// any OTHER live project / the global lock (via projects.json). When true, the
+// teardown must keep the worktree and drop only this project's symlinks + lock
+// entry (data loss #232).
+func worktreeStillReferenced(lock *model.LockFile, removingName, worktreePath string, req InstallRequest) bool {
+	// Siblings in the current lock that resolve to the same worktree.
+	for _, e := range lock.Entries() {
+		if e.Name == removingName {
+			continue
+		}
+		if EntryWorktreePath(e) == worktreePath {
+			return true
+		}
+	}
+	// Other projects / the global lock. Exclude the lock currently being mutated:
+	// its in-memory state (checked above) is authoritative, and its on-disk copy
+	// is stale until the caller writes it.
+	lockPath := req.LockPath
+	if lockPath == "" {
+		lockPath = model.DefaultLockPath(req.ProjectRoot, quiverHome(), req.Global)
+	}
+	return registry.WorktreeReferencedExcept(worktreePath, lockPath)
 }
 
 // InstallLocal installs a skill from a local directory as an immutable copy.

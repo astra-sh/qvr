@@ -1,6 +1,7 @@
 package model
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -38,10 +39,23 @@ type ProjectFile struct {
 	Project ProjectMeta `toml:"project" json:"project"`
 
 	// Skills maps an install coordinate ("<registry>/<skill>", e.g.
-	// "anthropics/skills/frontend-design") to a requested ref (branch or tag).
+	// "anthropics/skills/frontend-design") to its declared intent. Each value is
+	// polymorphic, decoded by go-toml into one of two shapes:
+	//
+	//   'reg/skill' = 'main'                              # bare ref — uses default-targets
+	//   'reg/skill' = { ref = 'main', targets = ['x'] }  # ref + per-skill target override
+	//
+	// The bare-string form routes the skill to [project].default-targets; the
+	// inline-table form pins a per-skill target set that survives a front-door
+	// regenerate (qvr add --target / qvr sync). Hold the map as map[string]any —
+	// go-toml decodes a bare value to string and an inline table to
+	// map[string]any natively (map values can't drive a custom unmarshaler since
+	// they aren't addressable). Read via the Skill*/HasSkill accessors and mutate
+	// via PutSkill/PutSkillSpec rather than indexing the raw values.
+	//
 	// Registry-sourced skills only — edit/link/local install modes have no
 	// coordinate and live solely in qvr.lock.
-	Skills map[string]string `toml:"skills,omitempty" json:"skills,omitempty"`
+	Skills map[string]any `toml:"skills,omitempty" json:"skills,omitempty"`
 
 	// Plugins/Hooks/Mcp are reserved for future milestones. Inert this release;
 	// map[string]any keeps any hand-authored content lossless on round-trip.
@@ -72,9 +86,58 @@ type ProjectMeta struct {
 // NewProjectFile returns an empty project file at the given path.
 func NewProjectFile(path string) *ProjectFile {
 	return &ProjectFile{
-		Skills: make(map[string]string),
+		Skills: make(map[string]any),
 		path:   path,
 	}
+}
+
+// SkillSpec is the parsed intent for one qvr.toml [skills] entry: a requested
+// ref plus an optional per-skill target override. An empty Targets means the
+// skill routes to [project].default-targets (the bare-string form on disk).
+type SkillSpec struct {
+	Ref     string   `json:"ref"`
+	Targets []string `json:"targets,omitempty"`
+}
+
+// parseSkillSpec interprets a raw qvr.toml [skills] value (string or inline
+// table, as decoded by go-toml) into a SkillSpec.
+func parseSkillSpec(raw any) SkillSpec {
+	switch v := raw.(type) {
+	case string:
+		return SkillSpec{Ref: v}
+	case map[string]any:
+		s := SkillSpec{}
+		if r, ok := v["ref"].(string); ok {
+			s.Ref = r
+		}
+		s.Targets = toStringSlice(v["targets"])
+		return s
+	}
+	return SkillSpec{}
+}
+
+// toStringSlice normalises a decoded TOML array (which go-toml yields as []any)
+// or an already-typed []string into []string. Returns nil for anything else.
+func toStringSlice(raw any) []string {
+	switch v := raw.(type) {
+	case []string:
+		if len(v) == 0 {
+			return nil
+		}
+		return append([]string(nil), v...)
+	case []any:
+		if len(v) == 0 {
+			return nil
+		}
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // Path returns the project file's on-disk path.
@@ -111,7 +174,7 @@ func ReadProjectFile(path string) (*ProjectFile, error) {
 	}
 	p.path = path
 	if p.Skills == nil {
-		p.Skills = make(map[string]string)
+		p.Skills = make(map[string]any)
 	}
 	return p, nil
 }
@@ -119,11 +182,41 @@ func ReadProjectFile(path string) (*ProjectFile, error) {
 // MarshalProjectFile serializes a project file using the canonical on-disk TOML
 // format. Callers comparing a planned write to prior bytes (idempotency) should
 // use this so the comparison matches Write exactly.
+//
+// The [skills] block is emitted in two passes: everything except skills is
+// marshaled normally, then the skills map is encoded with SetTablesInline so a
+// per-skill target override renders as an inline table
+// (`'reg/skill' = { ref = 'main', targets = ['x'] }`) while a bare ref stays a
+// plain string. go-toml has no per-value marshal hook and TextMarshaler is
+// string-only, so a single-pass struct marshal can't produce both shapes.
 func MarshalProjectFile(p *ProjectFile) ([]byte, error) {
-	data, err := toml.Marshal(p)
+	// Pass 1: [project] + reserved sections (skills deliberately omitted).
+	head := struct {
+		Project ProjectMeta    `toml:"project"`
+		Plugins map[string]any `toml:"plugins,omitempty"`
+		Hooks   map[string]any `toml:"hooks,omitempty"`
+		Mcp     map[string]any `toml:"mcp,omitempty"`
+	}{Project: p.Project, Plugins: p.Plugins, Hooks: p.Hooks, Mcp: p.Mcp}
+	data, err := toml.Marshal(head)
 	if err != nil {
 		return nil, fmt.Errorf("marshal project file: %w", err)
 	}
+
+	// Pass 2: the [skills] table, with inline tables for per-skill overrides.
+	if len(p.Skills) > 0 {
+		var sb bytes.Buffer
+		enc := toml.NewEncoder(&sb)
+		enc.SetTablesInline(true)
+		if err := enc.Encode(p.Skills); err != nil {
+			return nil, fmt.Errorf("marshal project file skills: %w", err)
+		}
+		if len(data) > 0 && data[len(data)-1] != '\n' {
+			data = append(data, '\n')
+		}
+		data = append(data, "\n[skills]\n"...)
+		data = append(data, sb.Bytes()...)
+	}
+
 	if len(data) == 0 || data[len(data)-1] != '\n' {
 		data = append(data, '\n')
 	}
@@ -168,20 +261,72 @@ func (p *ProjectFile) Write() error {
 	return nil
 }
 
-// PutSkill upserts a skill coordinate → ref entry.
+// PutSkill upserts a skill coordinate → ref entry, PRESERVING any existing
+// per-skill target override. Use this when only the ref is known (e.g. projecting
+// a lock ref into qvr.toml) so a hand-set or previously recorded target set is
+// not clobbered.
 func (p *ProjectFile) PutSkill(coordinate, ref string) {
 	if p.Skills == nil {
-		p.Skills = make(map[string]string)
+		p.Skills = make(map[string]any)
+	}
+	if targets := p.SkillTargets(coordinate); len(targets) > 0 {
+		p.Skills[coordinate] = map[string]any{"ref": ref, "targets": targets}
+		return
+	}
+	p.Skills[coordinate] = ref
+}
+
+// PutSkillSpec upserts a skill coordinate with both its ref and an explicit
+// per-skill target override. An empty targets set records the bare-string form
+// (the skill follows [project].default-targets); a non-empty set records the
+// inline-table form so the routing survives a front-door regenerate.
+func (p *ProjectFile) PutSkillSpec(coordinate, ref string, targets []string) {
+	if p.Skills == nil {
+		p.Skills = make(map[string]any)
+	}
+	if len(targets) > 0 {
+		p.Skills[coordinate] = map[string]any{"ref": ref, "targets": append([]string(nil), targets...)}
+		return
 	}
 	p.Skills[coordinate] = ref
 }
 
 // GetSkill returns the ref for a coordinate, or ErrProjectSkillMissing.
 func (p *ProjectFile) GetSkill(coordinate string) (string, error) {
-	if ref, ok := p.Skills[coordinate]; ok {
-		return ref, nil
+	if raw, ok := p.Skills[coordinate]; ok {
+		return parseSkillSpec(raw).Ref, nil
 	}
 	return "", fmt.Errorf("%w: %s", ErrProjectSkillMissing, coordinate)
+}
+
+// Skill returns the parsed spec for a coordinate and whether it is present.
+func (p *ProjectFile) Skill(coordinate string) (SkillSpec, bool) {
+	raw, ok := p.Skills[coordinate]
+	if !ok {
+		return SkillSpec{}, false
+	}
+	return parseSkillSpec(raw), true
+}
+
+// HasSkill reports whether a coordinate is declared.
+func (p *ProjectFile) HasSkill(coordinate string) bool {
+	_, ok := p.Skills[coordinate]
+	return ok
+}
+
+// SkillRef returns the declared ref for a coordinate, or "" if absent.
+func (p *ProjectFile) SkillRef(coordinate string) string {
+	return parseSkillSpec(p.Skills[coordinate]).Ref
+}
+
+// SkillTargets returns the per-skill target override for a coordinate, or nil
+// when the skill uses [project].default-targets (the bare-string form).
+func (p *ProjectFile) SkillTargets(coordinate string) []string {
+	raw, ok := p.Skills[coordinate]
+	if !ok {
+		return nil
+	}
+	return parseSkillSpec(raw).Targets
 }
 
 // RemoveSkill deletes a skill coordinate. A no-op (nil) if absent — removal
@@ -203,11 +348,11 @@ func (p *ProjectFile) SkillCoordinates() []string {
 
 // Validate checks structural invariants: every coordinate and ref is non-empty.
 func (p *ProjectFile) Validate() error {
-	for coord, ref := range p.Skills {
+	for coord, raw := range p.Skills {
 		if coord == "" {
 			return errors.New("project file has a skill entry with an empty coordinate")
 		}
-		if ref == "" {
+		if parseSkillSpec(raw).Ref == "" {
 			return fmt.Errorf("project file skill %q has an empty ref", coord)
 		}
 	}

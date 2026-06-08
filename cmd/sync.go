@@ -451,7 +451,7 @@ func applyProjectFileToLock(projPath string, lock *model.LockFile, installer *sk
 
 	// Cases B & C: walk qvr.toml's declared skills.
 	for _, coord := range proj.SkillCoordinates() {
-		ref := proj.Skills[coord]
+		ref := proj.SkillRef(coord)
 		if entry, ok := lockByCoord[coord]; ok {
 			if entry.Ref != ref { // Case B — lock wins.
 				warnings = append(warnings, fmt.Sprintf(
@@ -471,7 +471,16 @@ func applyProjectFileToLock(projPath string, lock *model.LockFile, installer *sk
 			warnings = append(warnings, fmt.Sprintf("%s: malformed coordinate in qvr.toml (expected <registry>/<skill>); skipped", coord))
 			continue
 		}
-		targets, terr := resolveTargets()
+		// A per-skill target override (qvr.toml inline table) wins over the
+		// project default-targets so a `qvr add --target` routing survives a
+		// regenerate-from-front-door (#228); a bare entry falls back to defaults.
+		var targets []string
+		var terr error
+		if override := proj.SkillTargets(coord); len(override) > 0 {
+			targets, terr = canonicalizeTargets(override)
+		} else {
+			targets, terr = resolveTargets()
+		}
 		if terr != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: cannot install from qvr.toml — %v", coord, terr))
 			continue
@@ -497,22 +506,25 @@ func applyProjectFileToLock(projPath string, lock *model.LockFile, installer *sk
 	// Apply mode only — read-only modes never write the file.
 	if apply {
 		changed := false
+		// Reconstruct the [project] block first when creating qvr.toml fresh so a
+		// lost qvr.toml doesn't silently degrade routing — default-targets is set
+		// to the project's dominant routing (mode), and per-skill outliers are
+		// recorded inline below. Seeding before the back-fill lets the back-fill
+		// decide which skills need an explicit target override.
+		if !existed {
+			seedSynthesizedProjectMeta(proj, lock, projPath)
+			changed = true
+		}
+		defaults := canonicalizeTargetsQuiet(proj.Project.DefaultTargets)
 		for _, e := range lock.Entries() {
 			coord := model.SkillCoordinate(e)
 			if coord == "" {
 				continue
 			}
-			if _, ok := proj.Skills[coord]; !ok {
-				proj.PutSkill(coord, e.Ref)
+			if !proj.HasSkill(coord) {
+				proj.PutSkillSpec(coord, e.Ref, skillTargetOverride(e.Targets, defaults))
 				changed = true
 			}
-		}
-		// Reconstruct the [project] block when creating qvr.toml fresh so a lost
-		// qvr.toml doesn't silently degrade routing — default-targets is rebuilt
-		// from the union of every installed skill's targets.
-		if !existed {
-			seedSynthesizedProjectMeta(proj, lock, projPath)
-			changed = true
 		}
 		if changed {
 			if werr := proj.Write(); werr != nil {

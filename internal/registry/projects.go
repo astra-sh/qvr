@@ -201,6 +201,54 @@ func Reachable() (*ReachabilityResult, error) {
 	return res, nil
 }
 
+// WorktreeReferencedExcept reports whether any lock OTHER than excludeLockPath
+// references worktreePath — i.e. whether a SHA-keyed worktree is still shared by
+// another live project (or the user-global lock) and so must NOT be torn down.
+//
+// Worktrees are global and content-addressed (`<registry>/<skill>/<sha>`), so two
+// projects that install the same skill@sha share one on-disk worktree. Teardown
+// (`qvr remove`, `lock --from-toml`) must not delete it out from under a sibling
+// project (data loss #232). excludeLockPath is the lock currently being mutated
+// (its in-memory state is authoritative for the caller, and its on-disk copy is
+// stale mid-teardown), so it is skipped here; the caller checks its own remaining
+// entries separately.
+func WorktreeReferencedExcept(worktreePath, excludeLockPath string) bool {
+	if worktreePath == "" {
+		return false
+	}
+	exclude := absLockPath(excludeLockPath)
+	res := &ReachabilityResult{Worktrees: map[string]struct{}{}}
+
+	globalLock := filepath.Join(config.Dir(), model.LockFileName)
+	if absLockPath(globalLock) != exclude {
+		addLockWorktrees(globalLock, res)
+	}
+	if pf, err := ReadProjects(); err == nil {
+		for _, rec := range pf.Projects {
+			if absLockPath(rec.LockPath) == exclude {
+				continue
+			}
+			if _, err := os.Stat(rec.LockPath); err != nil {
+				continue
+			}
+			addLockWorktrees(rec.LockPath, res)
+		}
+	}
+	_, ok := res.Worktrees[worktreePath]
+	return ok
+}
+
+// absLockPath normalises a lock path for comparison; returns "" unchanged.
+func absLockPath(p string) string {
+	if p == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return filepath.Clean(p)
+}
+
 // addLockWorktrees opens lockPath, decodes the entries, and records each
 // non-link entry's derived worktree path (via WorktreePath) and the entry itself
 // into res. Errors are swallowed — best-effort; a malformed lock just
