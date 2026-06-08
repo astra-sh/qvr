@@ -17,7 +17,7 @@ An extremely fast skills manager for coding agents, written in Go.
 
 ---
 
-## Agent skills are the new packages of AI — it's time to manage them securely
+## Agent skills are the new packages of AI — it's time to manage them the right way!
 
 A skill is a folder of instructions and scripts your agent loads and executes on
 your behalf. That makes it a **dependency**, with all the same questions npm and
@@ -29,10 +29,8 @@ unscanned, unattributable. Quiver gives agent skills the lifecycle software
 packages already have: a source, a lock, a gate, and an audit trail — with no
 server to run and no runtime in the read path.
 
-## What is Quiver (`qvr`)?
-
-Quiver is to agent skills what `uv` is to Python packages: a Git-native,
-zero-service CLI to install, version, scan, and govern [agent skills] across
+`qvr` is to agent skills what `uv` is to Python packages: a Git-native,
+zero-service CLI to install, version, lint, scan, and govern [agent skills] across
 every coding agent — Claude Code, Cursor, Copilot, Codex, Windsurf, anything
 that reads skills from a directory.
 
