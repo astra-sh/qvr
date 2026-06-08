@@ -591,17 +591,16 @@ func collectCacheEntries() ([]CacheEntry, []string, error) {
 		return nil, nil, fmt.Errorf("compute reachability: %w", err)
 	}
 
-	// registry.WorktreeLeaves enumerates both legacy `.git` worktrees and
-	// worktree-free content dirs (#204) — the latter have no marker and so were
-	// invisible to prune, permanently leaking when orphaned by a vanished
-	// project (issue #221).
+	// registry.WorktreeLeaves enumerates worktree roots config-independently
+	// (legacy `.git` worktrees and worktree-free content dirs #204), so prune
+	// reclaims true orphans even under a removed registry (#4) without leaking
+	// (#221).
 	var entries []CacheEntry
 	for _, leaf := range registry.WorktreeLeaves() {
 		size, _ := dirSize(leaf)
-		_, reachable := reach.Worktrees[leaf]
 		entries = append(entries, CacheEntry{
 			Path:      leaf,
-			Reachable: reachable,
+			Reachable: isReachableLeaf(leaf, reach.Worktrees),
 			SizeBytes: size,
 		})
 	}
@@ -613,6 +612,29 @@ func collectCacheEntries() ([]CacheEntry, []string, error) {
 		return entries[i].Path < entries[j].Path
 	})
 	return entries, reach.MissingProjects, nil
+}
+
+// isReachableLeaf reports whether a discovered worktree leaf must be PROTECTED
+// from prune. A leaf is reachable when it exactly matches a referenced worktree
+// root, OR overlaps one as an ancestor or descendant. The overlap check is a
+// safety net for WorktreeLeaves' hash-name heuristic: if it ever mis-identifies
+// the root level (e.g. a pathological all-hex registry/skill name, or a hash-like
+// content subdir), the candidate is an ancestor/descendant of the true reachable
+// root and is kept — so a misfire can only leak, never delete a live worktree
+// (the data-loss regression #231). True orphans sit at sibling depth to every
+// reachable root (they differ at the `<sha>` segment), so they never overlap and
+// are still reclaimed.
+func isReachableLeaf(leaf string, reachable map[string]struct{}) bool {
+	if _, ok := reachable[leaf]; ok {
+		return true
+	}
+	for root := range reachable {
+		if strings.HasPrefix(leaf, root+string(os.PathSeparator)) ||
+			strings.HasPrefix(root, leaf+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // dirSize sums the on-disk size that deleting dir would actually reclaim:

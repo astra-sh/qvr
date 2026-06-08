@@ -248,9 +248,10 @@ func TestRunCachePrune_VanishedProjectReclaimsWorktreeFreeContentDir(t *testing.
 	home := t.TempDir()
 	t.Setenv("QUIVER_HOME", home)
 
-	// The worktree-free enumerator keys on configured registries, so the
-	// registry must be present in config (only the PROJECT vanishes, not the
-	// registry — matching the reported repro).
+	// Only the PROJECT vanishes here, not the registry (matching the reported
+	// #221 repro); the registry stays in config. (Discovery no longer depends on
+	// config — see TestRunCachePrune_ReclaimsRemovedRegistryContentDir for the
+	// removed-registry case.)
 	if err := config.Save(&config.Config{
 		Registries: map[string]config.RegistryConfig{
 			"acme": {URL: "git@example.test:acme.git"},
@@ -304,6 +305,130 @@ func TestRunCachePrune_VanishedProjectReclaimsWorktreeFreeContentDir(t *testing.
 	if err := runCachePrune(nil, nil); err != nil {
 		t.Fatalf("second runCachePrune: %v", err)
 	}
+}
+
+// TestRunCachePrune_ReclaimsRemovedRegistryContentDir is the #4 guard (a
+// distinct trigger from #221): a worktree-free content dir whose registry is no
+// longer in config must still be discovered and reclaimed. The old enumerator
+// keyed content-dir discovery on cfg.Registries, so a removed-registry (or
+// publish-iteration) content dir was invisible — prune reported "0 worktree(s)"
+// and leaked it. The marker walk (`.git` OR SKILL.md) finds it regardless of
+// config; reachability still gates deletion.
+func TestRunCachePrune_ReclaimsRemovedRegistryContentDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+
+	// Config has NO registries — the "registry was removed" case. The content
+	// dir on disk is orphaned (no project lock references it).
+	if err := config.Save(&config.Config{}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	content := fakeContentDir(t, "gone", "demo", "abc1234")
+
+	resetPrinter(t)
+	cachePruneDryRun = false
+	cachePruneYes = true
+	t.Cleanup(func() { cachePruneYes = false })
+
+	if err := runCachePrune(nil, nil); err != nil {
+		t.Fatalf("runCachePrune: %v", err)
+	}
+	if _, err := os.Stat(content); !os.IsNotExist(err) {
+		t.Errorf("LEAK: removed-registry content dir not reclaimed (stat err=%v)", err)
+	}
+}
+
+// TestRunCachePrune_KeepsOtherLiveProjectsWorktrees is the #231 data-loss guard:
+// `cache prune` run while CWD is project B must NOT delete worktrees referenced
+// by project A (a different live project sharing ~/.quiver), while still
+// reclaiming a true orphan referenced by no project. Regression for the marker
+// walk that returned nested content dirs (never matching the reachable root) and
+// so deleted every project's worktrees.
+func TestRunCachePrune_KeepsOtherLiveProjectsWorktrees(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{
+		Registries: map[string]config.RegistryConfig{
+			"acme": {URL: "git@example.test:acme.git"},
+			"beta": {URL: "git@example.test:beta.git"},
+		},
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	// Two live projects, each with its own worktree, plus a true orphan. Use the
+	// REAL nested layout (SKILL.md at the repo subpath, NOT the worktree root) —
+	// the flat fixture would not reproduce #231, where the nested-content walk
+	// returned a dir that never matched the reachable root.
+	wtA := fakeNestedWorktree(t, "acme", "benchmark", "abc1234")
+	wtB := fakeNestedWorktree(t, "beta", "health", "feed123")
+	orphan := fakeNestedWorktree(t, "acme", "stale", "deadbee")
+
+	recordLiveProject(t, "projA", "benchmark", "acme", "abc1234abcdef")
+	recordLiveProject(t, "projB", "health", "beta", "feed123abcdef")
+
+	resetPrinter(t)
+	cachePruneDryRun = false
+	cachePruneYes = true
+	t.Cleanup(func() { cachePruneYes = false })
+
+	if err := runCachePrune(nil, nil); err != nil {
+		t.Fatalf("runCachePrune: %v", err)
+	}
+
+	// Assert the actual CONTENT survives, not just the root dir: the buggy walk
+	// returned the nested content dir and would have deleted exactly the SKILL.md
+	// subtree while leaving the (now-empty) root, which a root-only stat misses.
+	if _, err := os.Stat(filepath.Join(wtA, "skills", "benchmark", "SKILL.md")); err != nil {
+		t.Errorf("DATA LOSS: project A's worktree content was deleted (err=%v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(wtB, "skills", "health", "SKILL.md")); err != nil {
+		t.Errorf("DATA LOSS: project B's worktree content was deleted (err=%v)", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Errorf("orphan should have been reclaimed (stat err=%v)", err)
+	}
+}
+
+// fakeNestedWorktree builds a worktree root at <root>/<reg>/<skill>/<sha> whose
+// SKILL.md lives at the repo subpath (<sha>/skills/<skill>/SKILL.md), with NO
+// marker at the root — the shape a real sparse-checkout produces. Returns the
+// worktree ROOT path (what reachability records).
+func fakeNestedWorktree(t *testing.T, reg, skill, sha string) string {
+	t.Helper()
+	rootDir := filepath.Join(registry.WorktreesRoot(), reg, skill, sha)
+	content := filepath.Join(rootDir, "skills", skill)
+	if err := os.MkdirAll(content, 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(content, "SKILL.md"), []byte("payload"), 0o644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	return rootDir
+}
+
+// recordLiveProject writes projectRoot/qvr.lock with one entry whose derived
+// worktree path matches fakeWorktree(registry, name, ShortSHA(commit)), then
+// records the project so reachability protects it.
+func recordLiveProject(t *testing.T, dir, name, reg, commit string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), dir)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	lockPath := filepath.Join(root, model.LockFileName)
+	lock := model.NewLockFile(lockPath)
+	lock.Put(&model.LockEntry{
+		Name:     name,
+		Registry: reg,
+		Source:   "git@example.test:" + reg + ".git",
+		Ref:      "main",
+		Commit:   commit,
+	})
+	if err := lock.Write(); err != nil {
+		t.Fatalf("write lock %s: %v", dir, err)
+	}
+	registry.TouchProject(lockPath)
 }
 
 func TestRunCachePrune_ForgetsVanishedProjects(t *testing.T) {

@@ -114,7 +114,7 @@ func init() {
 	lockCmd.Flags().BoolVar(&lockResolveGlobal, "global", false,
 		"operate on the user-global lock file instead of the project lock")
 	lockCmd.Flags().BoolVar(&lockResolveFromToml, "from-toml", false,
-		"apply qvr.toml's [skills] refs into the lock (re-resolve each entry at the ref qvr.toml declares) — the toml-authoritative direction")
+		"apply qvr.toml into the lock (toml-authoritative): re-resolve each entry at the ref qvr.toml declares, and remove any portable lock entry no longer declared in qvr.toml (tearing down its installs)")
 
 	lockCmd.AddCommand(lockVerifyCmd, lockUpgradeCmd)
 	rootCmd.AddCommand(lockCmd)
@@ -168,6 +168,13 @@ func runLock(cmd *cobra.Command, args []string) error {
 	if lockErr != nil {
 		return lockErr
 	}
+	// Re-assert this project in projects.json, mirroring add/sync/remove. `qvr
+	// lock` (especially --from-toml, which now tears down skills) is a project
+	// mutation, so recording it keeps reachability — and the shared-worktree
+	// teardown gate (#232) — accurate even for a project last touched via `lock`.
+	if !lockResolveGlobal {
+		registry.TouchProject(lockPath)
+	}
 
 	failed := 0
 	repinned := 0
@@ -206,6 +213,10 @@ func runLock(cmd *cobra.Command, args []string) error {
 			printer.Info(fmt.Sprintf("%s: unchanged (%s @ %s)", e.Name, e.Ref, e.OldCommit))
 		case "skipped":
 			printer.Info(fmt.Sprintf("%s: skipped — %s", e.Name, e.Message))
+		case "removed":
+			printer.Success(fmt.Sprintf("%s: removed (absent from qvr.toml)", e.Name))
+		case "would-remove":
+			printer.Info(fmt.Sprintf("%s: would remove (absent from qvr.toml)", e.Name))
 		case "failed":
 			printer.Error(fmt.Sprintf("%s: failed — %s", e.Name, e.Message))
 		}
@@ -238,8 +249,13 @@ func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutp
 	// the inverse of `qvr sync` where the lock wins). Bare `qvr lock` re-pins the
 	// entry's current ref instead.
 	var proj *model.ProjectFile
+	projExists := false // distinguishes a present-but-empty qvr.toml from an absent one
 	if lockResolveFromToml {
-		p, perr := model.ReadProjectFile(model.DefaultProjectPath(filepath.Dir(lockPath)))
+		projPath := model.DefaultProjectPath(filepath.Dir(lockPath))
+		if _, statErr := os.Stat(projPath); statErr == nil {
+			projExists = true
+		}
+		p, perr := model.ReadProjectFile(projPath)
 		if perr != nil {
 			return nil, fmt.Errorf("read qvr.toml: %w", perr)
 		}
@@ -258,6 +274,54 @@ func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutp
 		LockVersion: lock.Version,
 		Entries:     []LockResolveEntryResult{}, // always [], never null
 		DryRun:      lockResolveDryRun,
+	}
+
+	// --from-toml honors deletions (toml wins): a portable lock entry whose
+	// coordinate is no longer declared in qvr.toml is removed, with its symlinks
+	// and worktree torn down via the same path as `qvr remove`. This is the
+	// destructive half of the toml-authoritative direction — without it a deleted
+	// qvr.toml line is silently un-done (the lock kept the skill and `qvr sync`,
+	// lock-wins, re-synthesised the line) (#229). Edit/link/local entries have no
+	// coordinate and are never selected, so user edits are never deleted.
+	// Report-only under --dry-run; skipped for --package (single-entry re-pin) and
+	// the global lock (no qvr.toml).
+	// Guard on projExists, not just proj != nil: an ABSENT qvr.toml reads back as
+	// an empty project, and treating that as "nothing declared" would tear down
+	// every skill. An absent qvr.toml is a no-op everywhere (the lock is
+	// self-sufficient); only a qvr.toml that is actually present drives deletions.
+	removed := false
+	if proj != nil && projExists && !lockResolveGlobal && lockResolvePackage == "" {
+		declared := make(map[string]struct{}, len(proj.Skills))
+		for _, c := range proj.SkillCoordinates() {
+			declared[c] = struct{}{}
+		}
+		projectRoot := filepath.Dir(lockPath)
+		installer := skill.NewInstaller(mgr, git.NewGoGitWorktree(), gc)
+		for _, e := range lock.Entries() {
+			coord := model.SkillCoordinate(e)
+			if coord == "" {
+				continue
+			}
+			if _, ok := declared[coord]; ok {
+				continue
+			}
+			row := LockResolveEntryResult{Name: e.Name, Ref: e.Ref}
+			if lockResolveDryRun {
+				row.Status = "would-remove"
+				row.Message = "absent from qvr.toml — would remove (toml wins)"
+				out.Entries = append(out.Entries, row)
+				continue
+			}
+			if rerr := installer.RemoveFrom(e.Name, skill.InstallRequest{ProjectRoot: projectRoot, Force: true}, lock); rerr != nil {
+				row.Status = "failed"
+				row.Message = fmt.Sprintf("remove (absent from qvr.toml): %v", rerr)
+			} else {
+				row.Status = "removed"
+				row.Message = "absent from qvr.toml — removed (toml wins)"
+				removed = true
+			}
+			out.Entries = append(out.Entries, row)
+		}
 	}
 
 	entries := lock.Entries()
@@ -299,9 +363,9 @@ func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutp
 			refAdopted := false
 			if proj != nil {
 				if coord := model.SkillCoordinate(entry); coord != "" {
-					if tomlRef, ok := proj.Skills[coord]; ok && tomlRef != entry.Ref {
-						entry.Ref = tomlRef
-						row.Ref = tomlRef
+					if spec, ok := proj.Skill(coord); ok && spec.Ref != entry.Ref {
+						entry.Ref = spec.Ref
+						row.Ref = spec.Ref
 						refAdopted = true
 					}
 				}
@@ -359,7 +423,7 @@ func lockResolveInternal(ctx context.Context, lockPath string) (*LockResolveOutp
 		out.Entries = append(out.Entries, row)
 	}
 
-	if changed && !lockResolveDryRun {
+	if (changed || removed) && !lockResolveDryRun {
 		if err := lock.Write(); err != nil {
 			return nil, fmt.Errorf("write lock: %w", err)
 		}
