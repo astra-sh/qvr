@@ -2,7 +2,8 @@
 name: onboard-skills
 description: >
   Discovers and installs agent skills into a project (or the user-global lane)
-  with the qvr CLI, treating qvr.lock as the single source of truth. Use when a
+  with the qvr CLI, where qvr.toml declares intent and qvr.lock is the resolved
+  source of truth for what loads. Use when a
   user wants to find, add, register, or install skills from a skills registry or
   GitHub repo with qvr — e.g. "register a skill registry", "search for a qvr
   skill", "qvr add this skill", "install a skill globally", or "why is my skill
@@ -17,11 +18,13 @@ metadata:
 
 `qvr` installs **agent skills** (SKILL.md bundles) into a project from one or
 more Git **registries**. qvr is agent-agnostic — it installs into whichever agent
-target directories you configure (e.g. `.claude/skills/`, `.cursor/rules/`, …).
-The lockfile `qvr.lock` (TOML, schema v5) is the only source of truth for what an
-agent loads — anything that lands in a managed agent directory without a matching
-lock entry is hidden on the next sync. This skill walks discovery → install →
-reconcile.
+target directories you configure (e.g. `.claude/skills/`, `.agents/skills/`, …).
+A project's skill set lives in two committed files: **`qvr.toml`** is the
+hand-editable *intent* (which skills, which default agents), and **`qvr.lock`**
+(TOML, schema v5) is the resolved *proof* and the source of truth for what an
+agent actually loads — anything that lands in a managed agent directory without a
+matching lock entry is hidden on the next sync. Mutating commands write through to
+both files. This skill walks discovery → install → reconcile.
 
 ## When to use this
 
@@ -35,15 +38,15 @@ or for reproducing an existing set on another machine (see `reproduce-skill-env`
 
 ## Prerequisites
 
-1. Confirm the CLI is present and note the version (workflows below assume
-   0.10.x):
+1. Confirm the CLI is present and note the version:
 
    ```
    qvr --version
    ```
 
-2. Run from the project root where you want `qvr.lock` to live. The lockfile and
-   the agent-target symlinks are written relative to the current directory.
+2. Run from the project root where you want `qvr.toml` + `qvr.lock` to live. The
+   files and the agent-target symlinks are written relative to the current
+   directory.
 
 ## Workflow
 
@@ -93,7 +96,11 @@ Useful flags on `add`:
   skill name exists in several. **Use the full `<org>/<repo>` name**, not a short
   alias.
 - `--target <agent>[,<agent>…]` — install into specific agent target dirs
-  (e.g. `--target claude,cursor`); defaults to your configured `default_target`.
+  (e.g. `--target claude,cursor`). When omitted, targets resolve in order:
+  `--target` flag > the project's `qvr.toml` `[project].default-targets` (set
+  once via `qvr target add claude cursor`) > the machine-local `default_target`
+  config. Run `qvr target list` to see every supported agent and the project's
+  current defaults.
 - `--as <localname>` — install under a different local name so two versions of
   the same skill can coexist (single skill only).
 - `--force` — allow replacing an existing lock entry pinned at a different ref.
@@ -138,7 +145,8 @@ qvr info tdd             # metadata, provenance, file tree (local-only, fast)
 
 - **The lockfile wins.** Dropping a folder into a managed agent directory does nothing
   durable — it's removed on the next `qvr sync` unless there's a lock entry.
-  Install via `qvr add` (or `qvr link` for a local path) instead.
+  Install via `qvr add` (or `qvr add --local <path>` for an immutable copy of a
+  local folder) instead.
 - **Registry names are nested `<org>/<repo>`.** The bare clone lives at
   `~/.quiver/registries/<org>/<repo>.git/`. `--registry`, `registry update`, and
   `registry remove` all expect that full name. Override the inferred name with

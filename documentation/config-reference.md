@@ -3,6 +3,16 @@
 qvr stores configuration at `~/.quiver/config.yaml`. Override with `QUIVER_HOME`
 env var.
 
+> **`config.yaml` vs. `qvr.toml`.** `config.yaml` holds **machine-local**
+> defaults — registries, your fallback `default_target`, GitHub token, security
+> policy — that apply to everything you do on this machine. A project's
+> **`qvr.toml`** holds **per-project** intent that travels with the repo: its
+> `[skills]` set and its `[project].default-targets` (set by `qvr target add`).
+> For install routing, `qvr.toml`'s `default-targets` sit *above* the
+> machine-local `default_target` (order: `--target` flag > `qvr.toml`
+> default-targets > `config.yaml` `default_target`). See
+> [registry-format.md](registry-format.md) and the team-workflows guide.
+
 ## Config File
 
 ```yaml
@@ -31,6 +41,10 @@ security:
 output:
   format: text # text | json
   color: auto # auto | always | never
+
+# Audit pipeline (experimental, opt-in — toggled by `qvr audit enable`/`disable`)
+ops:
+  enabled: false # Record skill-attributed agent activity into ~/.quiver/skillops.db
 ```
 
 ## Config Keys
@@ -47,6 +61,7 @@ output:
 | `security.block_severity`  | string | `critical` | Minimum severity to block install   |
 | `output.format`            | string | `text`     | Default output format               |
 | `output.color`             | string | `auto`     | Color mode                          |
+| `ops.enabled`              | bool   | `false`    | Enable the experimental audit pipeline (see [audit-and-tracing.md](audit-and-tracing.md)) |
 
 ## CLI Commands
 
@@ -127,6 +142,8 @@ export QUIVER_OUTPUT_FORMAT=json
 | `~/.quiver/registries/<org>/<repo>.git/`           | Bare clones of every registered source                                               |
 | `~/.quiver/worktrees/<org>/<repo>/<skill>/<sha7>/` | Worktree store: SHA-keyed sparse worktrees, shared across projects (mirrors the `registries/` shape) |
 | `~/.quiver/cache/index/<name>.json`                | Registry index cache (per-registry skill catalog; TTL'd, rebuilt from the bare clone) |
-| `<project>/qvr.lock`                               | Project lock — source of truth for what agents see                                   |
+| `~/.quiver/skillops.db`                            | Audit pipeline SQLite store (only when `ops.enabled`)                                |
+| `<project>/qvr.toml`                               | Declarative intent — skills + `[project].default-targets`                            |
+| `<project>/qvr.lock`                               | Project lock — resolved proof, source of truth for what agents see                   |
 
 Override base path: `export QUIVER_HOME=/custom/path`

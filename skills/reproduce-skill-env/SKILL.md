@@ -81,11 +81,14 @@ registered under a different alias is reused silently.
 ### 3. Commit the lockfile
 
 The manifest bootstraps a fresh machine; the **lockfile** is what guarantees
-identical bytes thereafter. Commit `qvr.lock` (and the manifest, if you keep one)
-to version control:
+identical bytes thereafter. Commit `qvr.lock` together with `qvr.toml` (and the
+manifest, if you keep one) to version control. `qvr.toml` carries the declared
+intent and the project's default agent targets so routing travels with the repo;
+`qvr.lock` is self-sufficient, so `qvr sync` on a fresh clone rebuilds the whole
+set from the lock alone — CI never needs `qvr.toml`:
 
 ```
-git add qvr.lock skills.lock.txt
+git add qvr.toml qvr.lock skills.lock.txt
 git commit -m "Pin agent skill set"
 ```
 

@@ -112,10 +112,10 @@ qvr publish my-skill --tag v0.3.0
 Consumers pick up a release with the version manager:
 
 ```
-qvr outdated                 # which installs have newer upstream commits
-qvr switch my-skill v0.3.0   # explicit pin
-qvr upgrade my-skill         # jump to the latest semver tag (alias of switch --latest)
-qvr pull my-skill            # fast-forward the current ref (alias of switch --tip)
+qvr outdated                  # which installs have newer upstream commits
+qvr switch my-skill v0.3.0    # explicit pin
+qvr switch my-skill --latest  # jump to the latest semver tag
+qvr pull my-skill             # fast-forward the current ref (alias of switch --tip)
 ```
 
 ### 5. Add a new skill to a registry (greenfield path mode)

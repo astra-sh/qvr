@@ -65,9 +65,9 @@ git push
 ### Option 2: Via qvr publish
 
 ```bash
-# From a standalone skill directory
+# From a standalone skill directory (use the full <org>/<repo> registry name)
 cd my-standalone-skill
-qvr publish --registry my-team
+qvr publish --registry your-org/skills
 # This copies the skill into the registry, commits, and pushes
 ```
 
@@ -117,14 +117,14 @@ No additional auth system needed.
 
 ## Publishing Your Registry
 
-Tell your team to add it:
+Tell your team to add it (the name is inferred as `<org>/<repo>`):
 
 ```bash
-qvr registry add team-skills git@github.com:your-org/skills.git
+qvr registry add git@github.com:your-org/skills.git     # -> your-org/skills
 ```
 
 For public registries, anyone with the URL can add it:
 
 ```bash
-qvr registry add community https://github.com/org/public-skills.git
+qvr registry add https://github.com/org/public-skills.git   # -> org/public-skills
 ```

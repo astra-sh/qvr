@@ -129,24 +129,27 @@ Checks for: prompt injection, leaked secrets, hidden unicode, risky permissions.
 cd my-skill
 qvr publish
 
-# Publish to a specific registry
-qvr publish --registry team
+# Publish to a specific registry (use the full <org>/<repo> name)
+qvr publish --registry your-org/skills
 ```
 
 ## Development Workflow
 
-Use `link` for local development:
+Scaffold directly into a project target so the agent picks it up immediately —
+`qvr init` writes the skill into your default target dir (or pass `--target`):
 
 ```bash
-# Symlink your local skill directly
-qvr link ./my-skill --target claude
+qvr init my-skill --target claude
 
-# Edit SKILL.md — agent sees changes instantly (symlink)
-# No need to reinstall
+# Edit SKILL.md — the agent sees changes instantly (it's a real dir under
+# .claude/skills/). No need to reinstall.
 
-# When ready, publish to registry
-qvr publish --registry team
+# When ready, publish to a registry
+qvr publish my-skill --registry your-org/skills
 ```
+
+To pull an existing local folder in as an immutable copy (no registry), use
+`qvr add --local ./my-skill`; run `qvr edit` afterward to make it mutable.
 
 ## Complex Skills (Rule-Based)
 

@@ -7,11 +7,11 @@ formats may still shift before v1.0.
 
 ```bash
 git clone https://github.com/astra-sh/qvr.git
-cd quiver
+cd qvr
 make all          # fmt + lint + test + build
 ```
 
-Requires Go 1.22+. `make all` runs `gofmt`, `golangci-lint run`,
+Requires Go 1.25+. `make all` runs `gofmt`, `golangci-lint run`,
 `go test ./...`, and `go build`. CI runs the same checks on every PR.
 
 Run the binary directly without installing:
@@ -19,7 +19,7 @@ Run the binary directly without installing:
 ```bash
 go run . --help
 go run . init my-skill
-go run . validate testdata/valid-skill
+go run . lint testdata/valid-skill
 ```
 
 ## Filing issues

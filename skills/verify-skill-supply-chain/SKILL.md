@@ -52,8 +52,8 @@ Install-time scanning is on by default (`security.scan_on_install`); `qvr add
 
 `qvr lock verify` recomputes each entry's subtree hash from disk and compares it
 to the recorded value, reporting `ok`, `drift`, `unverified` (no recorded hash),
-`missing` (worktree gone), `link`, or `failed`. As of 0.10.x it exits non-zero on
-drift by default so CI can gate:
+`missing` (worktree gone), `link`, or `failed`. It exits non-zero on drift by
+default so CI can gate:
 
 ```
 qvr lock verify                          # default: drift/missing/failed are fatal

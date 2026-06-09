@@ -49,9 +49,29 @@ The solution uses Git's own primitives:
                                            #   the bare clone — not skill files)
 
 <project>/
-├── qvr.lock                               # Project lock — source of truth for agents
+├── qvr.toml                               # Declarative intent (skills + default targets)
+├── qvr.lock                               # Resolved proof — source of truth for agents
 └── .claude/skills/<skill>  -->            symlink into ~/.quiver/worktrees/.../<sha7>/
 ```
+
+### Intent vs. proof: `qvr.toml` and `qvr.lock`
+
+A project's skill set lives in two committed files that move together. **`qvr.toml`**
+is the hand-editable *intent* — a `[skills]` map of `<registry>/<skill>` → ref and
+the project's `[project].default-targets` (the agents a bare `qvr add` installs
+into). **`qvr.lock`** (schema **v5**) is the machine-generated *proof* — one fully
+resolved entry per skill (source, resolved commit, subtree hash, scan decision,
+commit author, targets).
+
+Every mutating command (`qvr add`, `switch`, `remove`, `target`, …) writes through
+to **both** files, so they never drift in normal use. When they do diverge (a
+hand-edit, a merge), two explicit verbs reconcile them:
+
+- **`qvr sync`** resolves toward the lock — the lock wins, because it's the
+  reproducible truth. The lock is **self-sufficient**: `qvr sync` rebuilds the whole
+  set from `qvr.lock` alone, so CI never needs `qvr.toml` and a lost `qvr.toml` is
+  regenerated from the lock (routing policy and all).
+- **`qvr lock --from-toml`** pushes `qvr.toml` edits into the lock — intent wins.
 
 Single-skill repos live under the same `registries/` tree — `qvr registry add`
 is the only entrypoint, so the indexer's job is to walk whatever's there
@@ -97,17 +117,18 @@ old SHAs left by `qvr switch`, or worktrees from a project deleted out-of-band).
                       │
           ┌───────────┼───────────┐
           ▼           ▼           ▼
-    .claude/skills  .cursor/rules  .codex/skills
-    /code-review    /code-review   /code-review
+    .claude/skills  .agents/skills  .github/skills
+    /code-review    /code-review    /code-review
+   (claude)        (cursor/codex)   (copilot)
 ```
 
 ## Performance Model
 
 ### Hot Path (Every Agent Invocation)
 
-`qvr read code-review` or an agent reading `.claude/skills/code-review/SKILL.md`:
+An agent reading `.claude/skills/code-review/SKILL.md` (through the symlink):
 - Follow symlink → `fs.ReadFile()` → return content
-- **Zero git operations, zero network I/O**
+- **Zero git operations, zero network I/O** — qvr isn't even in the read path
 - Latency: microseconds
 
 ### Warm Path (Local-Only)
@@ -119,7 +140,7 @@ old SHAs left by `qvr switch`, or worktrees from a project deleted out-of-band).
 
 ### Cold Path (Network)
 
-`qvr update`, `qvr add` / `qvr sync`:
+`qvr registry update`, `qvr add` / `qvr sync`:
 - `git fetch` on bare clone (one fetch = all refs)
 - Create worktree + sparse checkout (disk I/O)
 - Only when explicitly requested
@@ -127,18 +148,21 @@ old SHAs left by `qvr switch`, or worktrees from a project deleted out-of-band).
 
 ## Bidirectional Sync
 
-### Pull (upstream → local)
+### Upstream → local (`qvr switch` / `qvr pull`)
 
-1. `git fetch` on bare repo
-2. `git rebase origin/<branch>` in worktree
-3. If conflict: abort rebase, flag to user
-4. Symlinks unchanged (worktree path doesn't move)
+1. `git fetch` on bare repo (`qvr registry update`)
+2. `qvr switch <skill> --tip` fast-forwards the worktree to the upstream tip
+   (`qvr pull` is the alias); `qvr switch <skill> --latest` jumps to the newest
+   semver tag
+3. Symlinks unchanged (worktree path is SHA-keyed, repointed not moved)
 
-### Push (local → upstream)
+### Local → upstream (`qvr edit` → `qvr publish`)
 
-1. Agent modifies skill through symlink → change lands in worktree (it's a git repo)
-2. `git add -A` + `git commit` + `git push` in the worktree
-3. Lock file updated with new commit hash
+1. `qvr edit <skill>` ejects the immutable worktree into a real, editable dir
+2. The agent (or you) modifies the skill in that dir — changes land in a git repo
+3. `qvr publish <skill>` re-runs the lint + scan gate, then commits + pushes
+   upstream (or to a fork with `--fork --migrate`); the lock entry is updated.
+   qvr never auto-commits or auto-pushes on your behalf.
 
 ## Module Dependencies
 
@@ -160,9 +184,13 @@ internal/registry/
 
 pkg/skillspec/           (public, no internal deps)
 
-# Possible future areas:
-#   internal/attestation/, internal/trust/  (signing + per-registry trust policy, v0.9)
-#   internal/inventory/, internal/audit/    (cross-agent inventory + local audit log, v0.9)
-#   internal/ui/ + ui/                      (embedded React dashboard, v0.9)
-#   internal/doctor/                        (environment diagnostics, v1.0)
+# Shipped subsystems:
+#   internal/security/                      (scan pipeline: injection, secrets,
+#                                            unicode, permissions — gates qvr add)
+#   internal/ops/ + internal/ops/<agent>/   (audit capture + SQLite store, per-agent
+#                                            hook adapters: claudecode, cursor, codex,
+#                                            opencode, copilot)
+#   internal/ui/ + ui/                      (embedded React dashboard, qvr ui)
+#   trust + provenance                      (per-registry commit-author policy and
+#                                            lock-entry verification records)
 ```

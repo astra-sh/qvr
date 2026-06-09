@@ -23,24 +23,22 @@ If you find yourself wanting a `qvr team`/`qvr fork` command, the answer is almo
 ### Organization with multiple teams
 
 ```bash
-# Shared org-wide registry
-qvr registry add org git@github.com:acme/org-skills.git
-
-# Team-specific registries
-qvr registry add platform git@github.com:acme/platform-skills.git
-qvr registry add ml-ops git@github.com:acme/ml-skills.git
+# Each registry's name is inferred as <org>/<repo>
+qvr registry add git@github.com:acme/org-skills.git       # -> acme/org-skills
+qvr registry add git@github.com:acme/platform-skills.git  # -> acme/platform-skills
+qvr registry add git@github.com:acme/ml-skills.git        # -> acme/ml-skills
 ```
 
-Permissions are enforced by the git host (who can push to `acme/platform-skills`). Quiver reads everything; it writes nothing back without you explicitly running `qvr push` or `qvr publish`.
+Permissions are enforced by the git host (who can push to `acme/platform-skills`). Quiver reads everything; it writes nothing back without you explicitly running `qvr publish`.
 
 ### Namespaced skill references
 
-Each registry's name is its namespace:
+The registry's `<org>/<repo>` name is its namespace; scope a skill with `--registry`:
 
 ```bash
-qvr add acme/code-review          # from "acme" registry
-qvr add platform/deploy-helper    # from platform registry
-qvr add ml-ops/model-deploy       # from ml-ops registry
+qvr add code-review --registry acme/org-skills
+qvr add deploy-helper --registry acme/platform-skills
+qvr add model-deploy --registry acme/ml-skills
 ```
 
 When a bare name (`qvr add code-review`) could resolve to multiple registries, Quiver should fail with a chooser instead of silently picking one. (Tracked as issue #106 — getting tightened up in the v1.0 close-out.)
@@ -75,7 +73,7 @@ After `--migrate`, the lockfile entry records `forkedFrom: <original-upstream>@<
 
 ## Comparing versions
 
-`qvr diff <skill>` shows uncommitted edits in the local worktree — useful before `qvr push`. For version-to-version comparison, use git directly inside the registry clone:
+`qvr diff <skill>` shows uncommitted edits in the local worktree — useful before `qvr publish`. For version-to-version comparison, use git directly inside the registry clone:
 
 ```bash
 # Local worktree edits before push
@@ -97,15 +95,15 @@ diff -ruN \
 
 1. Agent modifies the skill during a work session (through the symlink — `qvr` doesn't get involved).
 2. Review: `qvr status` (and `qvr diff <skill>` for the line-level changes).
-3. Push: `qvr push code-review -m "agent-improved patterns"`.
+3. Eject + publish: `qvr edit code-review` → `qvr publish code-review -m "agent-improved patterns"` (re-runs the lint + scan gate before pushing).
 4. Team benefits from the improvement.
 
 ### Upstream changes
 
 1. Teammate pushes a skill update.
-2. Check: `qvr pull --check`.
-3. Pull: `qvr pull code-review`.
-4. Resolve conflicts in the worktree, then `qvr push`.
+2. Check: `qvr outdated`.
+3. Fast-forward: `qvr switch code-review --tip` (or `qvr pull` for every skill).
+4. Resolve any conflicts in the worktree, then `qvr edit` + `qvr publish`.
 
 ### Version switch
 
@@ -128,9 +126,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          go install github.com/astra-sh/qvr@latest
+          curl -fsSL https://raw.githubusercontent.com/astra-sh/qvr/main/install.sh | sh
           qvr lint skills/ --output json
-          qvr scan skills/ --format json
+          qvr scan skills/ --format sarif > scan.sarif
+```
+
+### Gate a consuming repo on its lockfile
+
+A repo that *installs* skills commits `qvr.toml` + `qvr.lock`; CI asserts the
+checkout still matches the resolved, vetted set:
+
+```yaml
+# .github/workflows/verify-skills.yml
+name: Verify Skills
+on: [pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          curl -fsSL https://raw.githubusercontent.com/astra-sh/qvr/main/install.sh | sh
+          qvr sync --locked        # restore from the lock; fail if it would change
+          qvr lock verify --strict # fail on any drift from the recorded bytes
+          qvr trust verify         # registry commit-author policy
 ```
 
 ### Auto-publish on merge
@@ -148,7 +167,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          go install github.com/astra-sh/qvr@latest
+          curl -fsSL https://raw.githubusercontent.com/astra-sh/qvr/main/install.sh | sh
           qvr lint skills/
           qvr scan skills/
 ```

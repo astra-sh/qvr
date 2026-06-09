@@ -200,14 +200,14 @@ For contributors, or to build the latest `main`. Requires **Go 1.25+** and
 ```bash
 git clone https://github.com/astra-sh/qvr.git
 cd qvr
-make build-all      # builds the React UI, then embeds it into the binary
+make build          # builds the React UI, then embeds it into the binary
 make install        # -> /usr/local/bin/qvr  (use sudo if needed)
 ```
 
 > [!NOTE]
 > Plain `go install` is intentionally **not** a supported path — it can't run
 > the npm build, so it ships without the dashboard. Use the prebuilt binary or
-> `make build-all`.
+> `make build`.
 
 ### Updating
 
@@ -313,18 +313,23 @@ qvr publish code-review --fork <git-url> --migrate  # push to your fork and trac
 qvr publish code-review --dry-run                   # lint + scan, report target, no push
 ```
 
-`qvr upgrade <skill>` follows the latest semver tag; `qvr switch <skill> <ref>`
-flips to any ref without branching.
+`qvr switch <skill> --latest` follows the latest semver tag; `qvr switch <skill>
+<ref>` flips to any ref without branching; `qvr pull <skill>` fast-forwards the
+current ref to its upstream tip. (`qvr upgrade` is separate — it updates the
+`qvr` CLI itself.)
 
 ### Audit & trace — `qvr audit`
 
 ```bash
-qvr audit sessions                  # recorded skill sessions
-qvr audit logs                      # turn / tool / skill events
-qvr audit spans --otlp              # export OTLP for Jaeger, Tempo, Honeycomb, …
-qvr audit ingest <transcript|dir>   # record an existing transcript with no live hook
-qvr audit gc                        # drop sessions that never used a skill
+qvr audit enable                    # opt in (creates ~/.quiver/skillops.db)
+qvr audit install-hooks             # wire your agents' native hooks
+qvr audit sessions                  # recorded agent sessions
+qvr audit logs                      # turn / tool / skill spans
+qvr audit export > traces.jsonl     # raw traces as JSONL (OTLP-ready)
 ```
+
+The capture is verbatim and projects to OpenTelemetry spans — see the
+[audit & tracing guide](documentation/audit-and-tracing.md).
 
 ### Inspect & verify
 
@@ -432,6 +437,10 @@ In-depth docs live under [`documentation/`](documentation/):
   accepts
 - [Config reference](documentation/config-reference.md) —
   `~/.quiver/config.yaml` keys
+- [Security scanning](documentation/security-scanning.md) — `qvr scan`, the
+  install-time gate, and CI integration
+- [Audit & tracing](documentation/audit-and-tracing.md) — `qvr audit` capture
+  and OpenTelemetry spans
 - Guides: [getting started](documentation/guides/getting-started.md) ·
   [creating a skill](documentation/guides/creating-a-skill.md) ·
   [creating a registry](documentation/guides/creating-a-registry.md) ·

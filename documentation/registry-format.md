@@ -86,8 +86,10 @@ Added via `qvr add <repo-url>` instead of `qvr registry add`.
 
 ## How qvr Uses Registries
 
-1. **Add**: `qvr registry add acme git@github.com:acme/skills.git`
-   - Bare clone to `~/.quiver/registries/acme.git/`
+1. **Add**: `qvr registry add git@github.com:acme/skills.git`
+   - Name is inferred as `<org>/<repo>` (here `acme/skills`); override with
+     `--name` only when two repos collide
+   - Bare clone to `~/.quiver/registries/acme/skills.git/`
 
 2. **Index**: qvr reads git tree objects from the bare repo to discover skills
    - No checkout needed — reads blob objects directly
@@ -122,6 +124,6 @@ git add . && git commit -m "Initial skills"
 git remote add origin git@github.com:me/skills.git
 git push -u origin main
 
-# 5. Others can now add your registry
-qvr registry add my-team git@github.com:me/skills.git
+# 5. Others can now add your registry (name inferred as me/skills)
+qvr registry add git@github.com:me/skills.git
 ```
