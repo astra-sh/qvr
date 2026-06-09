@@ -74,7 +74,7 @@ func (s *Syncer) Status(entry *model.LockEntry, projectRoot string) (*SyncStatus
 	}
 	repo, err := gogit.PlainOpen(repoPath)
 	if err != nil {
-		// Edit-mode entries scaffolded via `qvr init` have no .git/ until
+		// Edit-mode entries scaffolded via `qvr create` have no .git/ until
 		// the user runs `git init` themselves — the directory IS the
 		// skill, no git history required. Pre-#117 we surfaced this as
 		// state=broken which made the most basic init→status flow look

@@ -14,7 +14,7 @@ import (
 )
 
 // scaffoldEditDirNoGit writes a minimal mode:edit skill dir WITHOUT a .git/ —
-// exactly the state `qvr init` left behind before #150 was fixed — and returns
+// exactly the state `qvr create` left behind before #150 was fixed — and returns
 // the lock entry + project root.
 func scaffoldEditDirNoGit(t *testing.T, name string) (*model.LockEntry, string) {
 	t.Helper()
@@ -42,10 +42,10 @@ func scaffoldEditDirNoGit(t *testing.T, name string) (*model.LockEntry, string) 
 }
 
 // TestPublishInstalled_ForkOnNonRepoEditDir is the direct #150 repro: the
-// two-line "ship your first skill" flow `qvr init` advertises. A freshly
+// two-line "ship your first skill" flow `qvr create` advertises. A freshly
 // init'd (un-git) edit dir must publish --fork without the opaque
 // "status: open: repository does not exist" — publish initializes the repo in
-// place. This is the exact command `qvr init` prints.
+// place. This is the exact command `qvr create` prints.
 func TestPublishInstalled_ForkOnNonRepoEditDir(t *testing.T) {
 	entry, projectRoot := scaffoldEditDirNoGit(t, "demo")
 

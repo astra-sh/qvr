@@ -301,7 +301,7 @@ func runDoctorChecks(lock *model.LockFile, cfg *config.Config, projectRoot strin
 func checkWorktree(e *model.LockEntry) doctorCheck {
 	worktreePath := skill.EntryWorktreePath(e)
 	c := doctorCheck{Type: "worktree", Skill: e.Name, Path: worktreePath}
-	// Edit-mode entries (`qvr edit`, `qvr init`) live at EditPath, not
+	// Edit-mode entries (`qvr edit`, `qvr create`) live at EditPath, not
 	// in the shared worktree cache. The shared lane is intentionally
 	// absent for these, so the worktree check would always fire as
 	// red even though the install is healthy. Skip and pass — the

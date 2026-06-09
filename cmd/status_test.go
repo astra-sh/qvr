@@ -12,7 +12,7 @@ import (
 
 // TestSyncerStatus_EditModeNotBroken is the #117 regression for the
 // status surface. Pre-fix, an edit-mode entry whose EditPath dir has
-// no .git/ (the `qvr init` scaffold flow) was opened via
+// no .git/ (the `qvr create` scaffold flow) was opened via
 // gogit.PlainOpen → ENOENT → state=broken with `worktree unreadable:
 // repository does not exist`. The fix special-cases edit-mode entries:
 // directory exists + no git history is the expected scaffold state, so

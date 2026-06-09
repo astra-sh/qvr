@@ -215,7 +215,7 @@ func buildSkillInfo(entry *model.LockEntry, projectRoot string, global bool) (*s
 			info.TargetDetails = append(info.TargetDetails, ts)
 			continue
 		}
-		// Edit-mode entries (qvr init / qvr edit): the canonical target
+		// Edit-mode entries (qvr create / qvr edit): the canonical target
 		// dir IS a real directory — the eject dir itself — not a symlink
 		// pointing at the shared worktree. VerifyTarget expects a
 		// symlink, so it flagged every ejected canonical as

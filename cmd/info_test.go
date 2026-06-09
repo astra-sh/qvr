@@ -288,7 +288,7 @@ func TestBuildSkillInfo_RefFieldNotBranch(t *testing.T) {
 }
 
 // TestBuildSkillInfo_EditModeTargetIsCanonicalDir is the #117 follow-up
-// regression on the info surface. For edit-mode entries (qvr init /
+// regression on the info surface. For edit-mode entries (qvr create /
 // qvr edit) the canonical target dir IS a real directory — the eject
 // dir itself — not a symlink at the shared worktree. info used to run
 // VerifyTarget on it, which expects a symlink, so every ejected
