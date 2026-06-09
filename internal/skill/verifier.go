@@ -27,8 +27,13 @@ const (
 
 // VerifyEntryResult is one row of `qvr lock verify` output.
 type VerifyEntryResult struct {
-	Name        string `json:"name"`
-	Status      string `json:"status"`
+	Name   string `json:"name"`
+	Status string `json:"status"`
+	// Mode is "edit" for ejected/created entries — drift there is expected
+	// mutability (the user is editing the skill), so renderers pick a remedy
+	// that works for sourceless local skills (`qvr lock verify --repair`)
+	// instead of the registry restore hint.
+	Mode        string `json:"mode,omitempty"`
 	SubtreeHash string `json:"subtreeHash,omitempty"`
 	// OldSubtreeHash is the hash that was on disk before --repair rewrote
 	// the entry. Populated only when Status == "repaired" so JSON
@@ -63,6 +68,9 @@ type VerifyDriftItem struct {
 // EditPath; callers that don't have a project root in scope may pass "".
 func VerifySingleEntry(entry *model.LockEntry, projectRoot string) VerifyEntryResult {
 	res := VerifyEntryResult{Name: entry.Name}
+	if entry.IsEdit() {
+		res.Mode = "edit"
+	}
 	if entry.IsLink() {
 		res.Status = VerifyStatusLink
 		res.Message = "link install — no upstream to verify"
