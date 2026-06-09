@@ -129,7 +129,7 @@ func (p *Publisher) PublishInstalled(ctx context.Context, req PublishInstalledRe
 		tagName = skillVersionTag(e.Name, req.Tag)
 	}
 
-	// A mode:edit dir scaffolded by `qvr init` (or one created by an older
+	// A mode:edit dir scaffolded by `qvr create` (or one created by an older
 	// binary that didn't init git) may have no .git/ yet. Publish needs a repo
 	// to read dirty-status and stamp the source commit, so initialize it in
 	// place instead of aborting with the opaque "open: repository does not
@@ -782,7 +782,7 @@ func wipeStageContents(dir string) error {
 }
 
 // ensureEditRepo guarantees the mode:edit dir is a git repo before publish.
-// PlainOpen only inspects dir/.git (no parent search), so an `qvr init`'d dir
+// PlainOpen only inspects dir/.git (no parent search), so a `qvr create`'d dir
 // nested inside a project repo is correctly seen as un-initialized and gets its
 // own repo + initial commit rather than borrowing the project's. A pre-existing
 // repo is left untouched. Issue #150.

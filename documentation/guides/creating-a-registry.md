@@ -21,9 +21,8 @@ settings:
   default-branch: main
 EOF
 
-# 3. Create your first skill
-mkdir -p skills
-qvr init skills/my-first-skill
+# 3. Create your first skill (free-standing dir inside skills/)
+mkdir -p skills && (cd skills && qvr create my-first-skill --standalone)
 
 # 4. Commit and push
 git add .
@@ -54,10 +53,10 @@ my-team-skills/
 ### Option 1: Direct commit
 
 ```bash
-cd my-team-skills
-qvr init skills/new-skill
-# Edit skills/new-skill/SKILL.md
-git add skills/new-skill
+cd my-team-skills/skills
+qvr create new-skill --standalone
+# Edit new-skill/SKILL.md
+git add new-skill
 git commit -m "Add new-skill"
 git push
 ```

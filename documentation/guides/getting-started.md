@@ -106,8 +106,11 @@ qvr publish code-review -m "improved review patterns"
 ## Create Your First Skill
 
 ```bash
+# (Optional) bootstrap the project front door — writes qvr.toml, infers targets
+qvr init
+
 # Scaffold a new skill
-qvr init my-first-skill
+qvr create my-first-skill
 
 # Edit SKILL.md with your instructions
 # ...

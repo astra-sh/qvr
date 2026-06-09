@@ -440,3 +440,59 @@ func SkillCoordinate(e *LockEntry) string {
 	}
 	return e.Registry + "/" + name
 }
+
+// InferDefaultTargets scans projectRoot for existing agent skill directories
+// (each Target.LocalDir) and returns the canonical target names that already
+// have an on-disk presence, sorted and deduplicated. It is the engine behind
+// `qvr init`'s auto-population of [project].default-targets.
+//
+// Many targets share a LocalDir — most notably ".agents/skills", used by
+// codex/cursor/gemini AND the universal "project" target — so a present
+// directory cannot be attributed to one agent. Inference dedupes by cleaned
+// LocalDir and resolves each shared dir to the single canonical "project"
+// (universal) target rather than emitting every agent that maps to it. A
+// uniquely-owned dir resolves to its sole owner (.claude/skills→claude,
+// .github/skills→copilot, .windsurf/skills→windsurf, …).
+//
+// Returns nil for a greenfield project with no agent dir on disk.
+func InferDefaultTargets(projectRoot string) []string {
+	owners := dirOwners()
+
+	seen := make(map[string]struct{})
+	var out []string
+	for relDir, owner := range owners {
+		info, err := os.Stat(filepath.Join(projectRoot, relDir))
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		if _, dup := seen[owner]; dup {
+			continue
+		}
+		seen[owner] = struct{}{}
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// dirOwners maps each cleaned LocalDir to the single canonical target that
+// inference attributes it to. For a dir owned by multiple targets the universal
+// "project" target wins; otherwise the alphabetically-first canonical name wins
+// (deterministic, since TargetNames is sorted).
+func dirOwners() map[string]string {
+	owners := make(map[string]string)
+	for _, name := range TargetNames() {
+		key := filepath.Clean(Targets[name].LocalDir)
+		switch cur, exists := owners[key]; {
+		case !exists:
+			owners[key] = name
+		case name == "project":
+			owners[key] = "project"
+		case cur == "project":
+			// keep the universal target
+		default:
+			// keep the alphabetically-first owner already recorded
+		}
+	}
+	return owners
+}

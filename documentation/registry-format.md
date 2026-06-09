@@ -116,8 +116,8 @@ settings:
   default-branch: main
 EOF
 
-# 3. Create a skill
-qvr init skills/my-first-skill
+# 3. Create a skill (free-standing dir inside skills/)
+mkdir -p skills && (cd skills && qvr create my-first-skill --standalone)
 
 # 4. Commit and push
 git add . && git commit -m "Initial skills"

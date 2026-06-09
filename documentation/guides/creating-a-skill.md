@@ -7,14 +7,18 @@
 
 ```bash
 # Simple skill (just SKILL.md)
-qvr init my-skill
+qvr create my-skill
 
 # Medium skill (with references + scripts)
-qvr init my-skill --type medium
+qvr create my-skill --type medium
 
 # Complex skill (with rules directory)
-qvr init my-skill --type complex
+qvr create my-skill --type complex
 ```
+
+> Starting a fresh project? Run `qvr init` first — it scaffolds a `qvr.toml`
+> (and infers your agent targets) without creating a skill. `qvr create` will
+> also scaffold a `qvr.toml` on the fly if one is missing, so either order works.
 
 ## Write Your SKILL.md
 
@@ -136,10 +140,10 @@ qvr publish --registry your-org/skills
 ## Development Workflow
 
 Scaffold directly into a project target so the agent picks it up immediately —
-`qvr init` writes the skill into your default target dir (or pass `--target`):
+`qvr create` writes the skill into your default target dir (or pass `--target`):
 
 ```bash
-qvr init my-skill --target claude
+qvr create my-skill --target claude
 
 # Edit SKILL.md — the agent sees changes instantly (it's a real dir under
 # .claude/skills/). No need to reinstall.
@@ -156,7 +160,7 @@ To pull an existing local folder in as an immutable copy (no registry), use
 For skills with many rules (like a large multi-rule skill):
 
 ```bash
-qvr init my-complex-skill --type complex
+qvr create my-complex-skill --type complex
 ```
 
 This creates:

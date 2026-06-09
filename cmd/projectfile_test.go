@@ -301,16 +301,16 @@ func TestSetProjectFileSkillRef_UpsertsAndGuardsCreate(t *testing.T) {
 	}
 }
 
-func TestInit_ScaffoldsProjectFile(t *testing.T) {
+func TestCreate_ScaffoldsProjectFile(t *testing.T) {
 	t.Setenv("QUIVER_HOME", t.TempDir())
 	project := t.TempDir()
 	t.Chdir(project)
 	resetPrinter(t)
-	initType, initTarget, initGlobal, initStandalone = "simple", "claude", false, false
-	t.Cleanup(func() { initType, initTarget, initGlobal, initStandalone = "simple", "claude", false, false })
+	createType, createTarget, createGlobal, createStandalone = "simple", "claude", false, false
+	t.Cleanup(func() { createType, createTarget, createGlobal, createStandalone = "simple", "claude", false, false })
 
-	if err := runInitProjectScoped("my-skill"); err != nil {
-		t.Fatalf("init: %v", err)
+	if err := runCreateProjectScoped("my-skill"); err != nil {
+		t.Fatalf("create: %v", err)
 	}
 
 	raw, err := os.ReadFile(model.DefaultProjectPath(project))
@@ -327,13 +327,13 @@ func TestInit_ScaffoldsProjectFile(t *testing.T) {
 	if len(proj.Project.DefaultTargets) != 1 || proj.Project.DefaultTargets[0] != "claude" {
 		t.Errorf("default-targets = %v, want [claude]", proj.Project.DefaultTargets)
 	}
-	// A greenfield init scaffolds an edit-mode skill (no coordinate), so [skills]
+	// A greenfield create scaffolds an edit-mode skill (no coordinate), so [skills]
 	// stays empty.
 	if len(proj.Skills) != 0 {
-		t.Errorf("greenfield init should leave [skills] empty, got %+v", proj.Skills)
+		t.Errorf("greenfield create should leave [skills] empty, got %+v", proj.Skills)
 	}
 
-	// Re-running init must not clobber an existing qvr.toml.
+	// Re-running create must not clobber an existing qvr.toml.
 	before, _ := os.ReadFile(model.DefaultProjectPath(project))
 	_ = scaffoldProjectFile(project)
 	after, _ := os.ReadFile(model.DefaultProjectPath(project))

@@ -317,9 +317,9 @@ func initEjectRepo(dir string, e *model.LockEntry, author, authorEmail string) e
 }
 
 // InitRepoWithCommit initializes a fresh git repo at dir, stages everything,
-// and writes a single commit. Shared by the worktree-eject path and `qvr init`
+// and writes a single commit. Shared by the worktree-eject path and `qvr create`
 // so every mode:edit skill is backed by a real repo from birth — without this
-// an `qvr init`'d skill had no .git/ and `qvr publish --fork` aborted with the
+// a `qvr create`'d skill had no .git/ and `qvr publish --fork` aborted with the
 // opaque "open: repository does not exist" (issue #150). author/authorEmail
 // fall back to quiver defaults when blank. Errors if dir is already a repo.
 func InitRepoWithCommit(dir, message, author, authorEmail string) error {

@@ -486,14 +486,14 @@ func TestDoctorChecks_LinkInstallSkipped(t *testing.T) {
 }
 
 // TestDoctorChecks_EditModeSkipsWorktree is the #117 regression. Pre-fix
-// mode:edit entries (created by `qvr init` or `qvr edit`) failed the
+// mode:edit entries (created by `qvr create` or `qvr edit`) failed the
 // worktree check because their shared-lane path doesn't exist on disk
 // — the eject dir IS the install. doctor printed
 //
 //	✗ worktree demo — lock entry has no derivable worktree path
 //
 // alongside the passing ejected/commit-integrity checks and exited 1
-// after a totally clean `qvr init`. The fix short-circuits the
+// after a totally clean `qvr create`. The fix short-circuits the
 // worktree check for edit-mode entries (same shape as
 // commit-integrity's `no commit recorded; skipped`).
 func TestDoctorChecks_EditModeSkipsWorktree(t *testing.T) {

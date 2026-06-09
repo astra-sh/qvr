@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/astra-sh/qvr/internal/model"
@@ -265,5 +266,56 @@ func TestProjectFile_RemoveSkillIdempotent(t *testing.T) {
 	p.RemoveSkill("org/repo/a") // second remove is a no-op, must not panic
 	if _, err := p.GetSkill("org/repo/a"); err == nil {
 		t.Fatal("expected skill to be gone")
+	}
+}
+
+func TestInferDefaultTargets(t *testing.T) {
+	tests := []struct {
+		name string
+		dirs []string // relative dirs to create under the project root
+		want []string
+	}{
+		{name: "none", dirs: nil, want: nil},
+		{name: "claude", dirs: []string{".claude/skills"}, want: []string{"claude"}},
+		{
+			name: "shared agents dir maps to universal project",
+			dirs: []string{".agents/skills"},
+			want: []string{"project"},
+		},
+		{
+			name: "combined sorted, no shared-dir dupes",
+			dirs: []string{".agents/skills", ".claude/skills", ".github/skills"},
+			want: []string{"claude", "copilot", "project"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, d := range tt.dirs {
+				if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got := model.InferDefaultTargets(root)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("InferDefaultTargets = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestInferDefaultTargets_FileNotDir: a regular file at a target's LocalDir is
+// not a dir, so it must not be inferred.
+func TestInferDefaultTargets_FileNotDir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// .claude/skills is a FILE, not a directory.
+	if err := os.WriteFile(filepath.Join(root, ".claude", "skills"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.InferDefaultTargets(root); got != nil {
+		t.Errorf("InferDefaultTargets = %v, want nil (file is not a dir)", got)
 	}
 }

@@ -15,7 +15,7 @@ import (
 // TestRunList_EditModeSourceColumn is the #117 regression for the list
 // surface. Pre-fix the SOURCE column rendered the literal word
 // "registry" whenever entry.Source was empty — meaningless to a user
-// who'd just run `qvr init` and expected the column to reflect the
+// who'd just run `qvr create` and expected the column to reflect the
 // install kind. Now the empty-Source fallback consults the entry's
 // mode: edit → "edit", everything else → "-".
 func TestRunList_EditModeSourceColumn(t *testing.T) {

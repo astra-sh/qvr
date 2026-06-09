@@ -287,18 +287,25 @@ qvr add --global diagnose           # ambient: available in every session
 qvr add code-review --target cursor # install into a specific agent dir
 ```
 
-### Author & edit — `qvr init` / `qvr edit`
+### Author & edit — `qvr create` / `qvr edit`
 
 Scaffold a new skill, or eject an installed one from its immutable worktree into
 a real, editable directory with its own git history. Other agent targets are
 repointed at the edit dir so they stay in sync.
 
 ```bash
-qvr init my-skill                          # scaffold a spec-valid skeleton
-qvr lint my-skill                      # check it against agentskills.io
+qvr init                                   # bootstrap a project (writes qvr.toml; uv-init style)
+qvr create my-skill                        # scaffold a spec-valid skeleton
+qvr lint my-skill                          # check it against agentskills.io
 qvr edit code-review                       # symlink -> real, editable dir
 qvr diff code-review                       # local changes vs. HEAD
 ```
+
+`qvr init` is the project front door: it writes a `qvr.toml` into the current
+directory and infers `default-targets` from any agent dirs already present
+(`.claude/skills`, `.github/skills`, a shared `.agents/skills` → the universal
+`project` target). It never creates a skill or a lockfile — use `qvr create` to
+author a skill and `qvr add` to install one.
 
 ### Publish upstream — `qvr publish`
 
