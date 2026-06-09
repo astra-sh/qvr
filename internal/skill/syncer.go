@@ -17,7 +17,7 @@ import (
 
 var (
 	ErrDivergence  = errors.New("local and upstream histories have diverged; resolve manually")
-	ErrPinnedToTag = errors.New("skill is pinned to a tag; use 'qvr switch' (or its 'upgrade'/'pull' aliases) to move it")
+	ErrPinnedToTag = errors.New("skill is pinned to a tag")
 )
 
 // SyncStatus summarises one installed skill's git state for `qvr status`.

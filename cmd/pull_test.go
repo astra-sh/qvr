@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,11 +123,13 @@ func resetPullFlags(t *testing.T) {
 	repointTip = true
 }
 
-// TestRunPull_TagPinned_ErrorsToStderr is the #129 / AC-LIFE-4 guard: a pull
-// of a tag-pinned skill must (1) exit non-zero and (2) emit its refusal to
-// stderr, not stdout — pre-fix it printed via printer.Info (stdout) and
-// returned nil, so a CI `qvr pull && deploy` ran on a no-op pull.
-func TestRunPull_TagPinned_ErrorsToStderr(t *testing.T) {
+// TestRunPull_TagPinned_SkipsToStderrExitsZero is the #240 contract: a pull of
+// a tag-pinned skill is an informational skip — exit zero (a deliberately
+// tag-pinned project is the docs-recommended setup), refusal text on stderr
+// (never stdout, #129), and the hint must name commands that actually move a
+// tag pin (`qvr switch <skill> --latest`), not the dead 'upgrade'/'pull'
+// aliases.
+func TestRunPull_TagPinned_SkipsToStderrExitsZero(t *testing.T) {
 	t.Setenv("QUIVER_HOME", t.TempDir())
 	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -144,23 +145,27 @@ func TestRunPull_TagPinned_ErrorsToStderr(t *testing.T) {
 	t.Cleanup(func() { printer = prev })
 
 	err := runSwitch(switchCmd, []string{"demo"})
-	if err == nil {
-		t.Fatal("pull of a tag-pinned skill returned nil; want non-zero exit (#129)")
-	}
-	if !errors.Is(err, errTextHandled) {
-		t.Errorf("pull error = %v, want errTextHandled", err)
+	if err != nil {
+		t.Fatalf("pull of a tag-pinned skill = %v, want nil (informational skip, #240)", err)
 	}
 	if stdout.Len() != 0 {
-		t.Errorf("refusal leaked to stdout: %q", stdout.String())
+		t.Errorf("skip notice leaked to stdout: %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "pinned to a tag") {
-		t.Errorf("stderr = %q, want it to mention the tag pin", stderr.String())
+	if !strings.Contains(stderr.String(), "pinned to tag v1.0.0") {
+		t.Errorf("stderr = %q, want it to name the pinned tag", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "qvr switch demo --latest") {
+		t.Errorf("stderr = %q, want the working `qvr switch demo --latest` remedy (#240)", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "upgrade") {
+		t.Errorf("stderr = %q, must not advertise the retired 'upgrade' alias (#240)", stderr.String())
 	}
 }
 
-// TestRunPull_TagPinned_JSONExitsNonZero confirms the JSON path mirrors the
-// text path: the results array lands on stdout AND the command exits non-zero.
-func TestRunPull_TagPinned_JSONExitsNonZero(t *testing.T) {
+// TestRunPull_TagPinned_JSONExitsZero confirms the JSON path mirrors the text
+// path: the results array lands on stdout with a skipped row and the command
+// exits zero (#240).
+func TestRunPull_TagPinned_JSONExitsZero(t *testing.T) {
 	t.Setenv("QUIVER_HOME", t.TempDir())
 	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
 		t.Fatalf("seed config: %v", err)
@@ -171,8 +176,8 @@ func TestRunPull_TagPinned_JSONExitsNonZero(t *testing.T) {
 
 	stdout := withCapturingPrinter(t, "json")
 	err := runSwitch(switchCmd, []string{"demo"})
-	if !errors.Is(err, errJSONHandled) {
-		t.Fatalf("pull --output json error = %v, want errJSONHandled (#129)", err)
+	if err != nil {
+		t.Fatalf("pull --output json error = %v, want nil (#240)", err)
 	}
 	var results []map[string]string
 	if jerr := json.Unmarshal(stdout.Bytes(), &results); jerr != nil {
@@ -180,5 +185,38 @@ func TestRunPull_TagPinned_JSONExitsNonZero(t *testing.T) {
 	}
 	if len(results) != 1 || results[0]["status"] != "skipped" {
 		t.Errorf("results = %+v, want one skipped entry", results)
+	}
+	if !strings.Contains(results[0]["message"], "qvr switch demo --latest") {
+		t.Errorf("message = %q, want the switch --latest remedy", results[0]["message"])
+	}
+}
+
+// TestRunPull_TagPinnedPlusMissingSkill_StillExitsNonZero pins the boundary of
+// #240: only the tag-pin skip became informational — a real failure in the
+// same batch (here an unknown skill name) must still exit non-zero.
+func TestRunPull_TagPinnedPlusMissingSkill_StillExitsNonZero(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetPullFlags(t)
+	installTagPinned(t, "demo", "v1.0.0")
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	prev := printer
+	printer = &output.Printer{Out: stdout, Err: stderr, Format: output.FormatText}
+	t.Cleanup(func() { printer = prev })
+
+	err := runSwitch(switchCmd, []string{"demo", "ghost"})
+	if err == nil {
+		t.Fatal("pull with an unknown skill returned nil; want non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "ghost") {
+		t.Errorf("error = %v, want it to name the missing skill", err)
+	}
+	if !strings.Contains(stderr.String(), "pinned to tag v1.0.0") {
+		t.Errorf("stderr = %q, want the tag-pin skip for demo still reported", stderr.String())
 	}
 }

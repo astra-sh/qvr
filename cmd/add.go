@@ -255,6 +255,13 @@ func prematerializeAddItems(installer *skill.Installer, cfg *config.Config, item
 	installer.PrematerializeBatch(batch)
 }
 
+// fileExistsAt reports whether a regular file (or anything stat-able) exists
+// at path.
+func fileExistsAt(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
 // addInstallState accumulates the batch install outcome across the WithLock
 // window for runAdd to emit afterwards.
 type addInstallState struct {
@@ -279,8 +286,16 @@ func runAddInstallLoop(cmd *cobra.Command, cfg *config.Config, installer *skill.
 	if err != nil {
 		return fmt.Errorf("read lock file: %w", err)
 	}
+	lockExisted := fileExistsAt(lockPath)
 	for _, item := range items {
 		addInstallItem(cmd, cfg, installer, item, targets, projectRoot, lockPath, lock, st)
+	}
+	// Nothing landed and no lock existed before: don't scaffold qvr.lock /
+	// qvr.toml as a side effect of a failed add (a typo'd skill name would
+	// otherwise turn any directory into a phantom qvr project, #245). The
+	// skipped write also skips the projects.json registration downstream.
+	if len(st.results) == 0 && !lockExisted {
+		return nil
 	}
 	// Persist the whole batch's lock mutations once. Partial successes are
 	// kept (matching the prior per-skill-write behavior); blocked installs
@@ -804,8 +819,13 @@ func runAddLocal(cmd *cobra.Command, cfg *config.Config, installer *skill.Instal
 // for cache pruning, refresh AGENTS.md, then emit the JSON envelope or the
 // text success/hint output. firstErr drives the exit-1 sentinel contract.
 func emitAddResults(results []*skill.InstallResult, blocked []blockedSkillJSON, firstErr error, projectRoot, lockPath string) error {
-	// Record the project so `qvr cache prune` knows this lock is reachable.
-	registry.TouchProject(lockPath)
+	// Record the project so `qvr cache prune` knows this lock is reachable —
+	// but only when the lock actually exists on disk. A fully-failed add in a
+	// pristine directory writes no lock (#245); registering its path anyway
+	// would leave a permanent "project lock vanished" warning in cache scans.
+	if fileExistsAt(lockPath) {
+		registry.TouchProject(lockPath)
+	}
 
 	if !addGlobal {
 		refreshAgentsMDFromLock(projectRoot)

@@ -745,6 +745,14 @@ func renderDriftReport(d skill.VerifyEntryResult) {
 		for _, item := range d.Drift {
 			switch item.Field {
 			case "subtreeHash":
+				if d.Mode == "edit" {
+					// Edit-mode entries are expected to mutate — the remove/add
+					// restore hint can't work for a sourceless local skill, and
+					// --repair (or publishing the changes) is the real remedy.
+					printer.Warning(fmt.Sprintf("%s: edited locally (edit mode) — content differs from the sealed hash; run `qvr lock verify --repair` to re-pin it (or `qvr publish %s` to ship the changes)",
+						d.Name, d.Name))
+					continue
+				}
 				printer.Warning(fmt.Sprintf("%s: subtreeHash drift — recorded %s, on disk %s; run `qvr lock verify --repair` to seal the current content or `qvr remove %s --force && qvr add %s` to restore from upstream",
 					d.Name, shortHashLabel(item.Expected), shortHashLabel(item.Actual), d.Name, d.Name))
 			case "commit":

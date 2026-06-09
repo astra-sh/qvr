@@ -364,3 +364,164 @@ func TestRunLock_PackageSelectsSingleSkill(t *testing.T) {
 		t.Fatal("demo did not actually advance")
 	}
 }
+
+// writeProjTomlFor declares the named entry's coordinate at the given ref in
+// qvr.toml, creating the file if needed. Returns the coordinate written.
+func writeProjTomlFor(t *testing.T, project, lockPath, name, ref string) string {
+	t.Helper()
+	e, err := lockEntryGet(t, lockPath, name)
+	if err != nil {
+		t.Fatalf("get %s: %v", name, err)
+	}
+	coord := model.SkillCoordinate(e)
+	if coord == "" {
+		t.Fatalf("entry %s has no qvr.toml coordinate", name)
+	}
+	proj, perr := model.ReadProjectFile(model.DefaultProjectPath(project))
+	if perr != nil {
+		t.Fatalf("read qvr.toml: %v", perr)
+	}
+	proj.PutSkill(coord, ref)
+	if werr := proj.Write(); werr != nil {
+		t.Fatalf("write qvr.toml: %v", werr)
+	}
+	return coord
+}
+
+// TestRunLock_FromToml_RefRewriteSameCommit_ReportsRefUpdated is the #246
+// reporting guard: hand-editing a qvr.toml ref to one that resolves to the
+// same commit (here tag v1.0.0 → same tip as main) is a lock mutation and
+// must be reported as such — not "unchanged".
+func TestRunLock_FromToml_RefRewriteSameCommit_ReportsRefUpdated(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	installBranchPinned(t, "acme", "demo") // ref=main; tag v1.0.0 at the same commit
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+	c0 := lockEntryCommit(t, lockPath, "demo")
+	e0, _ := lockEntryGet(t, lockPath, "demo")
+	hash0 := e0.SubtreeHash
+
+	writeProjTomlFor(t, project, lockPath, "demo", "v1.0.0")
+
+	lockResolveFromToml = true
+	t.Cleanup(func() { lockResolveFromToml = false })
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock --from-toml: %v", err)
+	}
+
+	e, err := lockEntryGet(t, lockPath, "demo")
+	if err != nil {
+		t.Fatalf("get demo: %v", err)
+	}
+	if e.Ref != "v1.0.0" {
+		t.Errorf("ref = %q, want adopted %q (#246)", e.Ref, "v1.0.0")
+	}
+	if e.Commit != c0 {
+		t.Errorf("commit = %s, want untouched %s (same-commit ref rewrite)", e.Commit, c0)
+	}
+	if e.SubtreeHash != hash0 {
+		t.Errorf("subtreeHash churned on a same-commit ref rewrite: %q → %q", hash0, e.SubtreeHash)
+	}
+	outBuf, ok := printer.Out.(interface{ String() string })
+	if !ok {
+		t.Fatalf("printer.Out is not a stringer; got %T", printer.Out)
+	}
+	if got := outBuf.String(); !strings.Contains(got, "ref main → v1.0.0 (same commit") {
+		t.Errorf("output = %q, want a 'ref main → v1.0.0 (same commit …)' line, not 'unchanged' (#246)", got)
+	}
+}
+
+// TestRunLock_FromToml_UntouchedBranchEntryNotRepinned is the #246 scope
+// guard: --from-toml reconciles intent edits only. An entry whose qvr.toml
+// line matches the lock's ref keeps its pinned commit even when the upstream
+// branch advanced — fast-forwarding is bare `qvr lock`'s job.
+func TestRunLock_FromToml_UntouchedBranchEntryNotRepinned(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	remote := installBranchPinned(t, "acme", "demo")
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+	c0 := lockEntryCommit(t, lockPath, "demo")
+
+	writeProjTomlFor(t, project, lockPath, "demo", "main") // declared at its current ref
+	newHash := advanceRemoteMain(t, remote, "demo", "v2")
+	if newHash == c0 {
+		t.Fatal("advance produced the same commit")
+	}
+
+	lockResolveFromToml = true
+	t.Cleanup(func() { lockResolveFromToml = false })
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock --from-toml: %v", err)
+	}
+	if got := lockEntryCommit(t, lockPath, "demo"); got != c0 {
+		t.Errorf("--from-toml fast-forwarded an untouched entry: commit = %s, want %s (#246)", got, c0)
+	}
+
+	// Bare `qvr lock` remains the explicit re-pin verb on the same fixture.
+	lockResolveFromToml = false
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("bare runLock: %v", err)
+	}
+	if got := lockEntryCommit(t, lockPath, "demo"); got != newHash {
+		t.Errorf("bare lock should re-pin: commit = %s, want %s", got, newHash)
+	}
+}
+
+// TestRunLock_FromToml_DryRunRefRewriteDoesNotWrite: a --dry-run --from-toml
+// same-commit ref rewrite reports would-ref-update and leaves the lock bytes
+// untouched.
+func TestRunLock_FromToml_DryRunRefRewriteDoesNotWrite(t *testing.T) {
+	t.Setenv("QUIVER_HOME", t.TempDir())
+	if err := config.Save(&config.Config{DefaultTarget: "claude"}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	t.Chdir(t.TempDir())
+	resetLockResolveFlags(t)
+	resetPrinter(t)
+
+	installBranchPinned(t, "acme", "demo")
+	project, _ := os.Getwd()
+	lockPath := model.DefaultLockPath(project, config.Dir(), false)
+	before, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("read lock bytes: %v", err)
+	}
+
+	writeProjTomlFor(t, project, lockPath, "demo", "v1.0.0")
+
+	lockResolveFromToml = true
+	lockResolveDryRun = true
+	t.Cleanup(func() { lockResolveFromToml = false })
+	if err := runLock(lockCmd, nil); err != nil {
+		t.Fatalf("runLock --from-toml --dry-run: %v", err)
+	}
+
+	after, err := os.ReadFile(lockPath)
+	if err != nil {
+		t.Fatalf("re-read lock bytes: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Errorf("--dry-run mutated the lock:\nbefore=%s\nafter=%s", before, after)
+	}
+	outBuf, ok := printer.Out.(interface{ String() string })
+	if !ok {
+		t.Fatalf("printer.Out is not a stringer; got %T", printer.Out)
+	}
+	if got := outBuf.String(); !strings.Contains(got, "would update ref main → v1.0.0") {
+		t.Errorf("output = %q, want a would-ref-update line", got)
+	}
+}

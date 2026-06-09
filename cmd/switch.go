@@ -388,12 +388,28 @@ func repointUnderLock(cmd *cobra.Command, mode repointMode, name, ref, action, p
 	return nil
 }
 
+// tipTally counts the two kinds of per-skill refusal a tip pull can hit. Only
+// conflicts (dirty/diverged worktrees) flip the exit code; tag-pinned entries
+// are an informational skip — a deliberately tag-pinned project is the
+// reproducible setup the docs recommend, not a failure (#240).
+type tipTally struct {
+	conflicts int // dirty/diverged worktrees — real refusals, exit non-zero
+	tagPinned int // tag-pinned entries — informational skips, exit zero
+}
+
+// tagPinSkipMessage names the commands that actually move a tag pin. The
+// sentinel error text stays generic; the per-skill guidance lives here, where
+// the skill name is known (#240).
+func tagPinSkipMessage(name, ref string) string {
+	return fmt.Sprintf("%s: pinned to tag %s — `qvr switch %s --latest` moves to the newest semver tag, `qvr switch %s <ref>` to any ref", name, ref, name, name)
+}
+
 // tipPullOne advances a single named skill to the tip of its current ref,
 // dispatching between the worktree-free Install re-materialize and the legacy
 // git fast-forward. It records the per-skill result (success or refusal) into
 // the shared slices and returns brk=true when the caller's loop must stop on a
 // fatal error (loopErr is set in that case).
-func tipPullOne(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Syncer, mgr *registry.Manager, gc git.GitClient, lock *model.LockFile, entry *model.LockEntry, name, projectRoot, lockPath string, results *[]map[string]string, refused *int, loopErr *error) bool {
+func tipPullOne(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Syncer, mgr *registry.Manager, gc git.GitClient, lock *model.LockFile, entry *model.LockEntry, name, projectRoot, lockPath string, results *[]map[string]string, tally *tipTally, loopErr *error) bool {
 	// Worktree-free consume install (#204): immutable + SHA-keyed, so
 	// "pull to tip" is a re-materialize at the current tip of the pinned
 	// ref (new SHA dir + symlink repoint), identical to switch/upgrade —
@@ -403,9 +419,10 @@ func tipPullOne(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Sy
 		hash, perr := tipPullViaInstall(cmd, installer, mgr, gc, entry, projectRoot, lockPath)
 		if perr != nil {
 			if errors.Is(perr, skill.ErrPinnedToTag) {
-				printer.Warning(fmt.Sprintf("%s: %v", name, perr))
-				*results = append(*results, map[string]string{"name": name, "status": "skipped", "message": perr.Error()})
-				*refused++
+				msg := tagPinSkipMessage(name, entry.Ref)
+				printer.Warning(msg)
+				*results = append(*results, map[string]string{"name": name, "status": "skipped", "message": msg})
+				tally.tagPinned++
 				return false
 			}
 			*loopErr = fmt.Errorf("pull %s: %w", name, perr)
@@ -419,22 +436,23 @@ func tipPullOne(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Sy
 	// Legacy git worktree: fast-forward in place.
 	hash, err := syncer.Pull(cmd.Context(), entry)
 	if err != nil {
-		// A diverged or tag-pinned entry is a refusal: the requested
-		// pull did not happen. Both are diagnostics (→ stderr, never
-		// stdout — stdout stays clean for the JSON payload) and both
-		// flip the exit code non-zero so a script notices. We
-		// `continue` rather than `break` so the remaining named skills
-		// still get pulled (AC-LIFE-3 / AC-LIFE-4, #129).
+		// A diverged entry is a refusal that flips the exit code; a
+		// tag-pinned entry is an informational skip that doesn't (#240).
+		// Both are diagnostics (→ stderr, never stdout — stdout stays
+		// clean for the JSON payload). We `continue` rather than `break`
+		// so the remaining named skills still get pulled (AC-LIFE-3 /
+		// AC-LIFE-4, #129).
 		if errors.Is(err, skill.ErrDivergence) {
 			printer.Warning(fmt.Sprintf("%s: %v", name, err))
 			*results = append(*results, map[string]string{"name": name, "status": "conflict", "message": err.Error()})
-			*refused++
+			tally.conflicts++
 			return false
 		}
 		if errors.Is(err, skill.ErrPinnedToTag) {
-			printer.Warning(fmt.Sprintf("%s: %v", name, err))
-			*results = append(*results, map[string]string{"name": name, "status": "skipped", "message": err.Error()})
-			*refused++
+			msg := tagPinSkipMessage(name, entry.Ref)
+			printer.Warning(msg)
+			*results = append(*results, map[string]string{"name": name, "status": "skipped", "message": msg})
+			tally.tagPinned++
 			return false
 		}
 		*loopErr = fmt.Errorf("pull %s: %w", name, err)
@@ -454,8 +472,10 @@ func tipPullOne(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Sy
 
 // runTip fast-forwards each named skill's worktree to the tip of its current
 // ref (the former `qvr pull`). With no names it pulls every skill in the lock.
-// It refuses to clobber local work: a dirty or diverged worktree, or a
-// tag-pinned entry, is reported as a refusal that flips the exit code.
+// It refuses to clobber local work: a dirty or diverged worktree is reported
+// as a refusal that flips the exit code. A tag-pinned entry is skipped with a
+// hint but exits zero — deliberately tag-pinned projects are a supported
+// setup, not a failure (#240).
 func runTip(cmd *cobra.Command, names []string) error {
 	projectRoot, err := os.Getwd()
 	if err != nil {
@@ -468,7 +488,7 @@ func runTip(cmd *cobra.Command, names []string) error {
 		loopErr    error
 		latestLock *model.LockFile
 		nothing    bool
-		refused    int
+		tally      tipTally
 	)
 	lockErr := model.WithLock(config.Dir(), lockPath, func() error {
 		lock, err := model.ReadLockFile(lockPath)
@@ -490,7 +510,7 @@ func runTip(cmd *cobra.Command, names []string) error {
 		mgr := newRegistryManager(gc)
 		installer := skill.NewInstaller(mgr, wt, gc)
 		syncer := skill.NewSyncer(wt, gc)
-		tipPullLoop(cmd, installer, syncer, mgr, gc, names, projectRoot, lockPath, &results, &refused, &loopErr)
+		tipPullLoop(cmd, installer, syncer, mgr, gc, names, projectRoot, lockPath, &results, &tally, &loopErr)
 		// Re-read for the AGENTS.md refresh / JSON payload below; per-iteration
 		// writes (and Install) have already persisted every change.
 		if l, lerr := model.ReadLockFile(lockPath); lerr == nil {
@@ -513,13 +533,13 @@ func runTip(cmd *cobra.Command, names []string) error {
 	if loopErr != nil {
 		return loopErr
 	}
-	return renderTipResults(results, refused)
+	return renderTipResults(results, tally)
 }
 
 // tipPullLoop advances each named skill to its current ref's tip, re-reading
 // the lock per iteration so worktree-free Install writes aren't clobbered. It
 // stops early when tipPullOne reports a fatal error (recorded in loopErr).
-func tipPullLoop(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Syncer, mgr *registry.Manager, gc git.GitClient, names []string, projectRoot, lockPath string, results *[]map[string]string, refused *int, loopErr *error) {
+func tipPullLoop(cmd *cobra.Command, installer *skill.Installer, syncer *skill.Syncer, mgr *registry.Manager, gc git.GitClient, names []string, projectRoot, lockPath string, results *[]map[string]string, tally *tipTally, loopErr *error) {
 	for _, name := range names {
 		// Re-read the lock each iteration. A worktree-free pull advances via
 		// Install, which writes the lock file directly, so a single in-memory
@@ -535,31 +555,32 @@ func tipPullLoop(cmd *cobra.Command, installer *skill.Installer, syncer *skill.S
 			return
 		}
 
-		if tipPullOne(cmd, installer, syncer, mgr, gc, lock, entry, name, projectRoot, lockPath, results, refused, loopErr) {
+		if tipPullOne(cmd, installer, syncer, mgr, gc, lock, entry, name, projectRoot, lockPath, results, tally, loopErr) {
 			return
 		}
 	}
 }
 
 // renderTipResults emits the runTip payload (JSON or per-skill text already
-// printed) and maps any refusal count onto the sentinel that flips the exit
-// code without re-printing (#129).
-func renderTipResults(results []map[string]string, refused int) error {
+// printed) and maps any conflict count onto the sentinel that flips the exit
+// code without re-printing (#129). Tag-pin skips are informational and never
+// flip the exit code (#240).
+func renderTipResults(results []map[string]string, tally tipTally) error {
 	if printer.Format == output.FormatJSON {
 		if err := printer.JSON(results); err != nil {
 			return err
 		}
 		// The payload already encodes each refusal's status/message; exit
 		// non-zero without a second envelope so the stream stays one JSON doc.
-		if refused > 0 {
+		if tally.conflicts > 0 {
 			return errJSONHandled
 		}
 		return nil
 	}
-	// Refusals were already printed to stderr per skill; flip the exit code
-	// without re-printing (errTextHandled) so a tag-pinned / diverged pull
-	// fails loudly instead of exiting 0 (#129).
-	if refused > 0 {
+	// Conflicts were already printed to stderr per skill; flip the exit code
+	// without re-printing (errTextHandled) so a diverged pull fails loudly
+	// instead of exiting 0 (#129).
+	if tally.conflicts > 0 {
 		return errTextHandled
 	}
 	return nil

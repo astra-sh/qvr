@@ -125,15 +125,20 @@ type LockResolveEntryResult struct {
 	Name string `json:"name"`
 	Ref  string `json:"ref,omitempty"`
 	// Status vocabulary mirrors `qvr lock upgrade`'s verbs:
-	//   "repinned"    — wrote a new commit to the entry
-	//   "would-repin" — --dry-run says we'd re-pin
-	//   "unchanged"   — ref already at its tip commit
-	//   "skipped"     — link/edit/standalone entry with no registry upstream
-	//   "failed"      — couldn't resolve the ref (e.g. registry not fetched)
+	//   "repinned"         — wrote a new commit to the entry
+	//   "would-repin"      — --dry-run says we'd re-pin
+	//   "ref-updated"      — --from-toml rewrote the ref; commit unchanged (#246)
+	//   "would-ref-update" — --dry-run says we'd rewrite the ref (same commit)
+	//   "unchanged"        — entry not modified at all
+	//   "skipped"          — link/edit/standalone entry with no registry upstream
+	//   "failed"           — couldn't resolve the ref (e.g. registry not fetched)
 	Status    string `json:"status"`
 	OldCommit string `json:"oldCommit,omitempty"`
 	NewCommit string `json:"newCommit,omitempty"`
-	Message   string `json:"message,omitempty"`
+	// OldRef is set on "ref-updated"/"would-ref-update": the ref the lock
+	// carried before --from-toml adopted qvr.toml's declared ref.
+	OldRef  string `json:"oldRef,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // LockResolveOutput is the top-level shape `qvr lock` emits in JSON mode.
@@ -221,7 +226,8 @@ func countLockResolveStatuses(entries []LockResolveEntryResult) (failed, repinne
 }
 
 // renderLockResolveEntries prints the text-mode per-entry verdict for `qvr lock`:
-// re-pinned / would-repin / unchanged / skipped / removed / would-remove / failed.
+// re-pinned / would-repin / ref-updated / would-ref-update / unchanged / skipped /
+// removed / would-remove / failed.
 func renderLockResolveEntries(entries []LockResolveEntryResult) {
 	for _, e := range entries {
 		switch e.Status {
@@ -229,6 +235,10 @@ func renderLockResolveEntries(entries []LockResolveEntryResult) {
 			printer.Success(fmt.Sprintf("%s: re-pinned %s %s → %s", e.Name, e.Ref, e.OldCommit, e.NewCommit))
 		case "would-repin":
 			printer.Info(fmt.Sprintf("~ %s: would re-pin %s %s → %s", e.Name, e.Ref, e.OldCommit, e.NewCommit))
+		case "ref-updated":
+			printer.Success(fmt.Sprintf("%s: ref %s → %s (same commit %s)", e.Name, e.OldRef, e.Ref, e.OldCommit))
+		case "would-ref-update":
+			printer.Info(fmt.Sprintf("~ %s: would update ref %s → %s (same commit %s)", e.Name, e.OldRef, e.Ref, e.OldCommit))
 		case "unchanged":
 			printer.Info(fmt.Sprintf("%s: unchanged (%s @ %s)", e.Name, e.Ref, e.OldCommit))
 		case "skipped":
@@ -411,75 +421,113 @@ func resolveLockEntry(ctx context.Context, entry *model.LockEntry, proj *model.P
 		row.Status = "skipped"
 		row.Message = "no registry upstream to re-resolve"
 	default:
-		// --from-toml: adopt qvr.toml's declared ref for this entry before
-		// resolving, so the lock moves to the hand-edited ref. A ref change is
-		// itself a lock mutation even if the resolved commit is unchanged.
-		// Defer the `changed` flag (and restore the ref on failure) until
-		// ResolveRef succeeds — otherwise a ref that doesn't resolve gets
-		// written into the lock, corrupting it (stale commit/hash under a
-		// dangling ref).
-		originalRef := entry.Ref
-		refAdopted := false
-		if proj != nil {
-			if coord := model.SkillCoordinate(entry); coord != "" {
-				if spec, ok := proj.Skill(coord); ok && spec.Ref != entry.Ref {
-					entry.Ref = spec.Ref
-					row.Ref = spec.Ref
-					refAdopted = true
-				}
-			}
-		}
-		if !fetched[entry.Registry] {
-			if _, uerr := mgr.Update(ctx, entry.Registry); uerr != nil {
-				printer.Warning(fmt.Sprintf("lock: refresh %s failed (%v); resolving against cached clone", entry.Registry, uerr))
-			}
-			fetched[entry.Registry] = true
-		}
-		newCommit, rerr := gc.ResolveRef(registry.RegistryPath(entry.Registry), entry.Ref)
-		if rerr != nil {
-			// Restore the original ref so the failed resolve leaves the lock
-			// entry untouched rather than persisting an unresolvable ref.
-			entry.Ref = originalRef
-			row.Ref = originalRef
-			row.Status = "failed"
-			row.Message = rerr.Error()
-			return row, changed
-		}
-		// Resolve succeeded — an adopted toml ref is now a real mutation.
-		if refAdopted {
-			changed = true
-		}
-		row.OldCommit = registry.ShortSHA(entry.Commit)
-		row.NewCommit = registry.ShortSHA(newCommit)
-		if newCommit == entry.Commit {
-			row.Status = "unchanged"
-			return row, changed
-		}
-		if lockResolveDryRun {
-			row.Status = "would-repin"
-			return row, changed
-		}
-		// Re-pin: rewrite the commit + cache key and recompute the content
-		// hash straight from the bare clone's git objects — no worktree
-		// checkout, no symlink change. The digest is identical to what a
-		// checkout of newCommit would produce, so the lock stays verifiable
-		// immediately and the next `qvr sync` materialises a worktree that
-		// matches. If hashing fails (unreadable subtree), invalidate the
-		// fields so sync recomputes them on restore rather than leaving a
-		// stale hash.
-		entry.Commit = newCommit
-		entry.InstallCommit = registry.ShortSHA(newCommit)
-		if id, herr := skill.ComputeEntryIdentityAtCommit(registry.RegistryPath(entry.Registry), newCommit, entry.Path, entry.RootCoexists); herr == nil {
-			entry.SubtreeHash = id.SubtreeHash
-			entry.TreeOID = id.TreeSHA
-		} else {
-			entry.SubtreeHash = ""
-			entry.TreeOID = ""
-		}
-		changed = true
-		row.Status = "repinned"
+		return resolveRegistryLockEntry(ctx, entry, proj, fetched, mgr, gc, row)
 	}
 	return row, changed
+}
+
+// adoptTomlRef applies qvr.toml's declared ref onto the entry (--from-toml).
+// Returns adopted=true when the declared ref differed and was taken, and
+// declaredSame=true when the entry is declared at exactly its current ref —
+// the "untouched intent" case --from-toml must leave alone (#246). Both are
+// false when --from-toml is off or the entry has no qvr.toml coordinate.
+func adoptTomlRef(entry *model.LockEntry, proj *model.ProjectFile, row *LockResolveEntryResult) (adopted, declaredSame bool) {
+	if proj == nil {
+		return false, false
+	}
+	coord := model.SkillCoordinate(entry)
+	if coord == "" {
+		return false, false
+	}
+	spec, ok := proj.Skill(coord)
+	if !ok {
+		return false, false
+	}
+	if spec.Ref == entry.Ref {
+		return false, true
+	}
+	entry.Ref = spec.Ref
+	row.Ref = spec.Ref
+	return true, false
+}
+
+// resolveRegistryLockEntry is the registry-backed arm of resolveLockEntry: it
+// adopts qvr.toml's ref under --from-toml, resolves the ref against the (once-
+// fetched) registry, and re-pins the entry when the tip moved. The `changed`
+// flag (and the ref restore on failure) is deferred until ResolveRef succeeds —
+// otherwise a ref that doesn't resolve gets written into the lock, corrupting
+// it (stale commit/hash under a dangling ref).
+func resolveRegistryLockEntry(ctx context.Context, entry *model.LockEntry, proj *model.ProjectFile, fetched map[string]bool, mgr *registry.Manager, gc git.GitClient, row LockResolveEntryResult) (LockResolveEntryResult, bool) {
+	originalRef := entry.Ref
+	refAdopted, declaredSame := adoptTomlRef(entry, proj, &row)
+	// --from-toml reconciles intent edits only (#246): an entry whose
+	// declared ref already matches the lock keeps its pinned commit —
+	// fast-forwarding branch refs to their tips is bare `qvr lock`'s job,
+	// not a side effect of applying an unrelated qvr.toml edit.
+	if declaredSame {
+		row.OldCommit = registry.ShortSHA(entry.Commit)
+		row.Status = "unchanged"
+		row.Message = "ref matches qvr.toml — left untouched (--from-toml)"
+		return row, false
+	}
+	if !fetched[entry.Registry] {
+		if _, uerr := mgr.Update(ctx, entry.Registry); uerr != nil {
+			printer.Warning(fmt.Sprintf("lock: refresh %s failed (%v); resolving against cached clone", entry.Registry, uerr))
+		}
+		fetched[entry.Registry] = true
+	}
+	newCommit, rerr := gc.ResolveRef(registry.RegistryPath(entry.Registry), entry.Ref)
+	if rerr != nil {
+		// Restore the original ref so the failed resolve leaves the lock
+		// entry untouched rather than persisting an unresolvable ref.
+		entry.Ref = originalRef
+		row.Ref = originalRef
+		row.Status = "failed"
+		row.Message = rerr.Error()
+		return row, false
+	}
+	// Resolve succeeded — an adopted toml ref is now a real mutation.
+	changed := refAdopted
+	row.OldCommit = registry.ShortSHA(entry.Commit)
+	row.NewCommit = registry.ShortSHA(newCommit)
+	if newCommit == entry.Commit {
+		// A rewritten ref that resolves to the same commit is still a lock
+		// mutation — report it as such instead of "unchanged" (#246). The
+		// commit (and so SubtreeHash/TreeOID) is untouched.
+		if refAdopted {
+			row.OldRef = originalRef
+			row.Status = "ref-updated"
+			if lockResolveDryRun {
+				row.Status = "would-ref-update"
+			}
+			return row, changed
+		}
+		row.Status = "unchanged"
+		return row, changed
+	}
+	if lockResolveDryRun {
+		row.Status = "would-repin"
+		return row, changed
+	}
+	// Re-pin: rewrite the commit + cache key and recompute the content
+	// hash straight from the bare clone's git objects — no worktree
+	// checkout, no symlink change. The digest is identical to what a
+	// checkout of newCommit would produce, so the lock stays verifiable
+	// immediately and the next `qvr sync` materialises a worktree that
+	// matches. If hashing fails (unreadable subtree), invalidate the
+	// fields so sync recomputes them on restore rather than leaving a
+	// stale hash.
+	entry.Commit = newCommit
+	entry.InstallCommit = registry.ShortSHA(newCommit)
+	if id, herr := skill.ComputeEntryIdentityAtCommit(registry.RegistryPath(entry.Registry), newCommit, entry.Path, entry.RootCoexists); herr == nil {
+		entry.SubtreeHash = id.SubtreeHash
+		entry.TreeOID = id.TreeSHA
+	} else {
+		entry.SubtreeHash = ""
+		entry.TreeOID = ""
+	}
+	row.Status = "repinned"
+	return row, true
 }
 
 // VerifySummary aggregates per-status counts for the JSON output.
@@ -737,6 +785,9 @@ func renderVerifyText(out *VerifyOutput) {
 			printer.Warning(fmt.Sprintf("%s: drift (%s)", r.Name, output.Plural(len(r.Drift), "field")))
 			for _, d := range r.Drift {
 				printer.Warning(fmt.Sprintf("  %s: expected %s, got %s", d.Field, shortHashLabel(d.Expected), shortHashLabel(d.Actual)))
+			}
+			if r.Mode == "edit" {
+				printer.Hint(fmt.Sprintf("%s is in edit mode — local edits are expected; run `qvr lock verify --repair` to re-pin the hash", r.Name))
 			}
 		case skill.VerifyStatusRepaired:
 			if r.OldSubtreeHash != "" {
