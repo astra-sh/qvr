@@ -64,7 +64,7 @@ func setupRepoWithGitlink(t *testing.T) string {
 	subHash := storeObject(t, repo, subTree)
 
 	rootTree := &object.Tree{Entries: []object.TreeEntry{
-		{Name: "registry.yaml", Mode: filemode.Regular, Hash: blobHash},
+		{Name: "README.md", Mode: filemode.Regular, Hash: blobHash},
 		{Name: "skills", Mode: filemode.Dir, Hash: subHash},
 	}}
 	rootHash := storeObject(t, repo, rootTree)

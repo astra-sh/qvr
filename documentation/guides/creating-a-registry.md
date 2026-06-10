@@ -9,18 +9,15 @@ A registry is a Git repository that contains skills. Anyone with access to the r
 mkdir my-team-skills && cd my-team-skills
 git init
 
-# 2. Add registry metadata
-cat > registry.yaml << 'EOF'
-name: my-team-skills
-description: My team's curated agent skills
-maintainers:
-  - name: Your Name
-    github: your-github-username
-skills-dir: skills        # where the indexer looks for skills (default: skills)
-ignore: []                # optional path globs the indexer must skip
-settings:
-  require-scan: true
-  default-branch: main
+# 2. Add the registry manifest — a [registry] table in qvr.toml (optional;
+#    without it, the indexer walks the whole tree)
+qvr init
+cat >> qvr.toml << 'EOF'
+
+[registry]
+name = "my-team-skills"
+skills-dir = "skills"     # where the indexer looks for skills (default: skills)
+ignore = []               # optional path.Match globs the indexer must skip
 EOF
 
 # 3. Create your first skill: scaffold OUTSIDE the repo, then vendor the
@@ -46,7 +43,7 @@ git push -u origin main
 
 ```
 my-team-skills/
-├── registry.yaml         # Recommended: metadata + indexer scoping (skills-dir, ignore)
+├── qvr.toml              # Registry manifest: [registry] table (skills-dir, ignore)
 ├── skills/               # All skills live here
 │   ├── code-review/
 │   │   └── SKILL.md
@@ -59,9 +56,9 @@ my-team-skills/
 └── README.md             # Optional: documentation
 ```
 
-When `registry.yaml` is present, the indexer scopes discovery to `skills-dir`
-(default `skills/`, plus a root-level `SKILL.md`) and honors the `ignore`
-globs. Without it, the whole tree is walked. In both modes, skill directories
+When `qvr.toml` carries a `[registry]` table, the indexer scopes discovery to
+`skills-dir` (default `skills/`, plus a root-level `SKILL.md`) and honors the
+`ignore` globs. Without it, the whole tree is walked. In both modes, skill directories
 under `testdata/` or `fixtures/` are always excluded — scanner fixtures and
 test data never reach `qvr search`/`qvr add`.
 

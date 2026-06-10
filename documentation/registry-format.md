@@ -6,7 +6,7 @@ A registry is a Git repository that contains skills. qvr clones registries as ba
 
 ```
 acme-skills/
-├── registry.yaml                    # Registry metadata (required)
+├── qvr.toml                         # Registry manifest: [registry] table (optional)
 ├── skills/                          # Skills directory
 │   ├── code-review/
 │   │   └── SKILL.md
@@ -19,32 +19,53 @@ acme-skills/
 └── README.md                        # Optional: human-readable docs
 ```
 
-## registry.yaml
+## Registry Manifest
 
-Required metadata file at the repository root:
+The registry manifest is the `[registry]` table in the repo's top-level
+`qvr.toml`. It scopes skill discovery when qvr indexes the repo and is
+**optional** — without one, qvr discovers every directory containing a
+`SKILL.md` across the whole tree (minus `testdata/` and `fixtures/`, which are
+always excluded).
 
-```yaml
-name: acme-skills
-description: ACME Corp's curated agent skills
-maintainers:
-  - name: Platform Team
-    email: platform@acme.com
-  - name: Alice Smith
-    github: alicesmith
-settings:
-  require-scan: true                 # Require scan before publish
-  default-branch: main               # Default branch for skill resolution
+`qvr.toml` is dual-intent: `[project]`/`[skills]` declare what the repo
+*consumes*, `[registry]` declares how the repo is indexed when *published* as
+a registry. qvr-managed rewrites of `qvr.toml` round-trip a hand-authored
+`[registry]` table losslessly. A `qvr.toml` that fails to parse never
+silently mis-scopes: the parse failure is surfaced as a skip and discovery
+falls back to whole-tree.
+
+```toml
+[registry]
+name = "acme-skills"
+skills-dir = "skills"                # where discovery looks (default: skills)
+ignore = ["skills/experimental-*"]   # path.Match globs, repo-relative dirs
 ```
 
 ### Fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `name` | Yes | Registry identifier |
-| `description` | Yes | Human-readable description |
-| `maintainers` | No | List of maintainers with name and contact |
-| `settings.require-scan` | No | Whether skills must pass scan before publish (default: false) |
-| `settings.default-branch` | No | Default branch for version resolution (default: main) |
+| `name` | No | Registry identifier |
+| `skills-dir` | No | Repo-relative directory skills live under (default: `skills`; the repo root itself stays eligible so a single-skill root-layout repo can carry a manifest) |
+| `ignore` | No | `path.Match` globs evaluated against each candidate skill directory; matches are skipped |
+
+Unknown keys are accepted and ignored — parsing is deliberately loose because
+manifests are read from untrusted remote HEADs. Directories excluded by the
+manifest are reported as informational skips (the SKIPPED column in
+`qvr registry list`), never silently dropped.
+
+### Artifact hierarchy
+
+qvr has exactly two files, needed in strictly decreasing order:
+
+1. **`qvr.lock`** — the only source of portability and reproducibility.
+   `qvr sync` reproduces the full install from the lock alone; CI never needs
+   anything else.
+2. **`qvr.toml`** — optional. The human intent layer (`[project]`,
+   `[skills]`); an absent `qvr.toml` is a no-op everywhere.
+3. **`[registry]` within `qvr.toml`** — optional within optional. Read only
+   when *other people's* qvr indexes your repo as a registry; a consumer-only
+   `qvr.toml` is inert for indexing.
 
 ## Versioning Model
 
@@ -108,12 +129,13 @@ Added via `qvr add <repo-url>` instead of `qvr registry add`.
 mkdir my-skills && cd my-skills
 git init
 
-# 2. Add registry.yaml
-cat > registry.yaml << 'EOF'
-name: my-skills
-description: My team's agent skills
-settings:
-  default-branch: main
+# 2. Declare the registry manifest (optional — whole-tree discovery without it)
+qvr init
+cat >> qvr.toml << 'EOF'
+
+[registry]
+name = "my-skills"
+skills-dir = "skills"
 EOF
 
 # 3. Create a skill (free-standing dir inside skills/)

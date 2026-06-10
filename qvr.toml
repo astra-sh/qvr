@@ -1,0 +1,18 @@
+[project]
+name = 'skill-hub'
+version = '0.1.0'
+default-targets = ['claude']
+
+[skills]
+'anthropics/skills/frontend-design' = 'main'
+'github/awesome-copilot/create-readme' = 'main'
+'mattpocock/skills/diagnose' = 'main'
+'mattpocock/skills/grill-with-docs' = 'main'
+'mattpocock/skills/improve-codebase-architecture' = 'main'
+'mattpocock/skills/tdd' = 'main'
+'mattpocock/skills/triage' = 'main'
+'mattpocock/skills/zoom-out' = 'main'
+
+[registry]
+name = 'astra-sh/qvr'
+skills-dir = 'skills'

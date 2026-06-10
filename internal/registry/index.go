@@ -66,7 +66,7 @@ func NewIndexer(gitClient git.GitClient) *Indexer {
 
 // BuildIndex reads the bare repo at HEAD, discovers skills, and returns index
 // entries plus a list of candidate directories that could not be indexed (no
-// SKILL.md, parse error, fixture path, outside the registry.yaml scope, a
+// SKILL.md, parse error, fixture path, outside the [registry] scope, a
 // gitlink, etc). The skipped list is informational — BuildIndex only returns
 // an error for repo-level failures, not per-skill ones.
 func (idx *Indexer) BuildIndex(repoPath string) ([]SkillIndexEntry, []SkippedSkill, error) {
@@ -89,17 +89,13 @@ func (idx *Indexer) BuildIndex(repoPath string) ([]SkillIndexEntry, []SkippedSki
 	skillDirs, fixtureSkips := excludeFixturePaths(skillDirs)
 	skipped = append(skipped, fixtureSkips...)
 
-	// 3. registry.yaml scoping: when the repo carries a manifest, discovery is
-	//    confined to its skills-dir (+ ignore globs). A malformed manifest
-	//    falls back to whole-tree discovery but is surfaced as a skip rather
-	//    than silently mis-scoping (#244).
-	if rf, rfErr := loadRegistryFile(idx.Git, repoPath); rfErr != nil {
-		skipped = append(skipped, SkippedSkill{
-			Name:   registryFileName,
-			Path:   registryFileName,
-			Reason: fmt.Sprintf("unparsable — whole-tree discovery used: %v", rfErr),
-		})
-	} else if rf != nil {
+	// 3. Manifest scoping: when the repo carries a [registry] table in its
+	//    qvr.toml, discovery is confined to its skills-dir (+ ignore globs).
+	//    A malformed qvr.toml falls back to whole-tree discovery and is
+	//    surfaced as a skip rather than silently mis-scoping (#244).
+	rf, manifestSkips := loadRegistryManifest(idx.Git, repoPath)
+	skipped = append(skipped, manifestSkips...)
+	if rf != nil {
 		var scopeSkips []SkippedSkill
 		skillDirs, scopeSkips = applyRegistryScope(rf, skillDirs)
 		skipped = append(skipped, scopeSkips...)

@@ -31,10 +31,12 @@ var (
 // merges) is reconciled by `qvr sync` (lock wins) or `qvr lock --from-toml`
 // (toml wins).
 //
-// Only [project] and [skills] are live today. Plugins/Hooks/Mcp are reserved
-// sections — round-tripped losslessly via map[string]any so a user pre-authoring
-// them survives a qvr-managed rewrite, and so future milestones (plugins → hooks
-// → mcp) are purely additive.
+// qvr.toml is dual-intent: [project] and [skills] are the consumer side (what
+// this repo installs), while [registry] is the producer side (how this repo is
+// indexed when added as a registry — see internal/registry). Plugins/Hooks/Mcp
+// are reserved sections. [registry] and the reserved sections are round-tripped
+// losslessly via map[string]any so hand-authored content survives a qvr-managed
+// rewrite, and so future milestones (plugins → hooks → mcp) are purely additive.
 type ProjectFile struct {
 	Project ProjectMeta `toml:"project" json:"project"`
 
@@ -56,6 +58,14 @@ type ProjectFile struct {
 	// Registry-sourced skills only — edit/link/local install modes have no
 	// coordinate and live solely in qvr.lock.
 	Skills map[string]any `toml:"skills,omitempty" json:"skills,omitempty"`
+
+	// Registry is the producer half of qvr.toml's dual intent: the registry
+	// manifest ([registry] name/skills-dir/ignore) that scopes skill discovery
+	// when OTHER people's qvr indexes this repo as a registry. It is consumed
+	// by internal/registry from the repo's HEAD blob — the consumer side never
+	// interprets it, so it is held as map[string]any purely to round-trip
+	// hand-authored content losslessly through qvr-managed rewrites.
+	Registry map[string]any `toml:"registry,omitempty" json:"registry,omitempty"`
 
 	// Plugins/Hooks/Mcp are reserved for future milestones. Inert this release;
 	// map[string]any keeps any hand-authored content lossless on round-trip.
@@ -192,11 +202,12 @@ func ReadProjectFile(path string) (*ProjectFile, error) {
 func MarshalProjectFile(p *ProjectFile) ([]byte, error) {
 	// Pass 1: [project] + reserved sections (skills deliberately omitted).
 	head := struct {
-		Project ProjectMeta    `toml:"project"`
-		Plugins map[string]any `toml:"plugins,omitempty"`
-		Hooks   map[string]any `toml:"hooks,omitempty"`
-		Mcp     map[string]any `toml:"mcp,omitempty"`
-	}{Project: p.Project, Plugins: p.Plugins, Hooks: p.Hooks, Mcp: p.Mcp}
+		Project  ProjectMeta    `toml:"project"`
+		Registry map[string]any `toml:"registry,omitempty"`
+		Plugins  map[string]any `toml:"plugins,omitempty"`
+		Hooks    map[string]any `toml:"hooks,omitempty"`
+		Mcp      map[string]any `toml:"mcp,omitempty"`
+	}{Project: p.Project, Registry: p.Registry, Plugins: p.Plugins, Hooks: p.Hooks, Mcp: p.Mcp}
 	data, err := toml.Marshal(head)
 	if err != nil {
 		return nil, fmt.Errorf("marshal project file: %w", err)

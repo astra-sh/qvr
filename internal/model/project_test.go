@@ -319,3 +319,55 @@ func TestInferDefaultTargets_FileNotDir(t *testing.T) {
 		t.Errorf("InferDefaultTargets = %v, want nil (file is not a dir)", got)
 	}
 }
+
+// TestProjectFile_RoundTrip_RegistryTableSurvivesRewrite: qvr.toml is
+// dual-intent — a hand-authored producer-side [registry] table (registry
+// manifest, read by internal/registry from HEAD) must survive a qvr-managed
+// consumer-side rewrite untouched.
+func TestProjectFile_RoundTrip_RegistryTableSurvivesRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), model.ProjectFileName)
+
+	raw := `[project]
+name = "team-skills"
+
+[registry]
+name = "team-skills"
+skills-dir = "skills"
+ignore = ["skills/experimental-*"]
+
+[skills]
+"anthropics/skills/frontend-design" = "main"
+`
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	proj, err := model.ReadProjectFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if proj.Registry == nil || proj.Registry["skills-dir"] != "skills" {
+		t.Fatalf("[registry] not preserved on read: %+v", proj.Registry)
+	}
+
+	// Mutate skills (a qvr-managed write) and confirm [registry] round-trips.
+	proj.PutSkill("anthropics/skills/pdf", "v2")
+	if err := proj.Write(); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	reloaded, err := model.ReadProjectFile(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if reloaded.Registry == nil || reloaded.Registry["name"] != "team-skills" ||
+		reloaded.Registry["skills-dir"] != "skills" {
+		t.Fatalf("[registry] lost across rewrite: %+v", reloaded.Registry)
+	}
+	ignore, _ := reloaded.Registry["ignore"].([]any)
+	if len(ignore) != 1 || ignore[0] != "skills/experimental-*" {
+		t.Fatalf("[registry].ignore lost across rewrite: %+v", reloaded.Registry["ignore"])
+	}
+	if !reloaded.HasSkill("anthropics/skills/pdf") {
+		t.Fatalf("rewrite lost the mutated skill: %+v", reloaded.Skills)
+	}
+}

@@ -782,7 +782,6 @@ func skillMD(name, desc string) []byte {
 // a bare "0 skills".
 func TestBuildIndex_GitlinkSurfacedAsSkipped(t *testing.T) {
 	mock := newMockGitClient()
-	mock.blobs["HEAD:registry.yaml"] = []byte("name: team\n")
 	mock.submodules = []string{"skills/my-first-skill"}
 
 	indexer := registry.NewIndexer(mock)
@@ -805,7 +804,8 @@ func TestBuildIndex_GitlinkSurfacedAsSkipped(t *testing.T) {
 }
 
 // TestBuildIndex_FixturePathsExcluded (#244): skill dirs under testdata/ or
-// fixtures/ (any depth) never reach the index, with or without registry.yaml,
+// fixtures/ (any depth) never reach the index, with or without a [registry]
+// manifest,
 // and are surfaced as skips.
 func TestBuildIndex_FixturePathsExcluded(t *testing.T) {
 	mock := newMockGitClient()
@@ -832,12 +832,12 @@ func TestBuildIndex_FixturePathsExcluded(t *testing.T) {
 	}
 }
 
-// TestBuildIndex_RegistryYamlScopesToSkillsDir (#244): with a registry.yaml
-// present, discovery is confined to skills-dir; out-of-scope SKILL.md dirs
-// are skipped with a reason.
-func TestBuildIndex_RegistryYamlScopesToSkillsDir(t *testing.T) {
+// TestBuildIndex_QvrTomlRegistryTableScopesToSkillsDir: qvr.toml is
+// dual-intent — a [registry] table is the registry manifest, confining
+// discovery to skills-dir.
+func TestBuildIndex_QvrTomlRegistryTableScopesToSkillsDir(t *testing.T) {
 	mock := newMockGitClient()
-	mock.blobs["HEAD:registry.yaml"] = []byte("name: team\nskills-dir: skills\n")
+	mock.blobs["HEAD:qvr.toml"] = []byte("[registry]\nname = 'team'\nskills-dir = 'skills'\n")
 	mock.blobs["HEAD:skills/good-skill/SKILL.md"] = skillMD("good-skill", "In scope.")
 	mock.blobs["HEAD:tools/stray-skill/SKILL.md"] = skillMD("stray-skill", "Out of scope.")
 
@@ -851,20 +851,21 @@ func TestBuildIndex_RegistryYamlScopesToSkillsDir(t *testing.T) {
 	}
 	found := false
 	for _, s := range skipped {
-		if s.Path == "tools/stray-skill" && strings.Contains(s.Reason, "outside skills-dir") {
+		if s.Path == "tools/stray-skill" && strings.Contains(s.Reason, "outside skills-dir") &&
+			strings.Contains(s.Reason, "qvr.toml") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("skipped = %+v, want tools/stray-skill marked outside skills-dir", skipped)
+		t.Errorf("skipped = %+v, want tools/stray-skill marked outside skills-dir (qvr.toml)", skipped)
 	}
 }
 
-// TestBuildIndex_RegistryYamlIgnoreGlobs (#244): ignore globs drop matching
-// skill dirs even inside skills-dir.
-func TestBuildIndex_RegistryYamlIgnoreGlobs(t *testing.T) {
+// TestBuildIndex_QvrTomlRegistryIgnoreGlobs: [registry].ignore globs drop
+// matching skill dirs even inside skills-dir.
+func TestBuildIndex_QvrTomlRegistryIgnoreGlobs(t *testing.T) {
 	mock := newMockGitClient()
-	mock.blobs["HEAD:registry.yaml"] = []byte("name: team\nignore:\n  - 'skills/experimental-*'\n")
+	mock.blobs["HEAD:qvr.toml"] = []byte("[registry]\nname = 'team'\nignore = ['skills/experimental-*']\n")
 	mock.blobs["HEAD:skills/good-skill/SKILL.md"] = skillMD("good-skill", "Kept.")
 	mock.blobs["HEAD:skills/experimental-skill/SKILL.md"] = skillMD("experimental-skill", "Ignored.")
 
@@ -887,12 +888,35 @@ func TestBuildIndex_RegistryYamlIgnoreGlobs(t *testing.T) {
 	}
 }
 
-// TestBuildIndex_MalformedRegistryYamlFallsBackToWholeTree (#244): a broken
-// manifest must not silently mis-scope — discovery falls back to whole-tree
-// and the parse failure is surfaced as a skip.
-func TestBuildIndex_MalformedRegistryYamlFallsBackToWholeTree(t *testing.T) {
+// TestBuildIndex_ConsumerOnlyQvrTomlIsInert: a qvr.toml with no [registry]
+// table (the shape every consumer project commits) must not affect discovery
+// — whole-tree applies, exactly as if the file were absent.
+func TestBuildIndex_ConsumerOnlyQvrTomlIsInert(t *testing.T) {
 	mock := newMockGitClient()
-	mock.blobs["HEAD:registry.yaml"] = []byte("\t::: not yaml {{{")
+	mock.blobs["HEAD:qvr.toml"] = []byte("[project]\nname = 'demo'\ndefault-targets = ['claude']\n\n[skills]\n'reg/some-skill' = 'main'\n")
+	mock.blobs["HEAD:anywhere/some-skill/SKILL.md"] = skillMD("some-skill", "Discovered whole-tree.")
+
+	indexer := registry.NewIndexer(mock)
+	skills, skipped, err := indexer.BuildIndex("/fake/path")
+	if err != nil {
+		t.Fatalf("BuildIndex: %v", err)
+	}
+	if len(skills) != 1 || skills[0].Name != "some-skill" {
+		t.Fatalf("skills = %+v, want whole-tree discovery to find some-skill", skills)
+	}
+	for _, s := range skipped {
+		if s.Path == "qvr.toml" {
+			t.Errorf("consumer-only qvr.toml must not surface a skip: %+v", s)
+		}
+	}
+}
+
+// TestBuildIndex_MalformedQvrTomlFallsBackToWholeTree: junk qvr.toml must
+// not silently mis-scope — the parse failure is surfaced as a skip and
+// discovery stays whole-tree.
+func TestBuildIndex_MalformedQvrTomlFallsBackToWholeTree(t *testing.T) {
+	mock := newMockGitClient()
+	mock.blobs["HEAD:qvr.toml"] = []byte("::: not toml {{{")
 	mock.blobs["HEAD:anywhere/some-skill/SKILL.md"] = skillMD("some-skill", "Discovered anyway.")
 
 	indexer := registry.NewIndexer(mock)
@@ -905,11 +929,11 @@ func TestBuildIndex_MalformedRegistryYamlFallsBackToWholeTree(t *testing.T) {
 	}
 	found := false
 	for _, s := range skipped {
-		if s.Path == "registry.yaml" && strings.Contains(s.Reason, "unparsable") {
+		if s.Path == "qvr.toml" && strings.Contains(s.Reason, "unparsable") {
 			found = true
 		}
 	}
 	if !found {
-		t.Errorf("skipped = %+v, want the registry.yaml parse-failure skip", skipped)
+		t.Errorf("skipped = %+v, want the qvr.toml parse-failure skip", skipped)
 	}
 }
