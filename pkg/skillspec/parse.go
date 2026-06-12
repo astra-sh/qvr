@@ -1,6 +1,7 @@
 package skillspec
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -21,12 +22,12 @@ var (
 // some upstream registries (e.g. claude-plugin marketplaces) ship. The exposed
 // Frontmatter type stays a flat string regardless of input shape.
 type rawFrontmatter struct {
-	Name          string            `yaml:"name"`
-	Description   string            `yaml:"description"`
-	License       string            `yaml:"license"`
-	Compatibility string            `yaml:"compatibility"`
-	Metadata      map[string]string `yaml:"metadata"`
-	AllowedTools  yaml.Node         `yaml:"allowed-tools"`
+	Name          string    `yaml:"name"`
+	Description   string    `yaml:"description"`
+	License       string    `yaml:"license"`
+	Compatibility string    `yaml:"compatibility"`
+	Metadata      yaml.Node `yaml:"metadata"`
+	AllowedTools  yaml.Node `yaml:"allowed-tools"`
 }
 
 // Parse parses a SKILL.md file content into a Skill struct.
@@ -83,6 +84,10 @@ func Parse(content string) (*Skill, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidYAML, err)
 	}
+	metadata, err := flattenMetadata(&raw.Metadata)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidYAML, err)
+	}
 
 	// YAML folded (`>`) and block (`|`) scalars append a trailing newline by
 	// default. That leaks into every downstream consumer (table output, info
@@ -93,7 +98,7 @@ func Parse(content string) (*Skill, error) {
 		Description:   strings.TrimSpace(raw.Description),
 		License:       strings.TrimSpace(raw.License),
 		Compatibility: strings.TrimSpace(raw.Compatibility),
-		Metadata:      raw.Metadata,
+		Metadata:      metadata,
 		AllowedTools:  allowed,
 	}
 
@@ -177,5 +182,97 @@ func flattenAllowedTools(node *yaml.Node) (string, error) {
 		return strings.Join(items, " "), nil
 	default:
 		return "", fmt.Errorf("allowed-tools must be a string or list of strings")
+	}
+}
+
+// flattenMetadata preserves qvr's public map[string]string API while accepting
+// richer YAML metadata blocks that appear in published skills. Scalar values are
+// kept as text. Nested mappings and lists become compact JSON strings so search,
+// info, and scanner paths can still inspect their visible contents.
+func flattenMetadata(node *yaml.Node) (map[string]string, error) {
+	if node == nil || node.Kind == 0 {
+		return nil, nil
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("metadata must be a mapping")
+	}
+
+	out := make(map[string]string, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		valueNode := node.Content[i+1]
+		if keyNode.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("metadata keys must be strings")
+		}
+		key := strings.TrimSpace(keyNode.Value)
+		if key == "" {
+			continue
+		}
+		value, err := metadataValueString(valueNode)
+		if err != nil {
+			return nil, err
+		}
+		if value != "" {
+			out[key] = value
+		}
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func metadataValueString(node *yaml.Node) (string, error) {
+	if node == nil || node.Kind == 0 {
+		return "", nil
+	}
+	if node.Kind == yaml.ScalarNode {
+		return strings.TrimSpace(node.Value), nil
+	}
+	value, err := metadataJSONValue(node)
+	if err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func metadataJSONValue(node *yaml.Node) (any, error) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		var value any
+		if err := node.Decode(&value); err == nil {
+			return value, nil
+		}
+		return node.Value, nil
+	case yaml.SequenceNode:
+		values := make([]any, 0, len(node.Content))
+		for _, child := range node.Content {
+			value, err := metadataJSONValue(child)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, value)
+		}
+		return values, nil
+	case yaml.MappingNode:
+		values := make(map[string]any, len(node.Content)/2)
+		for i := 0; i+1 < len(node.Content); i += 2 {
+			keyNode := node.Content[i]
+			if keyNode.Kind != yaml.ScalarNode {
+				return nil, fmt.Errorf("metadata keys must be strings")
+			}
+			value, err := metadataJSONValue(node.Content[i+1])
+			if err != nil {
+				return nil, err
+			}
+			values[keyNode.Value] = value
+		}
+		return values, nil
+	default:
+		return nil, fmt.Errorf("unsupported metadata value kind %d", node.Kind)
 	}
 }
