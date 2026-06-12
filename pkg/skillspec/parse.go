@@ -314,17 +314,27 @@ func isNullScalar(node *yaml.Node) bool {
 }
 
 func resolveMetadataAlias(node *yaml.Node, seen map[*yaml.Node]struct{}) (*yaml.Node, error) {
+	var visited []*yaml.Node
 	for node != nil && node.Kind == yaml.AliasNode {
 		if node.Alias == nil {
+			leaveMetadataNodes(visited, seen)
 			return nil, fmt.Errorf("metadata alias is empty")
 		}
 		if err := enterMetadataNode(node, seen); err != nil {
+			leaveMetadataNodes(visited, seen)
 			return nil, err
 		}
-		defer delete(seen, node)
+		visited = append(visited, node)
 		node = node.Alias
 	}
+	leaveMetadataNodes(visited, seen)
 	return node, nil
+}
+
+func leaveMetadataNodes(nodes []*yaml.Node, seen map[*yaml.Node]struct{}) {
+	for _, node := range nodes {
+		delete(seen, node)
+	}
 }
 
 func enterMetadataNode(node *yaml.Node, seen map[*yaml.Node]struct{}) error {
