@@ -3,8 +3,13 @@ name = 'skill-hub'
 version = '0.1.0'
 default-targets = ['claude']
 
+[registry]
+name = 'astra-sh/qvr'
+skills-dir = 'skills'
+
 [skills]
 'anthropics/skills/frontend-design' = 'main'
+'dammyjay93/interface-design/interface-design' = 'main'
 'github/awesome-copilot/create-readme' = 'main'
 'mattpocock/skills/diagnose' = 'main'
 'mattpocock/skills/grill-with-docs' = 'main'
@@ -12,7 +17,3 @@ default-targets = ['claude']
 'mattpocock/skills/tdd' = 'main'
 'mattpocock/skills/triage' = 'main'
 'mattpocock/skills/zoom-out' = 'main'
-
-[registry]
-name = 'astra-sh/qvr'
-skills-dir = 'skills'

@@ -71,6 +71,20 @@ scan = {reportSHA = 'sha256:9731f365fd9547a5777a48e2e0c006fb1724442fd1a41fd4366e
 provenance = {commitAuthor = 'Matt Pocock <mattpocockvoice@gmail.com>', signatureStatus = 'none'}
 
 [[skill]]
+name = 'interface-design'
+registry = 'dammyjay93/interface-design'
+source = 'https://github.com/Dammyjay93/interface-design.git'
+path = '.claude/skills/interface-design'
+ref = 'main'
+commit = '8c407c1c42890010a9eb403a9f419b1eeadcfdad'
+subtreeHash = 'sha256:e5eb3ab90cbf2e695ba205842612d332aa9d6fbebfa1c61f010eea569e782a56'
+treeOID = '3c1c18ac9f9732a8be68cb8504bf234fdafcf5c8'
+targets = ['claude']
+installedAt = 2026-06-11T23:30:56.704681Z
+scan = {reportSHA = 'sha256:1058909a9531663b08a61ed8d930a0ee67c8f5f05a3b75dfb50a350225a719b7', scannerVersion = '0.7.0', counts = {critical = 0, high = 1, medium = 0, low = 0, info = 0}, decision = 'allowed'}
+provenance = {commitAuthor = 'Oyindamola Akinleye <86404480+Dammyjay93@users.noreply.github.com>', signatureStatus = 'none'}
+
+[[skill]]
 name = 'tdd'
 registry = 'mattpocock/skills'
 source = 'https://github.com/mattpocock/skills.git'
