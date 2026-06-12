@@ -273,40 +273,48 @@ func metadataJSONValueWithAliases(node *yaml.Node, seen map[*yaml.Node]struct{})
 		}
 		return node.Value, nil
 	case yaml.SequenceNode:
-		if err := enterMetadataNode(node, seen); err != nil {
-			return nil, err
-		}
-		defer delete(seen, node)
-		values := make([]any, 0, len(node.Content))
-		for _, child := range node.Content {
-			value, err := metadataJSONValueWithAliases(child, seen)
-			if err != nil {
-				return nil, err
-			}
-			values = append(values, value)
-		}
-		return values, nil
+		return metadataJSONSequence(node, seen)
 	case yaml.MappingNode:
-		if err := enterMetadataNode(node, seen); err != nil {
-			return nil, err
-		}
-		defer delete(seen, node)
-		values := make(map[string]any, len(node.Content)/2)
-		for i := 0; i+1 < len(node.Content); i += 2 {
-			keyNode := node.Content[i]
-			if keyNode.Kind != yaml.ScalarNode {
-				return nil, fmt.Errorf("metadata keys must be strings")
-			}
-			value, err := metadataJSONValueWithAliases(node.Content[i+1], seen)
-			if err != nil {
-				return nil, err
-			}
-			values[keyNode.Value] = value
-		}
-		return values, nil
+		return metadataJSONMapping(node, seen)
 	default:
 		return nil, fmt.Errorf("unsupported metadata value kind %d", node.Kind)
 	}
+}
+
+func metadataJSONSequence(node *yaml.Node, seen map[*yaml.Node]struct{}) (any, error) {
+	if err := enterMetadataNode(node, seen); err != nil {
+		return nil, err
+	}
+	defer delete(seen, node)
+	values := make([]any, 0, len(node.Content))
+	for _, child := range node.Content {
+		value, err := metadataJSONValueWithAliases(child, seen)
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, nil
+}
+
+func metadataJSONMapping(node *yaml.Node, seen map[*yaml.Node]struct{}) (any, error) {
+	if err := enterMetadataNode(node, seen); err != nil {
+		return nil, err
+	}
+	defer delete(seen, node)
+	values := make(map[string]any, len(node.Content)/2)
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		keyNode := node.Content[i]
+		if keyNode.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("metadata keys must be strings")
+		}
+		value, err := metadataJSONValueWithAliases(node.Content[i+1], seen)
+		if err != nil {
+			return nil, err
+		}
+		values[keyNode.Value] = value
+	}
+	return values, nil
 }
 
 func isNullScalar(node *yaml.Node) bool {

@@ -313,9 +313,9 @@ Body.
 
 func TestParse_NestedMetadata(t *testing.T) {
 	content := `---
-name: tweetclaw
-description: X/Twitter automation workflows.
-metadata: {"openclaw":{"tags":["twitter","x","tweet-scraper"],"primaryEnv":"XQUIK_API_KEY","envVars":[{"name":"XQUIK_API_KEY","required":false}]}}
+name: example-skill
+description: Example automation workflow.
+metadata: {"runtime":{"tags":["research","automation","source-context"],"primaryEnv":"API_KEY","envVars":[{"name":"API_KEY","required":false}]}}
 ---
 
 Body.
@@ -324,31 +324,31 @@ Body.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got := s.Frontmatter.Metadata["openclaw"]
+	got := s.Frontmatter.Metadata["runtime"]
 	for _, want := range []string{
-		`"primaryEnv":"XQUIK_API_KEY"`,
-		`"tags":["twitter","x","tweet-scraper"]`,
-		`"envVars":[{"name":"XQUIK_API_KEY","required":false}]`,
+		`"primaryEnv":"API_KEY"`,
+		`"tags":["research","automation","source-context"]`,
+		`"envVars":[{"name":"API_KEY","required":false}]`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("metadata.openclaw = %q, want substring %q", got, want)
+			t.Errorf("metadata.runtime = %q, want substring %q", got, want)
 		}
 	}
 }
 
 func TestParse_BlockStyleNestedMetadata(t *testing.T) {
 	content := `---
-name: tweetclaw
-description: X/Twitter automation workflows.
+name: example-skill
+description: Example automation workflow.
 metadata:
-  openclaw:
+  runtime:
     tags:
-      - twitter
-      - x
-      - tweet-scraper
-    primaryEnv: XQUIK_API_KEY
+      - research
+      - automation
+      - source-context
+    primaryEnv: API_KEY
     envVars:
-      - name: XQUIK_API_KEY
+      - name: API_KEY
         required: false
 ---
 
@@ -358,14 +358,14 @@ Body.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	got := s.Frontmatter.Metadata["openclaw"]
+	got := s.Frontmatter.Metadata["runtime"]
 	for _, want := range []string{
-		`"primaryEnv":"XQUIK_API_KEY"`,
-		`"tags":["twitter","x","tweet-scraper"]`,
-		`"envVars":[{"name":"XQUIK_API_KEY","required":false}]`,
+		`"primaryEnv":"API_KEY"`,
+		`"tags":["research","automation","source-context"]`,
+		`"envVars":[{"name":"API_KEY","required":false}]`,
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("metadata.openclaw = %q, want substring %q", got, want)
+			t.Errorf("metadata.runtime = %q, want substring %q", got, want)
 		}
 	}
 }
@@ -394,12 +394,12 @@ name: aliased-metadata
 description: Metadata values may use YAML anchors.
 metadata:
   tags: &tags
-    - twitter
-    - x
+    - research
+    - automation
   searchTags: *tags
   config: &config
-    primaryEnv: XQUIK_API_KEY
-  openclaw: *config
+    primaryEnv: API_KEY
+  runtime: *config
 ---
 
 Body.
@@ -408,11 +408,11 @@ Body.
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := s.Frontmatter.Metadata["searchTags"]; got != `["twitter","x"]` {
+	if got := s.Frontmatter.Metadata["searchTags"]; got != `["research","automation"]` {
 		t.Errorf("metadata.searchTags = %q", got)
 	}
-	if got := s.Frontmatter.Metadata["openclaw"]; got != `{"primaryEnv":"XQUIK_API_KEY"}` {
-		t.Errorf("metadata.openclaw = %q", got)
+	if got := s.Frontmatter.Metadata["runtime"]; got != `{"primaryEnv":"API_KEY"}` {
+		t.Errorf("metadata.runtime = %q", got)
 	}
 }
 

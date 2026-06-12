@@ -92,9 +92,9 @@ metadata:
   author: example-org
   version: "1.0"
   homepage: https://github.com/example-org/skills
-  openclaw:
-    tags: ["twitter", "automation"]
-    primaryEnv: XQUIK_API_KEY
+  runtime:
+    tags: ["research", "automation"]
+    primaryEnv: API_KEY
 ```
 
 ### `allowed-tools` (Optional, Experimental)
