@@ -111,6 +111,12 @@ type Store interface {
 	// identity its spans carried — the lineage data. f.Skill is required.
 	SkillVersionRollup(ctx context.Context, f *MetricsFilter) ([]*SkillVersionUsage, error)
 
+	// PutLockSnapshots freezes a session's ingest-time proven identities
+	// (write-once per session+skill). GetLockSnapshots reads them back keyed
+	// by skill name. See migration 0005.
+	PutLockSnapshots(ctx context.Context, sessionID uuid.UUID, rows []*LockSnapshotRow) error
+	GetLockSnapshots(ctx context.Context, sessionID uuid.UUID) (map[string]*LockSnapshotRow, error)
+
 	// DeleteRawBefore sweeps raw rows captured before cutoff. Returns the
 	// number of rows deleted.
 	DeleteRawBefore(ctx context.Context, cutoff time.Time) (int64, error)
