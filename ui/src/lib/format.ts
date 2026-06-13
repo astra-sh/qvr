@@ -50,6 +50,17 @@ export function fmtCountWhole(n?: number): string {
   return `${Math.round(n / 1_000_000)}m`;
 }
 
+// fmtTokenPair renders "in / out" token totals, honest about absence: both
+// sides missing means the agent's store reported no usage → "n/a" (never 0,
+// which would poison cross-agent comparisons); a one-sided report (copilot
+// records only output per turn) shows "—" on the missing side; a genuine 0
+// renders as 0.
+export function fmtTokenPair(tin?: number, tout?: number): string {
+  if (tin == null && tout == null) return "n/a";
+  const side = (v?: number) => (v == null ? "—" : fmtCount(v));
+  return `${side(tin)} / ${side(tout)}`;
+}
+
 // fmtShare renders a 0..1 share as a percentage ("95%").
 export function fmtShare(x?: number): string {
   if (x == null || isNaN(x)) return "—";

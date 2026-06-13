@@ -40,6 +40,21 @@ type opencodeMessageData struct {
 		ProviderID string `json:"providerID"`
 		ModelID    string `json:"modelID"`
 	} `json:"model"`
+	Tokens *opencodeTokens `json:"tokens"` // assistant rows; pointer: absence ≠ 0
+}
+
+// opencodeTokens is an assistant message's usage record (observed live,
+// 2026-06-12): total = input + output + reasoning + cache.read + cache.write,
+// i.e. input EXCLUDES the cache counts, so they fold into the input total;
+// reasoning bills output-side.
+type opencodeTokens struct {
+	Input     int `json:"input"`
+	Output    int `json:"output"`
+	Reasoning int `json:"reasoning"`
+	Cache     struct {
+		Read  int `json:"read"`
+		Write int `json:"write"`
+	} `json:"cache"`
 }
 
 // opencodePartData is the part row's data JSON.
@@ -82,6 +97,13 @@ func (opencodeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 				roles[row.ID] = d.Role
 				if d.Model != nil && d.Model.ModelID != "" {
 					w.setModel(strings.TrimPrefix(d.Model.ProviderID+"/"+d.Model.ModelID, "/"))
+				}
+				if d.Tokens != nil && normType(d.Role) == "assistant" {
+					w.ensure(row.TimeCreated)
+					tok := d.Tokens
+					w.cur.addUsage(tok.Input+tok.Cache.Read+tok.Cache.Write, tok.Output+tok.Reasoning)
+					w.cur.addCacheRead(tok.Cache.Read)
+					w.cur.addCacheCreation(tok.Cache.Write)
 				}
 			}
 		case "part":

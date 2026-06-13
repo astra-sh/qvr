@@ -31,7 +31,18 @@ import (
 // this skill:" line (observed in real session stores, 2026-06-11) plus the
 // universal path signal over tool calls; isMeta lines no longer fabricate
 // turns.
-const Version = 6
+// v7: honest token accounting — gen_ai.usage.* attributes are emitted only
+// when the native store reported usage (absence ≠ 0, so token-less agents
+// derive to n/a, never a fabricated zero); cache sub-splits
+// (gen_ai.usage.cache_read_input_tokens / cache_creation_input_tokens) where
+// the format distinguishes them; SessionMeta carries session token totals
+// (from spans, or natively for stores that report only session-level usage).
+// claude usage dedupes by message id (per-block lines repeat the same id and
+// usage — summing per line inflated tokens ~2×), and gemini's polymorphic
+// resultDisplay (string OR object) no longer drops the whole item. Dispatch
+// is also mixed-agent safe: the majority transcript agent owns the session,
+// so a stale external writer's foreign rows can't blank it.
+const Version = 7
 
 // KindSkill is the Quiver span category for a skill load/invocation within a
 // turn. It exists so the trace makes skill usage a first-class, queryable stage
@@ -62,6 +73,12 @@ type SessionMeta struct {
 	Turns           int64  // LLM span count
 	Tools           int64  // TOOL span count
 	Skills          []string
+	// Session token totals. nil = the native store reported no usage on that
+	// side (rendered n/a, never 0). Filled from the spans' gen_ai.usage.*
+	// attributes; a deriver sets them directly when its store reports usage
+	// only at session level (hermes, copilot), and a deriver-set value wins.
+	TokensIn  *int64
+	TokensOut *int64
 }
 
 // Derivation is one session's full derived projection: the unified meta plus
@@ -114,10 +131,16 @@ func canonicalAgent(name string) string {
 	return name
 }
 
-// DeriveSession derives one session's projection from its rows. The agent is
-// taken from the first row; an empty slice yields nil. Returns an error only
-// if no deriver is registered for the agent.
+// DeriveSession derives one session's projection from its rows. The session's
+// agent is the DOMINANT transcript agent, not simply the first row's: a stale
+// external writer can inject rows under another agent name into the same
+// session id, and dispatching on the first row would run the wrong deriver
+// against the wrong record shapes (observed live, 2026-06-12: a foreign
+// writer's rows in a session derived it to zero spans). Rows from other
+// agents are excluded from derivation; raw capture stays untouched. An empty
+// slice yields nil. Returns an error only if no deriver is registered.
 func DeriveSession(rows []*ops.RawTrace) (*Derivation, error) {
+	rows = dominantAgentRows(rows)
 	if len(rows) == 0 {
 		return nil, nil
 	}
@@ -137,6 +160,43 @@ func DeriveSession(rows []*ops.RawTrace) (*Derivation, error) {
 	return out, nil
 }
 
+// dominantAgentRows reduces a possibly mixed-agent session to its real
+// agent's rows: the agent (by canonical name, so legacy aliases collapse)
+// with the most TRANSCRIPT rows wins — transcript rows are the session's
+// substance; hook payloads don't vote. Ties break to the agent seen first,
+// keeping the choice deterministic for a given row order. A single-agent
+// session passes through unchanged.
+func dominantAgentRows(rows []*ops.RawTrace) []*ops.RawTrace {
+	counts := map[string]int{}
+	var order []string
+	for _, r := range rows {
+		if r.Source != ops.RawSourceTranscript {
+			continue
+		}
+		c := canonicalAgent(r.AgentName)
+		if _, seen := counts[c]; !seen {
+			order = append(order, c)
+		}
+		counts[c]++
+	}
+	if len(counts) <= 1 {
+		return rows
+	}
+	winner := order[0]
+	for _, c := range order[1:] {
+		if counts[c] > counts[winner] {
+			winner = c
+		}
+	}
+	out := make([]*ops.RawTrace, 0, len(rows))
+	for _, r := range rows {
+		if canonicalAgent(r.AgentName) == winner {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // finalizeMeta fills every SessionMeta field derivable generically from the
 // rows and spans, leaving any format-specific value a deriver already set
 // (e.g. GitBranch) untouched. Keeping this shared is what lets per-agent
@@ -150,6 +210,7 @@ func finalizeMeta(d *Derivation, rows []*ops.RawTrace) {
 		m.Title = firstPromptFromSpans(d.Spans, titleDefaultMaxLen)
 	}
 	fillMetaFromSpans(m, d.Spans)
+	fillMetaTokens(m, d.Spans)
 	// Formats without in-file timestamps derive zero time bounds; fall back to
 	// the capture times so the session still buckets into the right day.
 	if m.StartedMs == 0 && len(rows) > 0 {
@@ -204,6 +265,47 @@ func fillMetaFromSpans(m *SessionMeta, spans []Span) {
 			m.Skills = append(m.Skills, name)
 		}
 	}
+}
+
+// fillMetaTokens accumulates the session token totals from the LLM spans'
+// usage attributes. Each side stays nil unless ≥1 span carried it (absence ≠
+// 0), and a deriver-set value wins — stores that report usage only at session
+// level (hermes, copilot input) set the totals natively.
+func fillMetaTokens(m *SessionMeta, spans []Span) {
+	var in, out *int64
+	for _, sp := range spans {
+		if sp.Kind != KindLLM {
+			continue
+		}
+		addAttrTokens(&in, sp.Attributes["gen_ai.usage.input_tokens"])
+		addAttrTokens(&out, sp.Attributes["gen_ai.usage.output_tokens"])
+	}
+	if m.TokensIn == nil {
+		m.TokensIn = in
+	}
+	if m.TokensOut == nil {
+		m.TokensOut = out
+	}
+}
+
+// addAttrTokens folds one span's token attribute value into a running
+// nullable sum; an absent attribute leaves the sum untouched (and nil).
+func addAttrTokens(sum **int64, v any) {
+	var n int64
+	switch t := v.(type) {
+	case int:
+		n = int64(t)
+	case int64:
+		n = t
+	case float64:
+		n = int64(t)
+	default:
+		return
+	}
+	if *sum == nil {
+		*sum = new(int64)
+	}
+	**sum += n
 }
 
 // --- deterministic id helpers ---

@@ -41,22 +41,23 @@ type skillMetricsHeadline struct {
 // present in spans but no longer installed still appear (installed:false) —
 // history stays honest.
 type skillMetricsRow struct {
-	Name          string     `json:"name"`
-	Installed     bool       `json:"installed"`
-	Registry      string     `json:"registry,omitempty"`
-	Ref           string     `json:"ref,omitempty"`
-	Commit        string     `json:"commit,omitempty"`
-	Disabled      bool       `json:"disabled,omitempty"`
-	Gate          string     `json:"gate,omitempty"` // recorded scan decision
-	InstalledAt   *time.Time `json:"installedAt,omitempty"`
-	Invocations   int64      `json:"invocations"`
-	Sessions      int64      `json:"sessions"`
-	Versions      []string   `json:"versions,omitempty"` // distinct observed versions; absent = unknown
-	FirstFired    *time.Time `json:"firstFired,omitempty"`
-	LastFired     *time.Time `json:"lastFired,omitempty"`
-	TokensIn      int64      `json:"tokensIn"`
-	TokensOut     int64      `json:"tokensOut"`
-	TokenSessions int64      `json:"tokenSessions"`
+	Name        string     `json:"name"`
+	Installed   bool       `json:"installed"`
+	Registry    string     `json:"registry,omitempty"`
+	Ref         string     `json:"ref,omitempty"`
+	Commit      string     `json:"commit,omitempty"`
+	Disabled    bool       `json:"disabled,omitempty"`
+	Gate        string     `json:"gate,omitempty"` // recorded scan decision
+	InstalledAt *time.Time `json:"installedAt,omitempty"`
+	Invocations int64      `json:"invocations"`
+	Sessions    int64      `json:"sessions"`
+	Versions    []string   `json:"versions,omitempty"` // distinct observed versions; absent = unknown
+	FirstFired  *time.Time `json:"firstFired,omitempty"`
+	LastFired   *time.Time `json:"lastFired,omitempty"`
+	// Session-attributed token totals; absent = no usage reported (n/a).
+	TokensIn      *int64 `json:"tokensIn,omitempty"`
+	TokensOut     *int64 `json:"tokensOut,omitempty"`
+	TokenSessions int64  `json:"tokenSessions"`
 }
 
 type skillMetricsResponse struct {
@@ -239,12 +240,16 @@ type skillReportTotals struct {
 
 // skillReportAgent is one agent's cut. Versions is the distinct observed
 // versions this agent's invocations carried; empty renders as "unknown".
+// Tokens are session-attributed within the cut; absent = no usage reported.
 type skillReportAgent struct {
-	Agent       string     `json:"agent"`
-	Invocations int64      `json:"invocations"`
-	Versions    []string   `json:"versions,omitempty"`
-	Sessions    int64      `json:"sessions"`
-	LastFired   *time.Time `json:"lastFired,omitempty"`
+	Agent         string     `json:"agent"`
+	Invocations   int64      `json:"invocations"`
+	Versions      []string   `json:"versions,omitempty"`
+	Sessions      int64      `json:"sessions"`
+	LastFired     *time.Time `json:"lastFired,omitempty"`
+	TokensIn      *int64     `json:"tokensIn,omitempty"`
+	TokensOut     *int64     `json:"tokensOut,omitempty"`
+	TokenSessions int64      `json:"tokenSessions"`
 }
 
 type skillReportSeriesPoint struct {
@@ -254,18 +259,23 @@ type skillReportSeriesPoint struct {
 }
 
 // skillReportModel is one model the skill fired under — the skill × model
-// performance cut ("this skill on opus vs on fable").
+// performance cut ("this skill on opus vs on fable"). Token semantics match
+// the store rollup: models overlap, so per-model tokens are exposure, not
+// exclusive cost; absent = no usage reported.
 type skillReportModel struct {
-	Model       string     `json:"model"`
-	Invocations int64      `json:"invocations"`
-	Sessions    int64      `json:"sessions"`
-	LastFired   *time.Time `json:"lastFired,omitempty"`
+	Model         string     `json:"model"`
+	Invocations   int64      `json:"invocations"`
+	Sessions      int64      `json:"sessions"`
+	LastFired     *time.Time `json:"lastFired,omitempty"`
+	TokensIn      *int64     `json:"tokensIn,omitempty"`
+	TokensOut     *int64     `json:"tokensOut,omitempty"`
+	TokenSessions int64      `json:"tokenSessions"`
 }
 
 type skillReportTokens struct {
-	Sessions int64 `json:"sessions"`
-	Input    int64 `json:"input"`
-	Output   int64 `json:"output"`
+	Sessions int64  `json:"sessions"`
+	Input    *int64 `json:"input,omitempty"` // absent = no usage reported (n/a)
+	Output   *int64 `json:"output,omitempty"`
 }
 
 // skillReportVersion is one (ref, commit) the skill fired as — the lineage
@@ -278,8 +288,8 @@ type skillReportVersion struct {
 	Sessions    int64      `json:"sessions"`
 	FirstFired  *time.Time `json:"firstFired,omitempty"`
 	LastFired   *time.Time `json:"lastFired,omitempty"`
-	TokensIn    int64      `json:"tokensIn"`
-	TokensOut   int64      `json:"tokensOut"`
+	TokensIn    *int64     `json:"tokensIn,omitempty"` // absent = no usage reported
+	TokensOut   *int64     `json:"tokensOut,omitempty"`
 	Current     bool       `json:"current,omitempty"`
 }
 
@@ -404,11 +414,14 @@ func (s *uiServer) fillReportCuts(ctx context.Context, resp *skillReportResponse
 	if agents, err := s.store.SkillAgentRollup(ctx, f); err == nil {
 		for _, a := range agents {
 			resp.Agents = append(resp.Agents, skillReportAgent{
-				Agent:       a.Agent,
-				Invocations: a.Invocations,
-				Versions:    a.Versions,
-				Sessions:    a.Sessions,
-				LastFired:   msToTimePtr(a.LastFiredMs),
+				Agent:         a.Agent,
+				Invocations:   a.Invocations,
+				Versions:      a.Versions,
+				Sessions:      a.Sessions,
+				LastFired:     msToTimePtr(a.LastFiredMs),
+				TokensIn:      a.InputTokens,
+				TokensOut:     a.OutputTokens,
+				TokenSessions: a.TokenSessions,
 			})
 		}
 	}
@@ -419,10 +432,13 @@ func (s *uiServer) fillReportCuts(ctx context.Context, resp *skillReportResponse
 				label = "(unknown)"
 			}
 			resp.Models = append(resp.Models, skillReportModel{
-				Model:       label,
-				Invocations: m.Invocations,
-				Sessions:    m.Sessions,
-				LastFired:   msToTimePtr(m.LastFiredMs),
+				Model:         label,
+				Invocations:   m.Invocations,
+				Sessions:      m.Sessions,
+				LastFired:     msToTimePtr(m.LastFiredMs),
+				TokensIn:      m.InputTokens,
+				TokensOut:     m.OutputTokens,
+				TokenSessions: m.TokenSessions,
 			})
 		}
 	}

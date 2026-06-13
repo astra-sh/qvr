@@ -30,8 +30,12 @@ type SessionMetaRow struct {
 	Turns           int64     `json:"turns"`
 	Tools           int64     `json:"tools"`
 	Skills          []string  `json:"skills,omitempty"` // distinct skill names, first-use order
-	DeriverVersion  int       `json:"deriver_version"`
-	DerivedAt       time.Time `json:"derived_at"`
+	// Session token totals. nil = the native store reported no usage on that
+	// side (serialized as absent, rendered n/a — never 0).
+	TokensIn       *int64    `json:"tokens_in,omitempty"`
+	TokensOut      *int64    `json:"tokens_out,omitempty"`
+	DeriverVersion int       `json:"deriver_version"`
+	DerivedAt      time.Time `json:"derived_at"`
 }
 
 // SessionMetaFilter scopes ListSessionMeta. Nil/zero fields are ignored.
@@ -47,17 +51,34 @@ type SessionMetaFilter struct {
 	SkillsOnly bool
 	Dirs       []string // working_directory ∈ Dirs (empty = all)
 	Limit      int
+	// SortByTokens orders by total session tokens descending (NULLs last —
+	// sessions whose store reported no usage sort below a genuine 0) instead
+	// of newest-first. Server-side because Limit truncates: a client-side
+	// sort over a truncated page can't find the maximum.
+	SortByTokens bool
 }
 
 const sessionMetaColumns = `session_id, agent_name, source_session_id, source_path,
   working_directory, git_branch, model, title, started_ms, ended_ms,
-  turns, tools, skills, deriver_version, derived_at`
+  turns, tools, skills, tokens_in, tokens_out, deriver_version, derived_at`
+
+// sessionMetaColumnsLegacy reads a DB that predates migration 0006 (opened
+// read-only by `qvr ui --no-discover`, so the migration can't apply): the
+// token columns come back as NULL (n/a) instead of failing the whole list.
+const sessionMetaColumnsLegacy = `session_id, agent_name, source_session_id, source_path,
+  working_directory, git_branch, model, title, started_ms, ended_ms,
+  turns, tools, skills, NULL, NULL, deriver_version, derived_at`
+
+// staleTokensSchema reports the pre-0006 "tokens columns missing" condition.
+func staleTokensSchema(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such column: tokens_in")
+}
 
 const upsertSessionMetaSQL = `INSERT OR REPLACE INTO session_meta(
   session_id, agent_name, source_session_id, source_path, working_directory,
   git_branch, model, title, started_ms, ended_ms, turns, tools, skills,
-  deriver_version, derived_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  tokens_in, tokens_out, deriver_version, derived_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // ReplaceSessionDerivation atomically replaces a session's whole derived
 // projection — its session_meta row and all its spans — in one tx. This is the
@@ -93,6 +114,7 @@ func (s *sqliteStore) ReplaceSessionDerivation(ctx context.Context, meta *Sessio
 		nullableString(meta.WorkingDir), nullableString(meta.GitBranch),
 		nullableString(meta.Model), nullableString(meta.Title),
 		meta.StartedMs, meta.EndedMs, meta.Turns, meta.Tools, skills,
+		nullableInt64(meta.TokensIn), nullableInt64(meta.TokensOut),
 		meta.DeriverVersion, meta.DerivedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("store: upsert session meta: %w", err)
@@ -100,14 +122,34 @@ func (s *sqliteStore) ReplaceSessionDerivation(ctx context.Context, meta *Sessio
 	return tx.Commit()
 }
 
-// ListSessionMeta returns unified session rows newest-first (by start time).
+// ListSessionMeta returns unified session rows newest-first (by start time),
+// or by total tokens when the filter asks for it.
 func (s *sqliteStore) ListSessionMeta(ctx context.Context, f *SessionMetaFilter) ([]*SessionMetaRow, error) {
+	out, err := s.listSessionMeta(ctx, f, false)
+	if staleTokensSchema(err) {
+		return s.listSessionMeta(ctx, f, true)
+	}
+	return out, err
+}
+
+func (s *sqliteStore) listSessionMeta(ctx context.Context, f *SessionMetaFilter, legacy bool) ([]*SessionMetaRow, error) {
 	where, args := sessionMetaWhere(f)
-	q := `SELECT ` + sessionMetaColumns + ` FROM session_meta`
+	cols := sessionMetaColumns
+	if legacy {
+		cols = sessionMetaColumnsLegacy
+	}
+	q := `SELECT ` + cols + ` FROM session_meta`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
-	q += " ORDER BY started_ms DESC"
+	// On a legacy schema a token sort degrades to the default order — every
+	// row's tokens read n/a, so there is no token order to honor.
+	if f != nil && f.SortByTokens && !legacy {
+		q += ` ORDER BY (tokens_in IS NULL AND tokens_out IS NULL),
+		  (COALESCE(tokens_in,0)+COALESCE(tokens_out,0)) DESC, started_ms DESC`
+	} else {
+		q += " ORDER BY started_ms DESC"
+	}
 	if f != nil && f.Limit > 0 {
 		q += " LIMIT ?"
 		args = append(args, f.Limit)
@@ -132,8 +174,16 @@ func (s *sqliteStore) ListSessionMeta(ctx context.Context, f *SessionMetaFilter)
 
 // GetSessionMeta returns one session's unified row, or nil when absent.
 func (s *sqliteStore) GetSessionMeta(ctx context.Context, sessionID uuid.UUID) (*SessionMetaRow, error) {
+	m, err := s.getSessionMeta(ctx, sessionID, sessionMetaColumns)
+	if staleTokensSchema(err) {
+		return s.getSessionMeta(ctx, sessionID, sessionMetaColumnsLegacy)
+	}
+	return m, err
+}
+
+func (s *sqliteStore) getSessionMeta(ctx context.Context, sessionID uuid.UUID, cols string) (*SessionMetaRow, error) {
 	row := s.db.QueryRowContext(ctx,
-		`SELECT `+sessionMetaColumns+` FROM session_meta WHERE session_id = ?`,
+		`SELECT `+cols+` FROM session_meta WHERE session_id = ?`,
 		sessionID.String())
 	m, err := scanSessionMeta(row)
 	if err != nil {
@@ -187,13 +237,17 @@ func scanSessionMeta(row interface{ Scan(...any) error }) (*SessionMetaRow, erro
 		sid                            string
 		srcSession, srcPath, wd        sql.NullString
 		branch, model, title, skillsJS sql.NullString
+		tokensIn, tokensOut            sql.NullInt64
 		derivedAt                      time.Time
 	)
 	if err := row.Scan(&sid, &m.AgentName, &srcSession, &srcPath, &wd,
 		&branch, &model, &title, &m.StartedMs, &m.EndedMs,
-		&m.Turns, &m.Tools, &skillsJS, &m.DeriverVersion, &derivedAt); err != nil {
+		&m.Turns, &m.Tools, &skillsJS, &tokensIn, &tokensOut,
+		&m.DeriverVersion, &derivedAt); err != nil {
 		return nil, fmt.Errorf("store: scan session meta: %w", err)
 	}
+	m.TokensIn = nullInt64Ptr(tokensIn)
+	m.TokensOut = nullInt64Ptr(tokensOut)
 	id, err := uuid.Parse(sid)
 	if err != nil {
 		return nil, fmt.Errorf("store: bad session_meta session_id %q: %w", sid, err)

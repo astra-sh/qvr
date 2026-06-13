@@ -16,7 +16,7 @@ import {
   Tag,
   VersionTag,
 } from "../components/qvr";
-import { fmtEpochMs, fmtMs, fmtTime, prettyJSON, short } from "../lib/format";
+import { fmtCount, fmtEpochMs, fmtMs, fmtTime, prettyJSON, short } from "../lib/format";
 import { spanKindTone } from "../lib/tones";
 
 type View = "spans" | "raw";
@@ -92,8 +92,12 @@ export default function SessionDetail() {
 
 interface ParsedAttrs {
   model?: string;
+  // Usage attrs exist only when the agent's store reported them (absence ≠ 0).
+  // inTokens is the TOTAL including cache; the cache fields are its sub-split.
   inTokens?: number;
   outTokens?: number;
+  cacheRead?: number;
+  cacheCreation?: number;
   prompt?: string;
   output?: string;
   toolName?: string;
@@ -130,6 +134,8 @@ function parseAttrs(raw: string): ParsedAttrs {
     model: str("gen_ai.request.model"),
     inTokens: num("gen_ai.usage.input_tokens"),
     outTokens: num("gen_ai.usage.output_tokens"),
+    cacheRead: num("gen_ai.usage.cache_read_input_tokens"),
+    cacheCreation: num("gen_ai.usage.cache_creation_input_tokens"),
     prompt: firstMessage("gen_ai.input.messages"),
     output: firstMessage("gen_ai.output.messages"),
     toolName: str("gen_ai.tool.name"),
@@ -217,11 +223,7 @@ function TurnCard({ turn, index }: { turn: Turn; index: number }) {
         </span>
         <Badge tone={spanKindTone("LLM")}>LLM</Badge>
         <span className="qvr-card__title">{a.model || "chat"}</span>
-        {(a.inTokens != null || a.outTokens != null) && (
-          <span className="qvr-scan__scanner">
-            {a.inTokens ?? 0} in / {a.outTokens ?? 0} out tok
-          </span>
-        )}
+        <TurnTokens a={a} />
         {dur > 0 && <span className="qvr-scan__scanner">{fmtMs(dur)}</span>}
       </div>
       <div className="qvr-card__body" style={{ display: "grid", gap: 12 }}>
@@ -236,6 +238,27 @@ function TurnCard({ turn, index }: { turn: Turn; index: number }) {
         )}
       </div>
     </div>
+  );
+}
+
+// TurnTokens renders the turn's usage, honest about absence: a store that
+// reported nothing reads "tokens n/a" (never 0); a one-sided report (copilot
+// records only output per turn) shows "—" on the missing side; the cached
+// share of the input rides inline, with cache writes in the tooltip.
+function TurnTokens({ a }: { a: ParsedAttrs }) {
+  if (a.inTokens == null && a.outTokens == null) {
+    return <span className="qvr-scan__scanner qvr-table__muted">tokens n/a</span>;
+  }
+  const inSide =
+    a.inTokens == null
+      ? "—"
+      : `${fmtCount(a.inTokens)}${a.cacheRead ? ` (${fmtCount(a.cacheRead)} cached)` : ""}`;
+  const outSide = a.outTokens == null ? "—" : fmtCount(a.outTokens);
+  const title = a.cacheCreation ? `cache writes: ${fmtCount(a.cacheCreation)}` : undefined;
+  return (
+    <span className="qvr-scan__scanner" title={title}>
+      {inSide} in / {outSide} out tok
+    </span>
   );
 }
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/astra-sh/qvr/internal/config"
 	"github.com/astra-sh/qvr/internal/ops"
+	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
 )
@@ -53,7 +54,16 @@ func seedVerifiedMetricsSession(t *testing.T, projectRoot string) uuid.UUID {
 			Attributes: `{"skill.name":"code-reviewer","skill.verified":true,"skill.commit":"a1b2c3d4567","skill.version":"v1.2.0"}`,
 		},
 	}
-	if err := st.ReplaceSessionSpans(ctx, sessionID, rows); err != nil {
+	// Meta rides with the spans, as persistDerivation always writes it: the
+	// token rollups read the session totals from session_meta.
+	tin, tout := int64(100), int64(40)
+	meta := &store.SessionMetaRow{
+		SessionID: sessionID, AgentName: "claude", WorkingDir: projectRoot,
+		Title: "review this", StartedMs: startMs, EndedMs: startMs + 1000,
+		Turns: 1, Skills: []string{"code-reviewer"},
+		TokensIn: &tin, TokensOut: &tout, DeriverVersion: derive.Version,
+	}
+	if err := st.ReplaceSessionDerivation(ctx, meta, rows); err != nil {
 		t.Fatalf("seed spans: %v", err)
 	}
 	return sessionID
@@ -113,8 +123,9 @@ func assertMetricsRows(t *testing.T, skills []skillMetricsRow) {
 	}
 	// Token join: both sessions' LLM usage sums (5+100 in, 2+40 out), counted
 	// once per session regardless of how many skill spans the session carried.
-	if cr.TokensIn != 105 || cr.TokensOut != 42 {
-		t.Errorf("code-reviewer tokens = %d/%d, want 105/42", cr.TokensIn, cr.TokensOut)
+	// Pointers: nil would mean "no usage reported" (n/a).
+	if cr.TokensIn == nil || cr.TokensOut == nil || *cr.TokensIn != 105 || *cr.TokensOut != 42 {
+		t.Errorf("code-reviewer tokens = %v/%v, want 105/42", cr.TokensIn, cr.TokensOut)
 	}
 	vs, ok := rows["valid-skill"]
 	if !ok {
@@ -188,8 +199,24 @@ func assertReportMetrics(t *testing.T, resp *skillReportResponse) {
 	if len(resp.Series) == 0 {
 		t.Errorf("series empty, want day buckets")
 	}
-	if resp.Tokens.Input != 105 || resp.Tokens.Output != 42 {
-		t.Errorf("tokens = %d/%d, want 105/42", resp.Tokens.Input, resp.Tokens.Output)
+	if resp.Tokens.Input == nil || resp.Tokens.Output == nil ||
+		*resp.Tokens.Input != 105 || *resp.Tokens.Output != 42 {
+		t.Errorf("tokens = %v/%v, want 105/42", resp.Tokens.Input, resp.Tokens.Output)
+	}
+	if len(resp.Agents) == 1 {
+		assertAgentTokens(t, resp.Agents[0])
+	}
+}
+
+// assertAgentTokens checks the agents-panel cut carries the same
+// session-attributed totals as the aggregate card (single-agent fixture).
+func assertAgentTokens(t *testing.T, a skillReportAgent) {
+	t.Helper()
+	if a.TokensIn == nil || a.TokensOut == nil || *a.TokensIn != 105 || *a.TokensOut != 42 {
+		t.Errorf("agent tokens = %v/%v, want 105/42", a.TokensIn, a.TokensOut)
+	}
+	if a.TokenSessions != 2 {
+		t.Errorf("agent tokenSessions = %d, want 2", a.TokenSessions)
 	}
 }
 

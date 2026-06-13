@@ -42,6 +42,15 @@ type hermesFlatRow struct {
 	ToolCalls  []hermesToolCall `json:"tool_calls"`
 	ToolCallID string           `json:"tool_call_id"`
 	Timestamp  json.RawMessage  `json:"timestamp"` // epoch seconds (REAL)
+	// Header-row session token totals. Hermes reports usage only at session
+	// level (the per-message token_count column's semantics are ambiguous);
+	// per-turn spans stay token-less (n/a) by design. input_tokens EXCLUDES
+	// the cache columns (observed live, 2026-06-12: cache_read_tokens ≫
+	// input_tokens), so the cache columns fold into the input total.
+	InputTokens      int64 `json:"input_tokens"`
+	OutputTokens     int64 `json:"output_tokens"`
+	CacheReadTokens  int64 `json:"cache_read_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
 }
 
 // hermesDoc is the session document.
@@ -87,6 +96,15 @@ func (hermesDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 			switch flat.Type {
 			case "session":
 				w.setModel(flat.Model)
+				// The sessions-table token columns are DEFAULT 0, so an
+				// all-zero pair means "not recorded" (a real session always
+				// has input tokens), not a genuine zero — leave nil (n/a).
+				if flat.InputTokens > 0 || flat.OutputTokens > 0 {
+					in := flat.InputTokens + flat.CacheReadTokens + flat.CacheWriteTokens
+					outTok := flat.OutputTokens
+					out.Meta.TokensIn = &in
+					out.Meta.TokensOut = &outTok
+				}
 			case "message":
 				hermesMessageWalk(w, hermesMessage{
 					Role:       flat.Role,

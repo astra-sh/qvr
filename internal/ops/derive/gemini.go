@@ -40,10 +40,13 @@ func init() { Register("gemini", geminiDeriver{}) }
 type geminiDeriver struct{}
 
 // geminiState is the walk plus the per-session set of skills already lifted
-// to a SKILL span (the first-touch-is-the-load rule above).
+// to a SKILL span (the first-touch-is-the-load rule above) and the item ids
+// whose usage was already counted (the store re-emits an item as it grows —
+// same id, same tokens, more content — so usage must count once per id).
 type geminiState struct {
 	turnWalk
 	skillLoaded map[string]bool
+	usageSeen   map[string]bool
 }
 
 // geminiDoc is the wrapper-object form.
@@ -57,6 +60,7 @@ type geminiDoc struct {
 
 // geminiItem is one message item.
 type geminiItem struct {
+	ID         string           `json:"id"`
 	Type       string           `json:"type"`
 	Role       string           `json:"role"`
 	Model      string           `json:"model"`
@@ -69,6 +73,19 @@ type geminiItem struct {
 	Parts      []geminiPart     `json:"parts"`
 	ToolCalls  []geminiToolCall `json:"toolCalls"`
 	ToolCalls2 []geminiToolCall `json:"tool_calls"`
+	Tokens     *geminiTokens    `json:"tokens"` // pointer: absence ≠ zero usage
+}
+
+// geminiTokens is an assistant item's usage record (observed live,
+// 2026-06-12): total = input + output + thoughts + tool, and cached is a
+// subset of input. tool counts prompt-side function-declaration tokens;
+// thoughts are billed output-side.
+type geminiTokens struct {
+	Input    int `json:"input"`
+	Output   int `json:"output"`
+	Cached   int `json:"cached"`
+	Thoughts int `json:"thoughts"`
+	Tool     int `json:"tool"`
 }
 
 type geminiPart struct {
@@ -76,15 +93,33 @@ type geminiPart struct {
 }
 
 type geminiToolCall struct {
-	Name          string          `json:"name"`
-	Tool          string          `json:"tool"`
-	DisplayName   string          `json:"displayName"`
-	ID            string          `json:"id"`
-	Args          map[string]any  `json:"args"`
-	Input         map[string]any  `json:"input"`
-	Result        []geminiToolRes `json:"result"`
-	ResultDisplay string          `json:"resultDisplay"`
+	Name        string          `json:"name"`
+	Tool        string          `json:"tool"`
+	DisplayName string          `json:"displayName"`
+	ID          string          `json:"id"`
+	Args        map[string]any  `json:"args"`
+	Input       map[string]any  `json:"input"`
+	Result      []geminiToolRes `json:"result"`
+	// resultDisplay is POLYMORPHIC (observed live, 2026-06-12): errors carry
+	// a string, but a successful call carries an object (list_directory's
+	// {summary, files[]}, invoke_agent's progress record). A string-typed
+	// field would fail the WHOLE item's unmarshal and silently drop the tool
+	// span and the item's tokens with it.
+	ResultDisplay json.RawMessage `json:"resultDisplay"`
 	Output        string          `json:"output"`
+}
+
+// resultDisplayText renders the polymorphic resultDisplay: a string verbatim,
+// anything else as its compact JSON (lossless, greppable).
+func (tc *geminiToolCall) resultDisplayText() string {
+	if len(tc.ResultDisplay) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(tc.ResultDisplay, &s); err == nil {
+		return s
+	}
+	return string(tc.ResultDisplay)
 }
 
 type geminiToolRes struct {
@@ -102,6 +137,7 @@ func (geminiDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 	st := &geminiState{
 		turnWalk:    turnWalk{sessionID: rows[0].SessionID.String()},
 		skillLoaded: map[string]bool{},
+		usageSeen:   map[string]bool{},
 	}
 	out := &Derivation{}
 
@@ -185,6 +221,7 @@ func geminiMessage(st *geminiState, item *geminiItem, fallbackMs int64) {
 		st.cur.prompt = text
 	case "assistant":
 		st.ensure(ts)
+		st.absorbUsage(item)
 		if text := geminiText(item); text != "" {
 			st.cur.appendOutput(text)
 		}
@@ -197,6 +234,21 @@ func geminiMessage(st *geminiState, item *geminiItem, fallbackMs int64) {
 		}
 		st.cur.bump(ts)
 	}
+}
+
+// absorbUsage folds an assistant item's tokens into the turn, once per item
+// id (re-emitted copies of the same item carry the same tokens). input is the
+// model-context total with cached as a subset; thoughts bill as output.
+func (st *geminiState) absorbUsage(item *geminiItem) {
+	tok := item.Tokens
+	if tok == nil || (item.ID != "" && st.usageSeen[item.ID]) {
+		return
+	}
+	if item.ID != "" {
+		st.usageSeen[item.ID] = true
+	}
+	st.cur.addUsage(tok.Input+tok.Tool, tok.Output+tok.Thoughts)
+	st.cur.addCacheRead(tok.Cached)
 }
 
 // geminiTool emits one tool call (and its inline result) as a span. The
@@ -242,7 +294,7 @@ func geminiToolOutput(tc geminiToolCall) string {
 			return r.Stdout
 		}
 	}
-	return firstNonEmptyStr(tc.ResultDisplay, tc.Output)
+	return firstNonEmptyStr(tc.resultDisplayText(), tc.Output)
 }
 
 // geminiRole normalizes the item's role/type to user|assistant|other.

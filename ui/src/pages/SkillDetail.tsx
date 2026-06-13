@@ -41,7 +41,7 @@ import {
   Th,
   VersionTag,
 } from "../components/qvr";
-import { fmtCount, fmtTime, relTime, relTimeMs, short } from "../lib/format";
+import { fmtCount, fmtTime, fmtTokenPair, relTime, relTimeMs, short } from "../lib/format";
 import { toneFor } from "../lib/tones";
 
 // SkillView is the skill workbench, used from two routes:
@@ -228,7 +228,10 @@ function ReportTab({ report }: { report: SkillReport | null }) {
   // flight. Defensive ?. — the server initializes the slice, but a hero that
   // can crash the whole report card isn't worth the assumption.
   const latest = report.versions?.[0];
-  const maxTok = Math.max(report.tokens.input, report.tokens.output, 1);
+  // Absent token sides mean the sessions' stores reported no usage — the cost
+  // card then says n/a instead of a fabricated 0.
+  const hasTokens = report.tokens.input != null || report.tokens.output != null;
+  const maxTok = Math.max(report.tokens.input ?? 0, report.tokens.output ?? 0, 1);
 
   return (
     <>
@@ -260,9 +263,13 @@ function ReportTab({ report }: { report: SkillReport | null }) {
         />
         <StatCard
           icon={<span />}
-          value={fmtCount(report.tokens.input + report.tokens.output)}
+          value={
+            hasTokens
+              ? fmtCount((report.tokens.input ?? 0) + (report.tokens.output ?? 0))
+              : "n/a"
+          }
           label="tokens"
-          sub="in sessions where it fired"
+          sub={hasTokens ? "in sessions where it fired" : "no usage in these stores"}
         />
       </div>
 
@@ -278,19 +285,27 @@ function ReportTab({ report }: { report: SkillReport | null }) {
 
       <Section title="cost">
         <Card>
-          <BarRow
-            label="input"
-            value={report.tokens.input}
-            max={maxTok}
-            display={fmtCount(report.tokens.input)}
-          />
-          <div style={{ height: 8 }} />
-          <BarRow
-            label="output"
-            value={report.tokens.output}
-            max={maxTok}
-            display={fmtCount(report.tokens.output)}
-          />
+          {hasTokens ? (
+            <>
+              <BarRow
+                label="input"
+                value={report.tokens.input ?? 0}
+                max={maxTok}
+                display={report.tokens.input == null ? "n/a" : fmtCount(report.tokens.input)}
+              />
+              <div style={{ height: 8 }} />
+              <BarRow
+                label="output"
+                value={report.tokens.output ?? 0}
+                max={maxTok}
+                display={report.tokens.output == null ? "n/a" : fmtCount(report.tokens.output)}
+              />
+            </>
+          ) : (
+            <p className="qvr-sub">
+              n/a — the native stores of this skill's sessions record no token usage.
+            </p>
+          )}
           <p className="qvr-sub" style={{ marginTop: 10 }}>
             tokens summed over the LLM turns of sessions where this skill fired — a session
             that fired several skills counts toward each, so this is exposure, not
@@ -307,6 +322,7 @@ function ReportTab({ report }: { report: SkillReport | null }) {
               <Th>invocations</Th>
               <Th>version</Th>
               <Th>sessions</Th>
+              <Th>tokens (in / out)</Th>
               <Th>last fired</Th>
             </tr>
           }
@@ -321,10 +337,17 @@ function ReportTab({ report }: { report: SkillReport | null }) {
                 <VersionCell versions={a.versions} />
               </Td>
               <Td muted>{fmtCount(a.sessions)}</Td>
+              <Td muted={a.tokensIn == null && a.tokensOut == null}>
+                {fmtTokenPair(a.tokensIn, a.tokensOut)}
+              </Td>
               <Td muted>{relTime(a.lastFired)}</Td>
             </tr>
           ))}
         </Table>
+        <p className="qvr-sub" style={{ marginTop: 6 }}>
+          tokens of this agent's sessions where the skill fired — n/a when the agent's
+          native store records no usage.
+        </p>
       </Section>
 
       {(report.models?.length ?? 0) > 0 && (
@@ -335,6 +358,7 @@ function ReportTab({ report }: { report: SkillReport | null }) {
                 <Th>model</Th>
                 <Th>invocations</Th>
                 <Th>sessions</Th>
+                <Th>tokens (in / out)</Th>
                 <Th>last fired</Th>
               </tr>
             }
@@ -348,13 +372,18 @@ function ReportTab({ report }: { report: SkillReport | null }) {
                 </Td>
                 <Td muted>{fmtCount(m.invocations)}</Td>
                 <Td muted>{fmtCount(m.sessions)}</Td>
+                <Td muted={m.tokensIn == null && m.tokensOut == null}>
+                  {fmtTokenPair(m.tokensIn, m.tokensOut)}
+                </Td>
                 <Td muted>{relTime(m.lastFired)}</Td>
               </tr>
             ))}
           </Table>
           <p className="qvr-sub" style={{ marginTop: 6 }}>
-            same skill, different models — how often it fired under each model
-            its spans ran with.
+            same skill, different models — how often it fired under each model its spans
+            ran with. tokens are whole-session totals: a session that ran two models
+            counts toward both (exposure, not exclusive cost); n/a when the store
+            records no usage.
           </p>
         </Section>
       )}

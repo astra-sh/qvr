@@ -46,6 +46,24 @@ type copilotData struct {
 	NewModel     string               `json:"newModel"`
 	Name         string               `json:"name"` // skill.invoked: skill name
 	Path         string               `json:"path"` // skill.invoked: loaded SKILL.md path
+
+	// assistant.message: per-message output tokens. Pointer: absence ≠ 0.
+	// The input side is never reported per message — only at shutdown.
+	OutputTokens *int `json:"outputTokens"`
+	// session.shutdown: per-model session usage rollups (observed live,
+	// 2026-06-12: usage.{inputTokens,outputTokens,cacheReadTokens,
+	// cacheWriteTokens,reasoningTokens}; inputTokens includes the cache
+	// reads/writes). The session-level token totals come from here.
+	ModelMetrics map[string]copilotModelMetrics `json:"modelMetrics"`
+}
+
+type copilotModelMetrics struct {
+	Usage *copilotUsage `json:"usage"`
+}
+
+type copilotUsage struct {
+	InputTokens  int64 `json:"inputTokens"`
+	OutputTokens int64 `json:"outputTokens"`
 }
 
 type copilotToolRequest struct {
@@ -74,10 +92,35 @@ func (copilotDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 			continue
 		}
 		copilotEvent(w, &ln, flexTimeMs(ln.Timestamp))
+		copilotShutdownUsage(&out.Meta, &ln)
 	}
 	w.flush()
 	out.Spans = w.spans
 	return out, nil
+}
+
+// copilotShutdownUsage folds a session.shutdown event's per-model usage
+// rollups into the session token totals. Copilot reports input tokens only
+// here (per message it reports just outputTokens), so this is the one source
+// for the session's input side.
+func copilotShutdownUsage(m *SessionMeta, ln *copilotLine) {
+	if normType(ln.Type) != "sessionshutdown" || len(ln.Data.ModelMetrics) == 0 {
+		return
+	}
+	var in, out int64
+	seen := false
+	for _, mm := range ln.Data.ModelMetrics {
+		if mm.Usage == nil {
+			continue
+		}
+		seen = true
+		in += mm.Usage.InputTokens
+		out += mm.Usage.OutputTokens
+	}
+	if seen {
+		m.TokensIn = &in
+		m.TokensOut = &out
+	}
 }
 
 // copilotEvent folds one event envelope into the walk.
@@ -94,6 +137,9 @@ func copilotEvent(w *turnWalk, ln *copilotLine, ts int64) {
 		w.cur.prompt = prompt
 	case "assistantmessage":
 		w.ensure(ts)
+		if ln.Data.OutputTokens != nil {
+			w.cur.addOutputUsage(*ln.Data.OutputTokens)
+		}
 		if ln.Data.Content != "" {
 			w.cur.appendOutput(ln.Data.Content)
 		}

@@ -23,17 +23,24 @@ export interface SessionMeta {
   tools: number;
   // Distinct skills this session used, first-use order.
   skills?: string[];
+  // Session token totals. Absent = the agent's native store reported no
+  // usage on that side — render n/a, never 0.
+  tokens_in?: number;
+  tokens_out?: number;
   deriver_version: number;
   derived_at: string;
 }
 
 // SessionFilter narrows the Sessions list server-side. All fields optional; an
 // empty filter returns the scoped list unfiltered. Dates are YYYY-MM-DD.
+// sort:"tokens" orders by total session tokens desc (server-side — the list is
+// limit-truncated, so a client sort couldn't surface the most expensive ones).
 export interface SessionFilter {
   agent?: string;
   skill?: string;
   since?: string;
   until?: string;
+  sort?: "tokens";
 }
 
 // SpanRow mirrors store.SpanRow: one derived (processed) span. `attributes` is
@@ -363,8 +370,9 @@ export interface SkillUsageRow {
   versions?: string[]; // distinct observed versions; absent = unknown
   firstFired?: string;
   lastFired?: string;
-  tokensIn: number;
-  tokensOut: number;
+  // Absent = the skill's sessions reported no usage (n/a, never 0).
+  tokensIn?: number;
+  tokensOut?: number;
   tokenSessions: number;
 }
 
@@ -397,22 +405,31 @@ export interface SkillReportTotals {
 
 // One agent's cut. versions is the distinct observed versions this agent's
 // invocations carried; absent renders as the unpinned "@unknown" tag.
+// Tokens are session-attributed within the cut; absent = no usage reported.
 export interface SkillReportAgent {
   agent: string;
   invocations: number;
   versions?: string[];
   sessions: number;
   lastFired?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  tokenSessions: number;
 }
 
 // SkillReportModel is the skill × model performance cut — the same skill can
 // behave differently under different models, so the report card breaks usage
-// down by the gen_ai.request.model its spans carried.
+// down by the gen_ai.request.model its spans carried. Models OVERLAP: a
+// session that ran the skill on two models contributes its tokens to both
+// rows (exposure, not exclusive cost).
 export interface SkillReportModel {
   model: string;
   invocations: number;
   sessions: number;
   lastFired?: string;
+  tokensIn?: number;
+  tokensOut?: number;
+  tokenSessions: number;
 }
 
 export interface SkillReportSeriesPoint {
@@ -431,8 +448,8 @@ export interface SkillVersionUsage {
   sessions: number;
   firstFired?: string;
   lastFired?: string;
-  tokensIn: number;
-  tokensOut: number;
+  tokensIn?: number; // absent = no usage reported (n/a)
+  tokensOut?: number;
   current?: boolean;
 }
 
@@ -445,7 +462,7 @@ export interface SkillReport {
   agents: SkillReportAgent[];
   models: SkillReportModel[] | null;
   series: SkillReportSeriesPoint[];
-  tokens: { sessions: number; input: number; output: number };
+  tokens: { sessions: number; input?: number; output?: number };
   versions: SkillVersionUsage[];
   recentSessions: SessionMeta[];
 }
@@ -646,6 +663,7 @@ function sessionsQuery(f: SessionFilter): string {
   if (f.skill) p.set("skill", f.skill);
   if (f.since) p.set("since", f.since);
   if (f.until) p.set("until", f.until);
+  if (f.sort) p.set("sort", f.sort);
   const q = p.toString();
   return q ? `?${q}` : "";
 }

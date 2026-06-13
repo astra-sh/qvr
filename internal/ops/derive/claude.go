@@ -50,10 +50,11 @@ type claudeLine struct {
 }
 
 type claudeMessage struct {
+	ID      string          `json:"id"` // API message id; repeats across per-block lines
 	Role    string          `json:"role"`
 	Model   string          `json:"model"`
 	Content json.RawMessage `json:"content"` // string OR []block
-	Usage   claudeUsage     `json:"usage"`
+	Usage   *claudeUsage    `json:"usage"`   // pointer: absence ≠ a zero-token record
 }
 
 type claudeUsage struct {
@@ -80,6 +81,11 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 	}
 	w := &turnWalk{sessionID: rows[0].SessionID.String()}
 	out := &Derivation{}
+	// Claude Code writes one JSONL line per content block of an API message,
+	// repeating the same message.id AND the same usage object on every line
+	// (observed live, 2026-06-12: one message spanned 7 lines). Usage must
+	// count once per message id or every token surface inflates ~2×.
+	usageSeen := map[string]bool{}
 
 	for _, r := range rows {
 		if r.Source != ops.RawSourceTranscript {
@@ -101,7 +107,7 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 			// ensure covers assistant output with no preceding prompt (e.g.
 			// a session resumed mid-turn): a synthetic turn, nothing lost.
 			w.ensure(ts)
-			w.cur.absorbAssistant(ln.Message, ts, w.sessionID)
+			w.cur.absorbAssistant(ln.Message, ts, w.sessionID, usageSeen)
 		}
 	}
 	w.flush()
@@ -139,8 +145,10 @@ func claudeUserLine(w *turnWalk, ln *claudeLine, ts int64) {
 
 // absorbAssistant folds one assistant line into the current turn: appends text,
 // sums tokens, records the model, and turns each tool_use block into a TOOL
-// (or SKILL) child span.
-func (t *turn) absorbAssistant(raw json.RawMessage, ts int64, sessionID string) {
+// (or SKILL) child span. usageSeen dedupes usage by message id — per-block
+// lines repeat the same id with identical usage, so only the first counts
+// (an id-less message can't be deduped and counts as its own).
+func (t *turn) absorbAssistant(raw json.RawMessage, ts int64, sessionID string, usageSeen map[string]bool) {
 	var msg claudeMessage
 	if err := json.Unmarshal(raw, &msg); err != nil {
 		return
@@ -148,8 +156,16 @@ func (t *turn) absorbAssistant(raw json.RawMessage, ts int64, sessionID string) 
 	if msg.Model != "" {
 		t.model = msg.Model
 	}
-	t.inTokens += msg.Usage.InputTokens + msg.Usage.CacheReadInputTokens + msg.Usage.CacheCreationInputTokens
-	t.outTokens += msg.Usage.OutputTokens
+	if u := msg.Usage; u != nil && (msg.ID == "" || !usageSeen[msg.ID]) {
+		if msg.ID != "" {
+			usageSeen[msg.ID] = true
+		}
+		// input_tokens excludes cache reads/writes in the native format; the
+		// turn total folds them back in so it means "context processed".
+		t.addUsage(u.InputTokens+u.CacheReadInputTokens+u.CacheCreationInputTokens, u.OutputTokens)
+		t.addCacheRead(u.CacheReadInputTokens)
+		t.addCacheCreation(u.CacheCreationInputTokens)
+	}
 	if ts > t.endMs {
 		t.endMs = ts
 	}
@@ -297,42 +313,6 @@ func (t *turn) applyToolResult(b claudeBlock, ts int64) {
 		sp.EndMs = ts
 	}
 	delete(t.pending, b.ToolUseID)
-}
-
-// llmSpan renders the turn's parent span — an OTel GenAI "chat" inference span.
-func (t *turn) llmSpan(sessionID string) Span {
-	output := t.output
-	if output == "" {
-		output = "(no text output)"
-	}
-	inMsgs, _ := json.Marshal([]map[string]string{{"role": "user", "content": t.prompt}})
-	outMsgs, _ := json.Marshal([]map[string]string{{"role": "assistant", "content": output}})
-	end := max(t.endMs, t.startMs)
-	name := "chat"
-	if t.model != "" {
-		name = "chat " + t.model
-	}
-	attrs := map[string]any{
-		"session.id":                 sessionID,
-		"gen_ai.operation.name":      "chat",
-		"gen_ai.request.model":       t.model,
-		"gen_ai.usage.input_tokens":  t.inTokens,
-		"gen_ai.usage.output_tokens": t.outTokens,
-		"gen_ai.input.messages":      string(inMsgs),
-		"gen_ai.output.messages":     string(outMsgs),
-	}
-	if p := providerName(t.model); p != "" {
-		attrs["gen_ai.provider.name"] = p
-	}
-	return Span{
-		Name:       name,
-		Kind:       KindLLM,
-		SpanID:     t.llmSpanID,
-		TraceID:    t.traceID,
-		StartMs:    t.startMs,
-		EndMs:      end,
-		Attributes: attrs,
-	}
 }
 
 // providerName maps a model id to its OTel gen_ai.provider.name, or "" when

@@ -100,8 +100,9 @@ type codexGitInfo struct {
 }
 
 type codexUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens       int `json:"input_tokens"` // total; includes cached_input_tokens
+	CachedInputTokens int `json:"cached_input_tokens"`
+	OutputTokens      int `json:"output_tokens"`
 }
 
 // codexBlock is one content block of a message (input_text / output_text).
@@ -180,8 +181,9 @@ func (st *codexState) handleEventMsg(p codexPayload, ts int64) {
 		st.cur.bump(ts)
 	case "token_count":
 		if st.cur != nil && p.Info != nil {
-			st.cur.inTokens += p.Info.Last.InputTokens
-			st.cur.outTokens += p.Info.Last.OutputTokens
+			st.cur.addUsage(p.Info.Last.InputTokens, p.Info.Last.OutputTokens)
+			// Codex reports cache reads only (no creation counter).
+			st.cur.addCacheRead(p.Info.Last.CachedInputTokens)
 		}
 	case "task_complete":
 		st.ensure(ts)

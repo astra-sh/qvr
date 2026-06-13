@@ -16,7 +16,7 @@ import {
   Td,
   Th,
 } from "../components/qvr";
-import { fmtEpochMs } from "../lib/format";
+import { fmtEpochMs, fmtTokenPair } from "../lib/format";
 
 // The agents qvr can discover today. The filter offers these plus any agent
 // actually present in the loaded rows (so an unexpected one still shows up).
@@ -38,12 +38,15 @@ export default function Sessions() {
   const [skill, setSkill] = useState("");
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
+  // Token sort is server-side (the list is limit-truncated), so it lives in
+  // the fetch key like the filters.
+  const [sortTokens, setSortTokens] = useState(false);
 
   // Re-fetch whenever the scope or any filter changes (the key encodes them all).
-  const key = `sessions:${scopeToken()}:${agent}|${skill}|${since}|${until}`;
+  const key = `sessions:${scopeToken()}:${agent}|${skill}|${since}|${until}|${sortTokens}`;
   // 10s polling keeps the list live against the server's background scan.
   const { data, error, loading, reload } = useFetch(
-    () => api.sessions({ agent, skill, since, until }),
+    () => api.sessions({ agent, skill, since, until, sort: sortTokens ? "tokens" : undefined }),
     key,
     10_000,
   );
@@ -137,6 +140,9 @@ export default function Sessions() {
               <Th>started</Th>
               <Th>turns</Th>
               <Th>tools</Th>
+              <Th onSort={() => setSortTokens((v) => !v)} sortActive={sortTokens}>
+                tokens (in / out)
+              </Th>
             </tr>
           }
         >
@@ -175,6 +181,9 @@ export default function Sessions() {
               <Td muted>{fmtEpochMs(s.started_ms)}</Td>
               <Td muted>{s.turns}</Td>
               <Td muted>{s.tools}</Td>
+              <Td muted={s.tokens_in == null && s.tokens_out == null}>
+                {fmtTokenPair(s.tokens_in, s.tokens_out)}
+              </Td>
             </tr>
           ))}
         </Table>

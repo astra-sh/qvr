@@ -143,6 +143,68 @@ func TestListSessionMeta_Filters(t *testing.T) {
 	}
 }
 
+// TestSessionMetaTokens_RoundTrip pins the nullable token columns: nil stays
+// nil (no usage reported → n/a), a genuine 0 stays 0 — never conflated.
+func TestSessionMetaTokens_RoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	noUsage, zero, real := uuid.New(), uuid.New(), uuid.New()
+	mustDerive := func(m *SessionMetaRow) {
+		t.Helper()
+		if err := st.ReplaceSessionDerivation(ctx, m, nil); err != nil {
+			t.Fatalf("derive %s: %v", m.SessionID, err)
+		}
+	}
+	mustDerive(metaFor(noUsage, "cursor", 1000, "code-review"))
+	z := metaFor(zero, "claude-code", 2000, "code-review")
+	z.TokensIn, z.TokensOut = i64(0), i64(0)
+	mustDerive(z)
+	r := metaFor(real, "claude-code", 3000, "code-review")
+	r.TokensIn, r.TokensOut = i64(462522), i64(4246)
+	mustDerive(r)
+
+	assertTokenPair(t, st, noUsage, nil, nil)
+	assertTokenPair(t, st, zero, i64(0), i64(0))
+	assertTokenPair(t, st, real, i64(462522), i64(4246))
+
+	// SortByTokens: token totals desc, NULLs (n/a) last — a token-less agent
+	// must never outrank a measured one, and a real 0 ranks above n/a.
+	rows, err := st.ListSessionMeta(ctx, &SessionMetaFilter{SortByTokens: true})
+	if err != nil {
+		t.Fatalf("list sorted: %v", err)
+	}
+	want := []uuid.UUID{real, zero, noUsage}
+	if len(rows) != len(want) {
+		t.Fatalf("want %d rows, got %d", len(want), len(rows))
+	}
+	for i, w := range want {
+		if rows[i].SessionID != w {
+			t.Errorf("sorted row %d: want %s, got %s", i, w, rows[i].SessionID)
+		}
+	}
+}
+
+// assertTokenPair checks one session's persisted token totals, nil meaning
+// "no usage reported" — distinct from a pointer to 0.
+func assertTokenPair(t *testing.T, st Store, sid uuid.UUID, wantIn, wantOut *int64) {
+	t.Helper()
+	got, err := st.GetSessionMeta(context.Background(), sid)
+	if err != nil || got == nil {
+		t.Fatalf("get %s: %v %v", sid, got, err)
+	}
+	if !i64Equal(got.TokensIn, wantIn) || !i64Equal(got.TokensOut, wantOut) {
+		t.Errorf("session %s tokens = %v/%v, want %v/%v", sid, got.TokensIn, got.TokensOut, wantIn, wantOut)
+	}
+}
+
+func i64Equal(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 // TestGetSessionMeta_AbsentIsNil pins the no-row contract: nil, not an error.
 func TestGetSessionMeta_AbsentIsNil(t *testing.T) {
 	st := openTestStore(t)

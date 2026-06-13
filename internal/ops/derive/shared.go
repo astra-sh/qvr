@@ -404,10 +404,104 @@ type turn struct {
 	model     string
 	inTokens  int
 	outTokens int
-	traceID   string
-	llmSpanID string
-	tools     []Span         // TOOL + SKILL children, parented to llmSpanID
-	pending   map[string]int // tool_use_id → index into tools (awaiting result)
+	// Cache sub-splits of inTokens (which stays the TOTAL including cache).
+	// The seen flags keep absence distinct from zero: a usage record the
+	// native store never wrote must derive to NO gen_ai.usage.* attributes
+	// (rendered n/a downstream), never a fabricated 0. in/out are flagged
+	// separately because some stores report only one side per turn
+	// (copilot's per-message outputTokens).
+	cacheReadTokens     int
+	cacheCreationTokens int
+	inSeen              bool
+	outSeen             bool
+	cacheReadSeen       bool
+	cacheCreationSeen   bool
+	traceID             string
+	llmSpanID           string
+	tools               []Span         // TOOL + SKILL children, parented to llmSpanID
+	pending             map[string]int // tool_use_id → index into tools (awaiting result)
+}
+
+// addUsage folds one native usage record into the turn. in is the TOTAL input
+// (cache included — claude and copilot report it that way natively; derivers
+// for formats that split it out sum before calling).
+func (t *turn) addUsage(in, out int) {
+	t.inSeen = true
+	t.outSeen = true
+	t.inTokens += in
+	t.outTokens += out
+}
+
+// addOutputUsage records output tokens for a format that reports only the
+// output side per turn; the input side stays absent (n/a), never 0.
+func (t *turn) addOutputUsage(out int) {
+	t.outSeen = true
+	t.outTokens += out
+}
+
+// addCacheRead records cache-read input tokens, a sub-split of the input
+// total, only meaningful when the format reports the split.
+func (t *turn) addCacheRead(n int) {
+	t.cacheReadSeen = true
+	t.cacheReadTokens += n
+}
+
+// addCacheCreation records cache-write input tokens (claude's cache_creation,
+// copilot/opencode's cache write), a sub-split of the input total.
+func (t *turn) addCacheCreation(n int) {
+	t.cacheCreationSeen = true
+	t.cacheCreationTokens += n
+}
+
+// llmSpan renders the turn's parent span — an OTel GenAI "chat" inference
+// span. Token attributes are emitted only when the native store actually
+// reported usage for the turn (the in/out seen flags); an unconditional 0
+// would be indistinguishable from a real zero and poison every cross-agent
+// comparison built on these spans. Cache sub-splits ride along when the
+// format distinguishes them.
+func (t *turn) llmSpan(sessionID string) Span {
+	output := t.output
+	if output == "" {
+		output = "(no text output)"
+	}
+	inMsgs, _ := json.Marshal([]map[string]string{{"role": "user", "content": t.prompt}})
+	outMsgs, _ := json.Marshal([]map[string]string{{"role": "assistant", "content": output}})
+	end := max(t.endMs, t.startMs)
+	name := "chat"
+	if t.model != "" {
+		name = "chat " + t.model
+	}
+	attrs := map[string]any{
+		"session.id":             sessionID,
+		"gen_ai.operation.name":  "chat",
+		"gen_ai.request.model":   t.model,
+		"gen_ai.input.messages":  string(inMsgs),
+		"gen_ai.output.messages": string(outMsgs),
+	}
+	if t.inSeen {
+		attrs["gen_ai.usage.input_tokens"] = t.inTokens
+		if t.cacheReadSeen {
+			attrs["gen_ai.usage.cache_read_input_tokens"] = t.cacheReadTokens
+		}
+		if t.cacheCreationSeen {
+			attrs["gen_ai.usage.cache_creation_input_tokens"] = t.cacheCreationTokens
+		}
+	}
+	if t.outSeen {
+		attrs["gen_ai.usage.output_tokens"] = t.outTokens
+	}
+	if p := providerName(t.model); p != "" {
+		attrs["gen_ai.provider.name"] = p
+	}
+	return Span{
+		Name:       name,
+		Kind:       KindLLM,
+		SpanID:     t.llmSpanID,
+		TraceID:    t.traceID,
+		StartMs:    t.startMs,
+		EndMs:      end,
+		Attributes: attrs,
+	}
 }
 
 // appendOutput accumulates assistant text, newline-separated.

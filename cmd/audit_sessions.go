@@ -95,7 +95,7 @@ func renderSessions(sessions []*store.SessionMetaRow) error {
 		printer.Info("No sessions recorded yet")
 		return nil
 	}
-	headers := []string{"STARTED", "AGENT", "TITLE", "TURNS", "TOOLS", "SKILLS", "SESSION ID"}
+	headers := []string{"STARTED", "AGENT", "TITLE", "TURNS", "TOOLS", "TOKENS", "SKILLS", "SESSION ID"}
 	rows := make([][]string, 0, len(sessions))
 	for _, sess := range sessions {
 		rows = append(rows, []string{
@@ -104,12 +104,38 @@ func renderSessions(sessions []*store.SessionMetaRow) error {
 			clipCell(sess.Title, 48),
 			fmt.Sprintf("%d", sess.Turns),
 			fmt.Sprintf("%d", sess.Tools),
+			tokenPairCell(sess.TokensIn, sess.TokensOut),
 			strings.Join(sess.Skills, ","),
 			sess.SessionID.String(),
 		})
 	}
 	printer.Table(headers, rows)
 	return nil
+}
+
+// tokenPairCell renders session token totals as "in/out", honest about
+// absence: a session whose store reported no usage reads n/a, never 0.
+func tokenPairCell(in, out *int64) string {
+	if in == nil && out == nil {
+		return "n/a"
+	}
+	return abbrevCount(in) + "/" + abbrevCount(out)
+}
+
+// abbrevCount renders a nullable count compactly (8.4k, 1.2M); nil → "-".
+func abbrevCount(v *int64) string {
+	if v == nil {
+		return "-"
+	}
+	n := *v
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1e6)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1e3)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // clipCell truncates a table cell to n runes with an ellipsis.

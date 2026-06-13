@@ -105,9 +105,11 @@ function SkillRow({ s, auditEnabled }: { s: SkillUsageRow; auditEnabled: boolean
       desc={
         auditEnabled
           ? s.invocations > 0
-            ? `${fmtCount(s.invocations)} runs · ${fmtCount(s.sessions)} sessions · ${fmtCount(
-                s.tokensIn + s.tokensOut,
-              )} tok · last fired ${relTime(s.lastFired)}`
+            ? `${fmtCount(s.invocations)} runs · ${fmtCount(s.sessions)} sessions · ${
+                s.tokensIn == null && s.tokensOut == null
+                  ? "n/a"
+                  : fmtCount((s.tokensIn ?? 0) + (s.tokensOut ?? 0))
+              } tok · last fired ${relTime(s.lastFired)}`
             : "never fired"
           : undefined
       }

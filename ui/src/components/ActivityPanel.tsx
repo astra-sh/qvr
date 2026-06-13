@@ -115,8 +115,12 @@ function colorsByAgent(data: ActivityResponse): Map<string, string> {
 // skill's full report card.
 function BySkill({ skills }: { skills: SkillUsageRow[] }) {
   const [metric, setMetric] = useState<SkillMetric>("sessions");
+  // Token sides are absent when the stores report no usage; null keeps those
+  // rows out of the tokens ranking instead of letting NaN poison it.
+  const tok = (s: SkillUsageRow) =>
+    s.tokensIn == null && s.tokensOut == null ? null : (s.tokensIn ?? 0) + (s.tokensOut ?? 0);
   const val = (s: SkillUsageRow) =>
-    metric === "sessions" ? s.sessions : metric === "invocations" ? s.invocations : s.tokensIn + s.tokensOut;
+    metric === "sessions" ? s.sessions : metric === "invocations" ? s.invocations : (tok(s) ?? 0);
   const rows = skills.filter((s) => val(s) > 0).sort((a, b) => val(b) - val(a)).slice(0, 8);
   if (rows.length === 0) return null;
   const max = Math.max(1, ...rows.map(val));
@@ -149,7 +153,7 @@ function BySkill({ skills }: { skills: SkillUsageRow[] }) {
               </Link>
               <span className="qvr-scan__scanner">
                 {fmtCount(s.invocations)} invocations · {fmtCount(s.sessions)} sessions ·{" "}
-                {fmtCount(s.tokensIn + s.tokensOut)} tok
+                {tok(s) == null ? "n/a" : fmtCount(tok(s)!)} tok
               </span>
               <span
                 style={{

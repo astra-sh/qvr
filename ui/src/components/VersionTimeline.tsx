@@ -93,8 +93,12 @@ export default function VersionTimeline({ rows }: { rows: TimelineRow[] }) {
             {v.usage && (
               <div className="qvr-ver__top" style={{ marginTop: 6, gap: 6 }}>
                 <Tag>{fmtCount(v.usage.invocations)} runs</Tag>
-                <Tag lead="↑">{fmtCount(v.usage.tokensIn)} tok</Tag>
-                <Tag lead="↓">{fmtCount(v.usage.tokensOut)} tok</Tag>
+                {/* Absent = these sessions' stores report no usage; omit the
+                    chips rather than showing a fabricated 0. */}
+                {v.usage.tokensIn != null && <Tag lead="↑">{fmtCount(v.usage.tokensIn)} tok</Tag>}
+                {v.usage.tokensOut != null && (
+                  <Tag lead="↓">{fmtCount(v.usage.tokensOut)} tok</Tag>
+                )}
                 <Tag>{fmtCount(v.usage.sessions)} sessions</Tag>
               </div>
             )}

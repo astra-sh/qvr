@@ -14,8 +14,26 @@ export function Table({ head, children }: { head: ReactNode; children: ReactNode
   );
 }
 
-export function Th({ children }: { children?: ReactNode }) {
-  return <th scope="col">{children}</th>;
+// Th — column header; pass onSort to make it clickable (a button in the same
+// uppercase micro-header style), with active="desc" rendering the ↓ marker.
+export function Th({
+  children,
+  onSort,
+  sortActive = false,
+}: {
+  children?: ReactNode;
+  onSort?: () => void;
+  sortActive?: boolean;
+}) {
+  if (!onSort) return <th scope="col">{children}</th>;
+  return (
+    <th scope="col" aria-sort={sortActive ? "descending" : "none"}>
+      <button type="button" className="qvr-table__sort" onClick={onSort}>
+        {children}
+        {sortActive ? " ↓" : ""}
+      </button>
+    </th>
+  );
 }
 
 export function Td({

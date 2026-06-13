@@ -823,6 +823,9 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 		// in the DB but never show in the UI.
 		SkillsOnly: true,
 		Limit:      limit,
+		// Token sorting is server-side: the limit truncates, so a client-side
+		// sort over one page couldn't surface the most expensive sessions.
+		SortByTokens: q.Get("sort") == "tokens",
 	}
 	// Date filters accept a calendar day (YYYY-MM-DD from the UI's date inputs)
 	// or a full RFC3339 instant. `until` is inclusive: a bare day extends to its

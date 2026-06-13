@@ -138,6 +138,8 @@ func seedRawSession(t *testing.T, st store.Store, sessionID uuid.UUID, workingDi
 		Turns:           d.Meta.Turns,
 		Tools:           d.Meta.Tools,
 		Skills:          skills,
+		TokensIn:        d.Meta.TokensIn,
+		TokensOut:       d.Meta.TokensOut,
 		DeriverVersion:  derive.Version,
 	}
 	if err := st.ReplaceSessionDerivation(ctx, meta, srows); err != nil {
@@ -620,6 +622,71 @@ func TestUI_SessionsFilters(t *testing.T) {
 	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions?skill=nope"), &none)
 	if len(none) != 0 {
 		t.Errorf("unknown skill filter = %d, want 0", len(none))
+	}
+}
+
+// TestUI_SessionsSortTokens pins ?sort=tokens: server-side ordering by total
+// session tokens with n/a (no usage reported) last, and the JSON shape —
+// tokens_in/tokens_out omitted entirely for token-less sessions, never 0.
+func TestUI_SessionsSortTokens(t *testing.T) {
+	root, _ := seedUIEnv(t, true) // claude session, no token data (newest StartedMs below)
+	addSkillSession(t, root)      // codex session, no token data
+
+	// A third session, older than both but with real token totals — the sort
+	// must put it first anyway.
+	st, err := store.Open(context.Background(), store.OpenOptions{Path: dbPathForTest(t)})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ctx := context.Background()
+	id := uuid.New()
+	if err := st.AppendRawTraces(ctx, []*ops.RawTrace{{
+		AgentName: "copilot", SessionID: id, Source: ops.RawSourceTranscript,
+		WorkingDirectory: root, CapturedAt: time.Now().UTC(),
+		Raw: []byte(`{"type":"user.message","data":{"content":"probe"}}`),
+	}}, nil); err != nil {
+		t.Fatalf("seed raw: %v", err)
+	}
+	tin, tout := int64(462522), int64(4246)
+	attrs, _ := json.Marshal(map[string]any{"skill.name": "code-review"})
+	if err := st.ReplaceSessionDerivation(ctx, &store.SessionMetaRow{
+		SessionID: id, AgentName: "copilot", WorkingDir: root,
+		Title: "probe", StartedMs: 0, EndedMs: 1,
+		Skills: []string{"code-review"}, TokensIn: &tin, TokensOut: &tout,
+		DeriverVersion: derive.Version,
+	}, []*store.SpanRow{{
+		SpanID: "cp-skill", TraceID: "tr", SessionID: id, AgentName: "copilot",
+		Kind: "SKILL", Name: "execute_tool skill", StartMs: 0, EndMs: 1,
+		Attributes: string(attrs), DeriverVersion: derive.Version,
+	}}); err != nil {
+		t.Fatalf("seed derivation: %v", err)
+	}
+	_ = st.Close()
+
+	h := newUITestServer(t, root)
+	var sorted []*store.SessionMetaRow
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions?sort=tokens"), &sorted)
+	if len(sorted) != 3 {
+		t.Fatalf("sessions = %d, want 3", len(sorted))
+	}
+	if sorted[0].SessionID != id {
+		t.Errorf("sort=tokens put %s first, want the tokened session despite its older start", sorted[0].AgentName)
+	}
+	if sorted[0].TokensIn == nil || *sorted[0].TokensIn != tin {
+		t.Errorf("tokens_in = %v, want %d", sorted[0].TokensIn, tin)
+	}
+	// The claude session derived real (small) usage from its seeded transcript;
+	// the codex session has none and must sort last as n/a.
+	last := sorted[2]
+	if last.AgentName != "codex" || last.TokensIn != nil || last.TokensOut != nil {
+		t.Errorf("last row = %s tokens %v/%v, want the token-less codex session (n/a) sorted last",
+			last.AgentName, last.TokensIn, last.TokensOut)
+	}
+
+	// JSON honesty: the token-less rows must omit the fields, not write 0.
+	rec := do(t, h, http.MethodGet, "/api/sessions?agent=codex")
+	if body := rec.Body.String(); strings.Contains(body, "tokens_in") {
+		t.Errorf("token-less session serialized a tokens_in field: %s", body)
 	}
 }
 

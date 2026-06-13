@@ -23,13 +23,22 @@ import (
 // such). Skill attribution (the name tag) is never gated on identity:
 // every SKILL span counts, version known or not.
 //
-// Token attribution is session-level: a skill's token cost is the sum of
-// gen_ai.usage.* over the LLM spans of every session in which the skill
-// produced at least one SKILL span. SKILL spans themselves carry no usage
-// data, and a loaded skill shapes every subsequent turn, so the session is
-// the honest attribution unit. The deliberate consequence: a session that
-// fired two skills contributes its tokens to both. Surfaces must label this
-// "tokens in sessions where this skill fired", never "exclusive cost".
+// Token attribution is session-level: a skill's token cost is the sum of the
+// session totals (session_meta.tokens_in/tokens_out — the derive-time sums of
+// the LLM spans' gen_ai.usage.*, or the store's own session-level totals for
+// agents that report usage only there, e.g. hermes and copilot's input side)
+// over every session in which the skill produced at least one SKILL span.
+// SKILL spans themselves carry no usage data, and a loaded skill shapes every
+// subsequent turn, so the session is the honest attribution unit. The
+// deliberate consequence: a session that fired two skills contributes its
+// tokens to both. Surfaces must label this "tokens in sessions where this
+// skill fired", never "exclusive cost".
+//
+// Token sums are NULL-preserving: derivers set session totals only when the
+// native store reported usage, and SUM over all-NULL is NULL — so a cut whose
+// sessions carry no usage data surfaces as nil (rendered n/a), never a
+// fabricated 0 that would poison cross-agent comparisons. The two sides are
+// independent: copilot reports per-turn output but session-level input.
 
 // MetricsFilter is the common scope for the skill aggregations. Zero fields
 // are ignored. Dirs scopes by session working directory (resolved through
@@ -53,9 +62,29 @@ const (
 	skillNameExpr    = `json_extract(attributes, '$."skill.name"')`
 	skillVersionExpr = `COALESCE(json_extract(attributes, '$."skill.version"'), '')`
 	skillVersionsAgg = `GROUP_CONCAT(NULLIF(` + skillVersionExpr + `, ''), char(31))`
-	llmInTokExpr     = `json_extract(attributes, '$."gen_ai.usage.input_tokens"')`
-	llmOutTokExpr    = `json_extract(attributes, '$."gen_ai.usage.output_tokens"')`
+	// Every token rollup joins session_meta aliased m for the per-session
+	// totals. tokenSessionsAgg counts the sessions that actually reported
+	// usage (either side), the honest denominator for a token cut.
+	tokenSessionsAgg = `COUNT(DISTINCT CASE WHEN m.tokens_in IS NOT NULL OR m.tokens_out IS NOT NULL THEN m.session_id END)`
 )
+
+// legacyTokenQuery rewrites a token rollup for a pre-0006 schema (read-only
+// open, migration not applied): the meta token columns don't exist yet, so
+// they read as NULL (n/a) instead of failing the whole aggregation.
+func legacyTokenQuery(q string) string {
+	q = strings.ReplaceAll(q, "m.tokens_in", "NULL")
+	return strings.ReplaceAll(q, "m.tokens_out", "NULL")
+}
+
+// queryTokenRollup runs a token rollup query, degrading to the NULL-token
+// form on a pre-0006 schema.
+func (s *sqliteStore) queryTokenRollup(ctx context.Context, q string, args []any) (*sql.Rows, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if staleTokensSchema(err) {
+		rows, err = s.db.QueryContext(ctx, legacyTokenQuery(q), args...)
+	}
+	return rows, err
+}
 
 // skillSpanWhere builds the WHERE clauses selecting the SKILL spans in scope
 // (kind, non-empty skill.name, optional name/dirs/window) plus their args.
@@ -163,17 +192,17 @@ func splitVersions(v sql.NullString) []string {
 }
 
 // TokenTotals is the session-attributed token rollup for one skill (see the
-// attribution note at the top of this file).
+// attribution note at the top of this file). nil token sides mean the cut's
+// sessions reported no usage there (n/a) — distinct from a genuine 0.
 type TokenTotals struct {
-	Sessions     int64 // sessions that contributed tokens (had ≥1 LLM span)
-	InputTokens  int64
-	OutputTokens int64
+	Sessions     int64 // sessions that reported usage on either side
+	InputTokens  *int64
+	OutputTokens *int64
 }
 
-// SkillTokenRollup returns per-skill token totals over the LLM spans of each
-// skill's sessions, keyed by skill name. Skills whose sessions carry no LLM
-// usage data (e.g. codex-derived spans) are absent or zero — callers treat
-// missing as zero.
+// SkillTokenRollup returns per-skill token totals over the session totals of
+// each skill's sessions, keyed by skill name. A skill whose sessions carry no
+// usage data (token-less agents) maps to nil token sides, never 0.
 func (s *sqliteStore) SkillTokenRollup(ctx context.Context, f *MetricsFilter) (map[string]*TokenTotals, error) {
 	where, args := skillSpanWhereSQL(f)
 	q := `WITH skill_sessions AS (
@@ -181,14 +210,14 @@ func (s *sqliteStore) SkillTokenRollup(ctx context.Context, f *MetricsFilter) (m
 	  FROM spans ` + where + `
 	)
 	SELECT ss.skill,
-	  COUNT(DISTINCT l.session_id),
-	  CAST(COALESCE(SUM(` + strings.ReplaceAll(llmInTokExpr, "attributes", "l.attributes") + `), 0) AS INTEGER),
-	  CAST(COALESCE(SUM(` + strings.ReplaceAll(llmOutTokExpr, "attributes", "l.attributes") + `), 0) AS INTEGER)
+	  ` + tokenSessionsAgg + `,
+	  CAST(SUM(m.tokens_in) AS INTEGER),
+	  CAST(SUM(m.tokens_out) AS INTEGER)
 	FROM skill_sessions ss
-	JOIN spans l ON l.session_id = ss.session_id AND l.kind = 'LLM'
+	JOIN session_meta m ON m.session_id = ss.session_id
 	GROUP BY ss.skill`
 
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.queryTokenRollup(ctx, q, args)
 	if err != nil {
 		return nil, fmt.Errorf("store: skill token rollup: %w", err)
 	}
@@ -197,10 +226,13 @@ func (s *sqliteStore) SkillTokenRollup(ctx context.Context, f *MetricsFilter) (m
 	out := map[string]*TokenTotals{}
 	for rows.Next() {
 		var skill string
+		var tin, tout sql.NullInt64
 		t := &TokenTotals{}
-		if err := rows.Scan(&skill, &t.Sessions, &t.InputTokens, &t.OutputTokens); err != nil {
+		if err := rows.Scan(&skill, &t.Sessions, &tin, &tout); err != nil {
 			return nil, fmt.Errorf("store: scan token totals: %w", err)
 		}
+		t.InputTokens = nullInt64Ptr(tin)
+		t.OutputTokens = nullInt64Ptr(tout)
 		out[skill] = t
 	}
 	return out, rows.Err()
@@ -245,32 +277,52 @@ func (s *sqliteStore) SkillInvocationSeries(ctx context.Context, f *MetricsFilte
 
 // SkillAgentUsage is one skill's rollup for a single agent. Versions is the
 // distinct proven versions this agent's invocations carried — empty when the
-// agent's evidence never pinned one (surfaces render "unknown").
+// agent's evidence never pinned one (surfaces render "unknown"). Tokens are
+// session-attributed within the cut (the tokens of this agent's sessions
+// where the skill fired); nil sides mean no usage reported (n/a).
 type SkillAgentUsage struct {
-	Agent       string
-	Invocations int64
-	Versions    []string
-	Sessions    int64
-	LastFiredMs int64
+	Agent         string
+	Invocations   int64
+	Versions      []string
+	Sessions      int64
+	LastFiredMs   int64
+	InputTokens   *int64
+	OutputTokens  *int64
+	TokenSessions int64 // sessions in the cut that reported usage
 }
 
 // SkillAgentRollup aggregates one skill's SKILL spans per agent, busiest
-// agent first. f.Skill is required.
+// agent first. f.Skill is required. An agent partitions the sessions (a
+// session has one agent), so per-agent tokens sum to the skill aggregate.
 func (s *sqliteStore) SkillAgentRollup(ctx context.Context, f *MetricsFilter) ([]*SkillAgentUsage, error) {
 	if f == nil || f.Skill == "" {
 		return nil, fmt.Errorf("store: skill agent rollup: Skill is required")
 	}
 	where, args := skillSpanWhereSQL(f)
-	q := `SELECT agent_name,
+	q := `WITH sk AS (
+	  SELECT agent_name, session_id, start_ms, attributes
+	  FROM spans ` + where + `
+	),
+	tok AS (
+	  SELECT ss.agent_name,
+	    CAST(SUM(m.tokens_in) AS INTEGER)  AS tin,
+	    CAST(SUM(m.tokens_out) AS INTEGER) AS tout,
+	    ` + tokenSessionsAgg + ` AS tses
+	  FROM (SELECT DISTINCT agent_name, session_id FROM sk) ss
+	  JOIN session_meta m ON m.session_id = ss.session_id
+	  GROUP BY ss.agent_name
+	)
+	SELECT sk.agent_name,
 	  COUNT(*),
 	  ` + skillVersionsAgg + `,
-	  COUNT(DISTINCT session_id),
-	  MAX(start_ms)
-	FROM spans ` + where + `
-	GROUP BY agent_name
-	ORDER BY COUNT(*) DESC, agent_name ASC`
+	  COUNT(DISTINCT sk.session_id),
+	  MAX(sk.start_ms),
+	  MAX(t.tin), MAX(t.tout), COALESCE(MAX(t.tses), 0)
+	FROM sk LEFT JOIN tok t ON t.agent_name = sk.agent_name
+	GROUP BY sk.agent_name
+	ORDER BY COUNT(*) DESC, sk.agent_name ASC`
 
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.queryTokenRollup(ctx, q, args)
 	if err != nil {
 		return nil, fmt.Errorf("store: skill agent rollup: %w", err)
 	}
@@ -280,10 +332,14 @@ func (s *sqliteStore) SkillAgentRollup(ctx context.Context, f *MetricsFilter) ([
 	for rows.Next() {
 		a := &SkillAgentUsage{}
 		var versions sql.NullString
-		if err := rows.Scan(&a.Agent, &a.Invocations, &versions, &a.Sessions, &a.LastFiredMs); err != nil {
+		var tin, tout sql.NullInt64
+		if err := rows.Scan(&a.Agent, &a.Invocations, &versions, &a.Sessions,
+			&a.LastFiredMs, &tin, &tout, &a.TokenSessions); err != nil {
 			return nil, fmt.Errorf("store: scan agent usage: %w", err)
 		}
 		a.Versions = splitVersions(versions)
+		a.InputTokens = nullInt64Ptr(tin)
+		a.OutputTokens = nullInt64Ptr(tout)
 		out = append(out, a)
 	}
 	return out, rows.Err()
@@ -292,30 +348,52 @@ func (s *sqliteStore) SkillAgentRollup(ctx context.Context, f *MetricsFilter) ([
 // SkillModelUsage is one skill's rollup for a single model — the
 // "skill A on opus vs skill A on fable" cut. Model is the turn's
 // gen_ai.request.model stamped onto the skill's spans at derive time;
-// "" groups spans whose transcript carried no model.
+// "" groups spans whose transcript carried no model. Tokens are
+// session-attributed within the cut; nil sides mean no usage reported (n/a).
 type SkillModelUsage struct {
-	Model       string
-	Invocations int64
-	Sessions    int64
-	LastFiredMs int64
+	Model         string
+	Invocations   int64
+	Sessions      int64
+	LastFiredMs   int64
+	InputTokens   *int64
+	OutputTokens  *int64
+	TokenSessions int64 // sessions in the cut that reported usage
 }
 
 // SkillModelRollup aggregates one skill's SKILL spans per model, busiest
-// model first. f.Skill is required.
+// model first. f.Skill is required. Unlike the agent cut, models OVERLAP: a
+// session that invoked the skill on two models contributes its whole session
+// tokens to both rows — exposure, not exclusive cost. Surfaces must label it
+// that way.
 func (s *sqliteStore) SkillModelRollup(ctx context.Context, f *MetricsFilter) ([]*SkillModelUsage, error) {
 	if f == nil || f.Skill == "" {
 		return nil, fmt.Errorf("store: skill model rollup: Skill is required")
 	}
 	where, args := skillSpanWhereSQL(f)
-	q := `SELECT COALESCE(json_extract(attributes, '$."gen_ai.request.model"'), ''),
+	q := `WITH sk AS (
+	  SELECT COALESCE(json_extract(attributes, '$."gen_ai.request.model"'), '') AS model,
+	         session_id, start_ms
+	  FROM spans ` + where + `
+	),
+	tok AS (
+	  SELECT ss.model,
+	    CAST(SUM(m.tokens_in) AS INTEGER)  AS tin,
+	    CAST(SUM(m.tokens_out) AS INTEGER) AS tout,
+	    ` + tokenSessionsAgg + ` AS tses
+	  FROM (SELECT DISTINCT model, session_id FROM sk) ss
+	  JOIN session_meta m ON m.session_id = ss.session_id
+	  GROUP BY ss.model
+	)
+	SELECT sk.model,
 	  COUNT(*),
-	  COUNT(DISTINCT session_id),
-	  MAX(start_ms)
-	FROM spans ` + where + `
-	GROUP BY 1
-	ORDER BY COUNT(*) DESC, 1 ASC`
+	  COUNT(DISTINCT sk.session_id),
+	  MAX(sk.start_ms),
+	  MAX(t.tin), MAX(t.tout), COALESCE(MAX(t.tses), 0)
+	FROM sk LEFT JOIN tok t ON t.model = sk.model
+	GROUP BY sk.model
+	ORDER BY COUNT(*) DESC, sk.model ASC`
 
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.queryTokenRollup(ctx, q, args)
 	if err != nil {
 		return nil, fmt.Errorf("store: skill model rollup: %w", err)
 	}
@@ -324,9 +402,13 @@ func (s *sqliteStore) SkillModelRollup(ctx context.Context, f *MetricsFilter) ([
 	var out []*SkillModelUsage
 	for rows.Next() {
 		m := &SkillModelUsage{}
-		if err := rows.Scan(&m.Model, &m.Invocations, &m.Sessions, &m.LastFiredMs); err != nil {
+		var tin, tout sql.NullInt64
+		if err := rows.Scan(&m.Model, &m.Invocations, &m.Sessions, &m.LastFiredMs,
+			&tin, &tout, &m.TokenSessions); err != nil {
 			return nil, fmt.Errorf("store: scan model usage: %w", err)
 		}
+		m.InputTokens = nullInt64Ptr(tin)
+		m.OutputTokens = nullInt64Ptr(tout)
 		out = append(out, m)
 	}
 	return out, rows.Err()
@@ -343,8 +425,10 @@ type SkillVersionUsage struct {
 	Sessions     int64
 	FirstFiredMs int64
 	LastFiredMs  int64
-	InputTokens  int64 // session-attributed, keyed by this version's session set
-	OutputTokens int64
+	// Session-attributed, keyed by this version's session set; nil = the
+	// sessions reported no usage (n/a).
+	InputTokens  *int64
+	OutputTokens *int64
 }
 
 // SkillVersionRollup groups one skill's SKILL spans by the version identity
@@ -365,10 +449,10 @@ func (s *sqliteStore) SkillVersionRollup(ctx context.Context, f *MetricsFilter) 
 	  -- of its spans carried a proven version; otherwise the same session's
 	  -- tokens would be claimed by both the proven row and the unknown row.
 	  SELECT vs.ref, vs.commit_sha,
-	    CAST(COALESCE(SUM(` + strings.ReplaceAll(llmInTokExpr, "attributes", "l.attributes") + `), 0) AS INTEGER) AS tin,
-	    CAST(COALESCE(SUM(` + strings.ReplaceAll(llmOutTokExpr, "attributes", "l.attributes") + `), 0) AS INTEGER) AS tout
+	    CAST(SUM(m.tokens_in) AS INTEGER)  AS tin,
+	    CAST(SUM(m.tokens_out) AS INTEGER) AS tout
 	  FROM (SELECT DISTINCT ref, commit_sha, session_id FROM ver) vs
-	  JOIN spans l ON l.session_id = vs.session_id AND l.kind = 'LLM'
+	  JOIN session_meta m ON m.session_id = vs.session_id
 	  WHERE vs.ref <> ''
 	     OR NOT EXISTS (SELECT 1 FROM ver pv
 	                    WHERE pv.session_id = vs.session_id AND pv.ref <> '')
@@ -379,14 +463,14 @@ func (s *sqliteStore) SkillVersionRollup(ctx context.Context, f *MetricsFilter) 
 	  COUNT(DISTINCT ver.session_id),
 	  MIN(ver.start_ms),
 	  MAX(ver.start_ms),
-	  COALESCE(MAX(tok.tin), 0),
-	  COALESCE(MAX(tok.tout), 0)
+	  MAX(tok.tin),
+	  MAX(tok.tout)
 	FROM ver
 	LEFT JOIN tok ON tok.ref = ver.ref AND tok.commit_sha = ver.commit_sha
 	GROUP BY ver.ref, ver.commit_sha
 	ORDER BY MIN(ver.start_ms) DESC`
 
-	rows, err := s.db.QueryContext(ctx, q, args...)
+	rows, err := s.queryTokenRollup(ctx, q, args)
 	if err != nil {
 		return nil, fmt.Errorf("store: skill version rollup: %w", err)
 	}
@@ -395,10 +479,13 @@ func (s *sqliteStore) SkillVersionRollup(ctx context.Context, f *MetricsFilter) 
 	var out []*SkillVersionUsage
 	for rows.Next() {
 		v := &SkillVersionUsage{}
+		var tin, tout sql.NullInt64
 		if err := rows.Scan(&v.Ref, &v.Commit, &v.Invocations, &v.Sessions,
-			&v.FirstFiredMs, &v.LastFiredMs, &v.InputTokens, &v.OutputTokens); err != nil {
+			&v.FirstFiredMs, &v.LastFiredMs, &tin, &tout); err != nil {
 			return nil, fmt.Errorf("store: scan version usage: %w", err)
 		}
+		v.InputTokens = nullInt64Ptr(tin)
+		v.OutputTokens = nullInt64Ptr(tout)
 		out = append(out, v)
 	}
 	return out, rows.Err()

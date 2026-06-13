@@ -103,12 +103,15 @@ type Store interface {
 	// agent. f.Skill is required.
 	SkillInvocationSeries(ctx context.Context, f *MetricsFilter) ([]*SkillSeriesPoint, error)
 
-	// SkillAgentRollup aggregates one skill's invocations per agent.
+	// SkillAgentRollup aggregates one skill's invocations per agent,
+	// including session-attributed token totals (nil = no usage reported).
 	// f.Skill is required.
 	SkillAgentRollup(ctx context.Context, f *MetricsFilter) ([]*SkillAgentUsage, error)
 
 	// SkillModelRollup aggregates one skill's invocations per model — the
-	// skill × model performance cut. f.Skill is required.
+	// skill × model performance cut, including session-attributed token
+	// totals (models overlap: a two-model session counts toward both).
+	// f.Skill is required.
 	SkillModelRollup(ctx context.Context, f *MetricsFilter) ([]*SkillModelUsage, error)
 
 	// SkillVersionRollup groups one skill's invocations by the (ref, commit)

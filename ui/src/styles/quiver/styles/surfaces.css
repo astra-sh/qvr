@@ -81,3 +81,9 @@
 .qvr-table tbody tr:hover { background: var(--surface-raised); }
 .qvr-table tbody tr:last-child td { border-bottom: none; }
 .qvr-table__muted { color: var(--text-faint); }
+/* Sortable header: a button that inherits the micro-header look exactly. */
+.qvr-table__sort {
+  font: inherit; color: inherit; letter-spacing: inherit; text-transform: inherit;
+  background: none; border: none; padding: 0; cursor: pointer;
+}
+.qvr-table__sort:hover { color: var(--text); }
