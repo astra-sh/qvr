@@ -174,7 +174,9 @@ export default function SkillLedger({
 // open) and shows two columns: tokens-by-agent and the recent traces that fired
 // it — the per-skill detail the handoff reveals inline.
 function SkillDrill({ name }: { name: string }) {
-  const rep = useFetch(() => api.skillReport(name), `drill:${name}:${scopeToken()}`);
+  // Poll on the same 10s cadence as the parent Overview so the drill's
+  // agent/trace totals never drift out of sync with the auto-refreshing row.
+  const rep = useFetch(() => api.skillReport(name), `drill:${name}:${scopeToken()}`, 10_000);
   if (rep.loading) return <span className="qvr-sub">loading…</span>;
   if (rep.error) return <span className="qvr-sub">couldn't load detail: {rep.error}</span>;
   if (!rep.data) return <span className="qvr-sub">no detail available.</span>;
