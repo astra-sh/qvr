@@ -113,6 +113,15 @@ type InstallRequest struct {
 	// to the by-name full-index lookup, so this is a pure speedup, never a
 	// correctness change.
 	SkillPath string
+	// Vendor materializes the skill as real files committed into the repo at
+	// VendorPath instead of a symlink into the shared store (`qvr add --vendor`).
+	// After the normal resolve + scan + store materialization, the content is
+	// promoted into the canonical agent dir as a real directory (sibling targets
+	// repoint at it via relative symlinks) and the lock entry flips to
+	// mode:vendor — so the skill travels with a `git clone` without needing the
+	// store or a reachable registry. Composes with any source (registry or
+	// --local).
+	Vendor bool
 }
 
 // InstallResult holds the outcome for a single skill install.
@@ -206,9 +215,29 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		return nil, err
 	}
 	if err := lock.Write(); err != nil {
+		in.rollbackInstallResult(result, req)
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 	return result, nil
+}
+
+// rollbackInstallResult undoes a completed InstallInto when the single-install
+// caller's lock.Write fails: it removes the target symlinks and, for a vendored
+// install, the real canonical directory VendorIntoRepo materialized (a plain
+// symlink rollback can't, since it's a real dir — a retry would otherwise hit
+// "exists and is not a symlink"). Best-effort.
+func (in *Installer) rollbackInstallResult(result *InstallResult, req InstallRequest) {
+	if result == nil {
+		return
+	}
+	for _, t := range result.Targets {
+		if p, perr := ResolveTargetPath(t, result.Name, req.ProjectRoot, req.Global); perr == nil {
+			_ = RemoveSymlink(p)
+		}
+	}
+	if req.Vendor && result.Worktree != "" {
+		_ = os.RemoveAll(result.Worktree)
+	}
 }
 
 // InstallInto runs the full install flow against an already-loaded, in-memory
@@ -280,7 +309,8 @@ func (in *Installer) InstallInto(req InstallRequest, lock *model.LockFile) (*Ins
 		setSubtreeReadOnly(skillDir)
 	}
 
-	if err := in.linkInstallTargets(req, plan, skillDir); err != nil {
+	created, err := in.linkInstallTargets(req, plan, skillDir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -292,11 +322,25 @@ func (in *Installer) InstallInto(req InstallRequest, lock *model.LockFile) (*Ins
 	}
 	lock.Put(entry)
 
+	worktree := finalPath
+	// --vendor: promote the just-materialized store copy into real files
+	// committed in the repo, flipping the entry to mode:vendor. The entry is the
+	// pointer held in the lock map, so mutating it in place is reflected on the
+	// caller's lock.Write(). The store worktree stays on disk (shared, content-
+	// addressed) until `qvr cache prune` reclaims it as an orphan.
+	if req.Vendor {
+		if _, verr := VendorIntoRepo(VendorRequest{Entry: entry, ProjectRoot: req.ProjectRoot, Global: req.Global}); verr != nil {
+			rollbackLinks(created)
+			return nil, fmt.Errorf("vendor %s: %w", localName, verr)
+		}
+		worktree = EffectiveTarget(entry, req.ProjectRoot)
+	}
+
 	result := &InstallResult{
 		Name:     localName,
 		Registry: loc.RegistryName,
 		Version:  version,
-		Worktree: finalPath,
+		Worktree: worktree,
 		Targets:  targets,
 		Commit:   commit,
 	}
@@ -462,7 +506,7 @@ func (in *Installer) gateInstallTrust(req InstallRequest, plan *installPlan, ski
 // a sanitized agent view for a legacy root-layout worktree with a live .git/ —
 // issue #154) and creates a symlink for every requested target, rolling back any
 // links created so far if one fails.
-func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, skillDir string) error {
+func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, skillDir string) ([]string, error) {
 	loc := plan.loc
 	finalPath := plan.finalPath
 	localName := plan.localName
@@ -477,7 +521,7 @@ func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, s
 	if IsRootLayoutPath(loc.Entry.Path) && HasGitDir(finalPath) {
 		view, verr := buildAgentViewAt(finalPath)
 		if verr != nil {
-			return fmt.Errorf("agent view: %w", verr)
+			return nil, fmt.Errorf("agent view: %w", verr)
 		}
 		linkTarget = view
 	}
@@ -489,15 +533,15 @@ func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, s
 		linkPath, err := ResolveTargetPath(t, localName, req.ProjectRoot, req.Global)
 		if err != nil {
 			rollbackLinks(created)
-			return err
+			return nil, err
 		}
 		if err := CreateSymlink(linkPath, linkTarget); err != nil {
 			rollbackLinks(created)
-			return fmt.Errorf("symlink %s: %w", t, err)
+			return nil, fmt.Errorf("symlink %s: %w", t, err)
 		}
 		created = append(created, linkPath)
 	}
-	return nil
+	return created, nil
 }
 
 // buildLockEntry assembles the in-memory lock entry for the install: it merges
@@ -790,21 +834,27 @@ func (in *Installer) RemoveFrom(name string, req InstallRequest, lock *model.Loc
 	}
 
 	entryGlobal := lock.IsGlobal(quiverHome())
-	canonicalEditAbs := ""
+	// canonicalDirAbs is the in-repo real directory to rm -rf for the modes
+	// whose canonical target IS a directory rather than a store symlink:
+	// edit (EditPath) and vendor (VendorPath).
+	canonicalDirAbs := ""
 	if entry.IsEdit() {
 		if !req.Force {
 			return fmt.Errorf("remove %s: skill is in edit mode — pass --force to delete the eject dir at %s", name, entry.EditPath)
 		}
-		canonicalEditAbs = entry.EditPath
-		if canonicalEditAbs != "" && !filepath.IsAbs(canonicalEditAbs) {
-			canonicalEditAbs = filepath.Join(req.ProjectRoot, canonicalEditAbs)
-		}
+		canonicalDirAbs = absInProject(entry.EditPath, req.ProjectRoot)
+	}
+	if entry.IsVendor() {
+		// Vendored files are reproducible (re-run `qvr add --vendor`) and
+		// tracked by the outer repo, so — unlike an edit dir's hand-authored
+		// changes — removal needs no --force; `git checkout` restores them.
+		canonicalDirAbs = absInProject(entry.VendorPath, req.ProjectRoot)
 	}
 
-	// Pass 1: drop target symlinks (and the canonical edit dir, when in
-	// edit mode). Bail without touching the lock if any step fails so the
-	// user can recover rather than be left with an orphan lock entry.
-	if err := removeTargetLinks(name, entry, req, entryGlobal, canonicalEditAbs); err != nil {
+	// Pass 1: drop target symlinks (and the canonical in-repo dir, for edit/
+	// vendor). Bail without touching the lock if any step fails so the user can
+	// recover rather than be left with an orphan lock entry.
+	if err := removeTargetLinks(name, entry, req, entryGlobal, canonicalDirAbs); err != nil {
 		return err
 	}
 
@@ -821,24 +871,34 @@ func (in *Installer) RemoveFrom(name string, req InstallRequest, lock *model.Loc
 	return nil
 }
 
-// removeTargetLinks drops every target symlink for the entry, and for a
-// mode:edit canonical target rm -rf's the eject dir (siblings are symlinks
+// absInProject resolves a lock-recorded path (EditPath/VendorPath) to absolute:
+// project-relative paths join projectRoot, absolute paths (e.g. --global) and
+// empty pass through unchanged.
+func absInProject(p, projectRoot string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(projectRoot, p)
+}
+
+// removeTargetLinks drops every target symlink for the entry, and for an
+// edit/vendor canonical target rm -rf's the in-repo dir (siblings are symlinks
 // pointing at canonical and use RemoveSymlink). Bails on the first failure so
 // the caller can leave the lock untouched for recovery.
-func removeTargetLinks(name string, entry *model.LockEntry, req InstallRequest, entryGlobal bool, canonicalEditAbs string) error {
+func removeTargetLinks(name string, entry *model.LockEntry, req InstallRequest, entryGlobal bool, canonicalDirAbs string) error {
 	for _, t := range entry.Targets {
 		linkPath, err := ResolveTargetPath(t, name, req.ProjectRoot, entryGlobal)
 		if err != nil {
 			return fmt.Errorf("remove %s: resolve target %s: %w", name, t, err)
 		}
-		// For mode:edit canonical target: rm -rf the eject dir. Siblings
+		// For an edit/vendor canonical target: rm -rf the real dir. Siblings
 		// are symlinks pointing at canonical and use RemoveSymlink.
-		if entry.IsEdit() && canonicalEditAbs != "" {
-			canonicalAbs, _ := filepath.Abs(canonicalEditAbs)
+		if (entry.IsEdit() || entry.IsVendor()) && canonicalDirAbs != "" {
+			canonicalAbs, _ := filepath.Abs(canonicalDirAbs)
 			absLink, _ := filepath.Abs(linkPath)
 			if canonicalAbs == absLink {
 				if err := os.RemoveAll(linkPath); err != nil {
-					return fmt.Errorf("remove %s: rm eject dir %s: %w", name, linkPath, err)
+					return fmt.Errorf("remove %s: rm in-repo dir %s: %w", name, linkPath, err)
 				}
 				continue
 			}
@@ -859,7 +919,11 @@ func removeTargetLinks(name string, entry *model.LockEntry, req InstallRequest, 
 // entries never had a shared worktree to clean; link installs point at
 // user-owned dirs we don't touch.
 func (in *Installer) removeSharedWorktree(name string, entry *model.LockEntry, req InstallRequest, lock *model.LockFile) error {
-	if entry.IsLink() || entry.IsEdit() {
+	// Edit/vendor entries' content is the in-repo dir (removed in pass 1); link
+	// installs point at user-owned dirs. None claim a store worktree to drop —
+	// the transient one a vendored install left behind is reclaimed by `qvr
+	// cache prune` once no other project references it.
+	if entry.IsLink() || entry.IsEdit() || entry.IsVendor() {
 		return nil
 	}
 	worktreePath := EntryWorktreePath(entry)
@@ -958,7 +1022,7 @@ func (in *Installer) InstallLocal(localPath string, req InstallRequest) (*Instal
 		return nil, err
 	}
 
-	if err := materializeLocalCopy(abs, finalPath); err != nil {
+	if err := in.materializeLocalCopy(abs, finalPath); err != nil {
 		return nil, err
 	}
 	// Freeze: same immutability contract as a shared install (see immutable.go)
@@ -967,6 +1031,58 @@ func (in *Installer) InstallLocal(localPath string, req InstallRequest) (*Instal
 	// `qvr lock verify` and healed by `qvr sync` (re-copy from Source).
 	setSubtreeReadOnly(finalPath)
 
+	created, err := linkLocalTargets(name, finalPath, req)
+	if err != nil {
+		return nil, err
+	}
+
+	entry := &model.LockEntry{
+		Name:          name,
+		Registry:      model.LocalRegistry,
+		Source:        abs,
+		Ref:           "local",
+		Mode:          model.ModeLocal,
+		Commit:        commitKey,
+		InstallCommit: commitKey,
+		SubtreeHash:   hash,
+		Targets:       req.Targets,
+		InstalledAt:   time.Now().UTC(),
+	}
+	lock.Put(entry)
+
+	worktree := finalPath
+	// --vendor: promote the just-materialized store copy into real files
+	// committed in the repo, flipping the entry to mode:vendor. Mutates entry
+	// in place (the same pointer held in the lock map), so the Put above already
+	// reflects it. On failure the links we created are rolled back.
+	if req.Vendor {
+		if _, verr := VendorIntoRepo(VendorRequest{Entry: entry, ProjectRoot: req.ProjectRoot, Global: req.Global}); verr != nil {
+			rollbackLinks(created)
+			return nil, fmt.Errorf("vendor %s: %w", name, verr)
+		}
+		worktree = EffectiveTarget(entry, req.ProjectRoot)
+	}
+
+	if err := lock.Write(); err != nil {
+		rollbackVendoredInstall(created, req.Vendor, worktree)
+		return nil, fmt.Errorf("write lock file: %w", err)
+	}
+	return &InstallResult{
+		Name:     name,
+		Registry: model.LocalRegistry,
+		Version:  "local",
+		Worktree: worktree,
+		Commit:   commitKey,
+		Targets:  req.Targets,
+	}, nil
+}
+
+// linkLocalTargets symlinks every requested target at finalPath (the local
+// install's immutable store copy), rolling back any links created so far if one
+// fails so the filesystem is left consistent. Mirrors linkInstallTargets for the
+// registry path, minus the legacy root-layout agent-view handling a copied local
+// folder never needs.
+func linkLocalTargets(name, finalPath string, req InstallRequest) ([]string, error) {
 	var created []string
 	for _, t := range req.Targets {
 		linkPath, err := ResolveTargetPath(t, name, req.ProjectRoot, req.Global)
@@ -980,31 +1096,7 @@ func (in *Installer) InstallLocal(localPath string, req InstallRequest) (*Instal
 		}
 		created = append(created, linkPath)
 	}
-
-	lock.Put(&model.LockEntry{
-		Name:          name,
-		Registry:      model.LocalRegistry,
-		Source:        abs,
-		Ref:           "local",
-		Mode:          model.ModeLocal,
-		Commit:        commitKey,
-		InstallCommit: commitKey,
-		SubtreeHash:   hash,
-		Targets:       req.Targets,
-		InstalledAt:   time.Now().UTC(),
-	})
-	if err := lock.Write(); err != nil {
-		rollbackLinks(created)
-		return nil, fmt.Errorf("write lock file: %w", err)
-	}
-	return &InstallResult{
-		Name:     name,
-		Registry: model.LocalRegistry,
-		Version:  "local",
-		Worktree: finalPath,
-		Commit:   commitKey,
-		Targets:  req.Targets,
-	}, nil
+	return created, nil
 }
 
 // checkLocalConflict refuses to silently replace an existing entry of the same
@@ -1024,11 +1116,15 @@ func checkLocalConflict(lock *model.LockFile, name, abs string, force bool) erro
 	return nil
 }
 
-// materializeLocalCopy copies the local skill folder into the immutable worktree
-// at finalPath if it isn't already on disk. It stages in a sibling dir and
-// atomically renames so a crashed copy never leaves a half-written worktree
-// behind. copyDir skips .git/ and preserves exec bits.
-func materializeLocalCopy(abs, finalPath string) error {
+// materializeLocalCopy materializes the local skill folder into the immutable
+// worktree at finalPath if it isn't already on disk. It stages in a sibling dir
+// and atomically renames so a crashed copy never leaves a half-written worktree
+// behind. The copy flows through the SAME Materializer seam as a registry install
+// (Materializer.MaterializeFromDisk → BlobMaterializer reflink/content-store,
+// #205) rather than a bespoke recursive copy, and skips exactly what the canonical
+// hasher excludes (.git/, signature wrappers) so the materialized copy hash-agrees
+// with the source.
+func (in *Installer) materializeLocalCopy(abs, finalPath string) error {
 	if _, statErr := os.Stat(finalPath); statErr == nil {
 		return nil
 	}
@@ -1037,9 +1133,10 @@ func materializeLocalCopy(abs, finalPath string) error {
 	if err := os.MkdirAll(filepath.Dir(finalPath), 0o755); err != nil {
 		return fmt.Errorf("create worktrees dir: %w", err)
 	}
-	if err := copyDir(abs, stagingPath); err != nil {
+	mat := &Materializer{Blob: in.Blob}
+	if err := mat.MaterializeFromDisk(abs, stagingPath); err != nil {
 		_ = os.RemoveAll(stagingPath)
-		return fmt.Errorf("copy local skill: %w", err)
+		return fmt.Errorf("materialize local skill: %w", err)
 	}
 	if err := os.Rename(stagingPath, finalPath); err != nil {
 		// Lost the race to a concurrent install of the same content: the
@@ -1078,6 +1175,17 @@ func lintStagedSkill(stagingPath, skillRelPath string) error {
 func rollbackLinks(paths []string) {
 	for _, p := range paths {
 		_ = RemoveSymlink(p)
+	}
+}
+
+// rollbackVendoredInstall removes the created target symlinks and, for a
+// vendored install, the real canonical directory VendorIntoRepo materialized —
+// which rollbackLinks alone can't, since it's a real dir (a retry would
+// otherwise hit "exists and is not a symlink"). Best-effort.
+func rollbackVendoredInstall(created []string, vendor bool, vendorDir string) {
+	rollbackLinks(created)
+	if vendor && vendorDir != "" {
+		_ = os.RemoveAll(vendorDir)
 	}
 }
 

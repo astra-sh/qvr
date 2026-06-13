@@ -149,6 +149,15 @@ func EffectiveTarget(entry *model.LockEntry, projectRoot string) string {
 		}
 		return entry.EditPath
 	}
+	// Vendored skills, like edit installs, live as a real in-repo directory at
+	// VendorPath rather than a store worktree — the canonical agent dir IS the
+	// content. Resolve project-relative paths against projectRoot.
+	if entry.IsVendor() && entry.VendorPath != "" {
+		if projectRoot != "" && !filepath.IsAbs(entry.VendorPath) {
+			return filepath.Join(projectRoot, entry.VendorPath)
+		}
+		return entry.VendorPath
+	}
 	if entry.IsLink() {
 		return entry.Source
 	}

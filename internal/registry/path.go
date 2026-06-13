@@ -233,6 +233,14 @@ func WorktreePathForEntry(e *model.LockEntry) string {
 	if e.IsLink() {
 		return e.Source
 	}
+	// Vendored skills live in-repo at VendorPath, not in the store. They claim
+	// no store worktree, so the transient one materialized at install time
+	// becomes orphan and is reclaimed by `qvr cache prune` (the content is
+	// content-addressed and shared, so prune only drops it when no other
+	// project references it). Returning a path here would wrongly pin it.
+	if e.IsVendor() {
+		return ""
+	}
 	key := e.InstallCommit
 	if key == "" {
 		key = e.Commit
