@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { api, prettyAgent, scopeToken, useFetch, type SkillUsageRow } from "../api";
@@ -79,9 +79,9 @@ export default function SkillLedger({
           const intens = intensity(s);
           const hog = intens > INTENSITY_AMBER;
           const isOpen = open === s.name;
-          return [
+          return (
+            <Fragment key={s.name}>
             <tr
-              key={s.name}
               className={"ovr-ledrow" + (isOpen ? " ovr-ledrow--open" : "")}
               onClick={() => setOpen(isOpen ? null : s.name)}
             >
@@ -127,15 +127,16 @@ export default function SkillLedger({
                   {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                 </span>
               </Td>
-            </tr>,
-            isOpen ? (
-              <tr key={s.name + "-drill"} className="ovr-drill">
+            </tr>
+            {isOpen && (
+              <tr className="ovr-drill">
                 <td colSpan={COLS}>
                   <SkillDrill name={s.name} />
                 </td>
               </tr>
-            ) : null,
-          ];
+            )}
+            </Fragment>
+          );
         })}
         {dead.length > 0 && (
           <tr className="ovr-divrow">
@@ -175,6 +176,7 @@ export default function SkillLedger({
 function SkillDrill({ name }: { name: string }) {
   const rep = useFetch(() => api.skillReport(name), `drill:${name}:${scopeToken()}`);
   if (rep.loading) return <span className="qvr-sub">loading…</span>;
+  if (rep.error) return <span className="qvr-sub">couldn't load detail: {rep.error}</span>;
   if (!rep.data) return <span className="qvr-sub">no detail available.</span>;
 
   const r = rep.data;

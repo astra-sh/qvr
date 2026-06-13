@@ -24,13 +24,18 @@ interface ShareSeg {
   color: string;
 }
 
-function shareSegments(skills: SkillUsageRow[]): { segs: ShareSeg[]; total: number; topShare: number } {
+function shareSegments(skills: SkillUsageRow[]): {
+  segs: ShareSeg[];
+  total: number;
+  topShare: number;
+  truncated: boolean;
+} {
   const withTokens = skills
     .map((s) => ({ name: s.name, tokens: (s.tokensIn ?? 0) + (s.tokensOut ?? 0) }))
     .filter((s) => s.tokens > 0)
     .sort((a, b) => b.tokens - a.tokens);
   const total = withTokens.reduce((acc, s) => acc + s.tokens, 0);
-  if (total === 0) return { segs: [], total: 0, topShare: 0 };
+  if (total === 0) return { segs: [], total: 0, topShare: 0, truncated: false };
 
   const top = withTokens.slice(0, TOP_N);
   const restTokens = withTokens.slice(TOP_N).reduce((acc, s) => acc + s.tokens, 0);
@@ -49,7 +54,9 @@ function shareSegments(skills: SkillUsageRow[]): { segs: ShareSeg[]; total: numb
     });
   }
   const topShare = top.reduce((acc, s) => acc + s.tokens, 0) / total;
-  return { segs, total, topShare };
+  // Truncated only when there are more skills than the top tier — i.e. the share
+  // hint is meaningful (not a tautological "top N = 100%").
+  return { segs, total, topShare, truncated: restTokens > 0 };
 }
 
 export default function TokenBand({
@@ -63,7 +70,7 @@ export default function TokenBand({
   const tout = summary.tokens_out;
   const total = tin + tout;
   const meterMax = Math.max(tin, tout, 1);
-  const { segs, topShare } = shareSegments(skills);
+  const { segs, topShare, truncated } = shareSegments(skills);
 
   return (
     <Card>
@@ -83,9 +90,9 @@ export default function TokenBand({
         <div className="ovr-band__share">
           <div className="ovr-lbl">
             <span>token share by skill</span>
-            {segs.length > 0 && (
+            {truncated && (
               <span className="ovr-lbl__hint">
-                top {Math.min(TOP_N, segs.length)} = {Math.round(topShare * 100)}% of skill tokens
+                top {TOP_N} = {Math.round(topShare * 100)}% of skill tokens
               </span>
             )}
           </div>
