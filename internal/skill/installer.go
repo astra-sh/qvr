@@ -289,7 +289,8 @@ func (in *Installer) InstallInto(req InstallRequest, lock *model.LockFile) (*Ins
 		setSubtreeReadOnly(skillDir)
 	}
 
-	if err := in.linkInstallTargets(req, plan, skillDir); err != nil {
+	created, err := in.linkInstallTargets(req, plan, skillDir)
+	if err != nil {
 		return nil, err
 	}
 
@@ -309,6 +310,7 @@ func (in *Installer) InstallInto(req InstallRequest, lock *model.LockFile) (*Ins
 	// addressed) until `qvr cache prune` reclaims it as an orphan.
 	if req.Vendor {
 		if _, verr := VendorIntoRepo(VendorRequest{Entry: entry, ProjectRoot: req.ProjectRoot, Global: req.Global}); verr != nil {
+			rollbackLinks(created)
 			return nil, fmt.Errorf("vendor %s: %w", localName, verr)
 		}
 		worktree = EffectiveTarget(entry, req.ProjectRoot)
@@ -484,7 +486,7 @@ func (in *Installer) gateInstallTrust(req InstallRequest, plan *installPlan, ski
 // a sanitized agent view for a legacy root-layout worktree with a live .git/ —
 // issue #154) and creates a symlink for every requested target, rolling back any
 // links created so far if one fails.
-func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, skillDir string) error {
+func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, skillDir string) ([]string, error) {
 	loc := plan.loc
 	finalPath := plan.finalPath
 	localName := plan.localName
@@ -499,7 +501,7 @@ func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, s
 	if IsRootLayoutPath(loc.Entry.Path) && HasGitDir(finalPath) {
 		view, verr := buildAgentViewAt(finalPath)
 		if verr != nil {
-			return fmt.Errorf("agent view: %w", verr)
+			return nil, fmt.Errorf("agent view: %w", verr)
 		}
 		linkTarget = view
 	}
@@ -511,15 +513,15 @@ func (in *Installer) linkInstallTargets(req InstallRequest, plan *installPlan, s
 		linkPath, err := ResolveTargetPath(t, localName, req.ProjectRoot, req.Global)
 		if err != nil {
 			rollbackLinks(created)
-			return err
+			return nil, err
 		}
 		if err := CreateSymlink(linkPath, linkTarget); err != nil {
 			rollbackLinks(created)
-			return fmt.Errorf("symlink %s: %w", t, err)
+			return nil, fmt.Errorf("symlink %s: %w", t, err)
 		}
 		created = append(created, linkPath)
 	}
-	return nil
+	return created, nil
 }
 
 // buildLockEntry assembles the in-memory lock entry for the install: it merges

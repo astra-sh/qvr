@@ -3,6 +3,7 @@ package skill_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/astra-sh/qvr/internal/canonical"
@@ -244,5 +245,28 @@ func TestEdit_RefusesVendored(t *testing.T) {
 	entry, _ := lock.Get("my-skill")
 	if _, err := skill.EjectToTarget(skill.EjectRequest{Entry: entry, ProjectRoot: h.project}); err == nil {
 		t.Fatal("EjectToTarget on a vendored entry should error")
+	}
+}
+
+// TestMaterializeFromDisk_RefusesEscapingSymlink guards the --local disk
+// materialization escape check, including a BARE ".." target (which cleans to
+// ".." with no "../" prefix and previously slipped through).
+func TestMaterializeFromDisk_RefusesEscapingSymlink(t *testing.T) {
+	for _, target := range []string{"..", "../outside", "/etc/passwd"} {
+		t.Run(target, func(t *testing.T) {
+			src := t.TempDir()
+			if err := os.WriteFile(filepath.Join(src, "SKILL.md"),
+				[]byte("---\nname: x\ndescription: y\n---\nbody\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(src, "escape")); err != nil {
+				t.Fatal(err)
+			}
+			dest := filepath.Join(t.TempDir(), "out")
+			err := (&skill.Materializer{}).MaterializeFromDisk(src, dest)
+			if err == nil || !strings.Contains(err.Error(), "escaping target") {
+				t.Errorf("target %q: want escaping-target rejection, got %v", target, err)
+			}
+		})
 	}
 }

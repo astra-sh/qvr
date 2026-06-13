@@ -171,8 +171,12 @@ func (m *Materializer) writeDiskEntry(srcPath, destAbs string, fi os.FileInfo) e
 		if err != nil {
 			return fmt.Errorf("read symlink %s: %w", srcPath, err)
 		}
-		if t := filepath.ToSlash(target); filepath.IsAbs(target) || strings.HasPrefix(filepath.ToSlash(filepath.Clean(target)), "../") {
-			return fmt.Errorf("refusing symlink %s with escaping target %q", srcPath, t)
+		// Reject any target that escapes the skill dir: absolute, a bare ".."
+		// (cleans to ".." with no trailing slash), or anything that cleans to a
+		// "../"-prefixed path.
+		cleaned := filepath.ToSlash(filepath.Clean(target))
+		if filepath.IsAbs(target) || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+			return fmt.Errorf("refusing symlink %s with escaping target %q", srcPath, filepath.ToSlash(target))
 		}
 		return os.Symlink(target, destAbs)
 	}
