@@ -106,22 +106,27 @@ func (r *Reconciler) restoreFromLock(lock *model.LockFile, projectRoot string, g
 			continue
 		}
 		if entry.IsEdit() {
-			// Edit-mode entries live at EditPath inside the project, not in
-			// the shared cache. The shared worktree is no longer load-bearing,
-			// so we don't try to (re-)install — just verify the edit dir is
-			// present and refresh sibling symlinks. If EditPath is missing
-			// after e.g. a teammate cloned the repo without the dir,
-			// surface a clear error rather than silently overwriting with
-			// shared-mode contents.
-			editDir := EffectiveTarget(entry, projectRoot)
-			if _, err := os.Stat(editDir); err != nil {
-				res.Errors = append(res.Errors, fmt.Sprintf("%s: edit dir %s missing — re-run `qvr edit %s` to re-materialize from %s@%s",
-					entry.Name, editDir, entry.Name, entry.UpstreamSource(), shortHashOrFull(entry.InstallCommit)))
-				continue
-			}
-			if err := r.fixSymlinks(entry, projectRoot, global, opts, res); err != nil {
-				res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", entry.Name, err))
-			}
+			// Edit-mode entries live at EditPath inside the project, not in the
+			// shared cache. The shared worktree is no longer load-bearing, so we
+			// don't (re-)install — just verify the dir is present and refresh
+			// sibling symlinks.
+			r.reconcileInRepoEntry(entry, projectRoot, global, opts, res, func(dir string) string {
+				return fmt.Sprintf("%s: edit dir %s missing — re-run `qvr edit %s` to re-materialize from %s@%s",
+					entry.Name, dir, entry.Name, entry.UpstreamSource(), shortHashOrFull(entry.InstallCommit))
+			})
+			continue
+		}
+
+		if entry.IsVendor() {
+			// Vendored entries live as real files committed in the repo at
+			// VendorPath — the source of truth is the project tree, not the
+			// store. A teammate gets them with the clone; a missing dir means
+			// the checkout dropped them, so surface a clear error rather than
+			// silently overwriting.
+			r.reconcileInRepoEntry(entry, projectRoot, global, opts, res, func(dir string) string {
+				return fmt.Sprintf("%s: vendored dir %s missing — it is tracked by the repo; restore it from version control or re-run `qvr add --vendor`",
+					entry.Name, dir)
+			})
 			continue
 		}
 
@@ -147,6 +152,22 @@ func (r *Reconciler) restoreFromLock(lock *model.LockFile, projectRoot string, g
 		}
 	}
 	return nil
+}
+
+// reconcileInRepoEntry handles entries whose content lives as a real directory
+// inside the project (edit + vendor modes): the store worktree is not load-
+// bearing, so reconcile only verifies the in-repo dir exists and refreshes
+// sibling symlinks — never a re-install. missingMsg builds the error when the
+// dir is absent (each mode points the user at its own repair path).
+func (r *Reconciler) reconcileInRepoEntry(entry *model.LockEntry, projectRoot string, global bool, opts ReconcileOptions, res *ReconcileResult, missingMsg func(dir string) string) {
+	dir := EffectiveTarget(entry, projectRoot)
+	if _, err := os.Stat(dir); err != nil {
+		res.Errors = append(res.Errors, missingMsg(dir))
+		return
+	}
+	if err := r.fixSymlinks(entry, projectRoot, global, opts, res); err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", entry.Name, err))
+	}
 }
 
 // restoreShared restores a shared (registry) entry whose worktree is missing,
@@ -245,22 +266,15 @@ func (r *Reconciler) restoreLocal(entry *model.LockEntry, projectRoot string, gl
 	if worktreePath == "" {
 		return fmt.Errorf("cannot derive worktree path for local copy — re-run `qvr add --local %s`", entry.Source)
 	}
-	staging := fmt.Sprintf("%s.staging.%d", worktreePath, os.Getpid())
-	_ = os.RemoveAll(staging)
-	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
-		return fmt.Errorf("create worktrees dir: %w", err)
+	if r.Installer == nil {
+		return fmt.Errorf("cannot re-materialize local copy %s: no installer configured", entry.Name)
 	}
-	if err := copyDir(entry.Source, staging); err != nil {
-		_ = os.RemoveAll(staging)
-		return fmt.Errorf("re-copy local skill from %s: %w", entry.Source, err)
-	}
-	if err := os.Rename(staging, worktreePath); err != nil {
-		if _, e := os.Stat(worktreePath); e == nil {
-			_ = os.RemoveAll(staging)
-		} else {
-			_ = os.RemoveAll(staging)
-			return fmt.Errorf("finalize local worktree: %w", err)
-		}
+	// Re-materialize through the same seam as the initial install
+	// (MaterializeFromDisk → reflink), not a bespoke copy — the installer's
+	// staging + atomic-rename handles the missing-worktree case we just
+	// confirmed.
+	if err := r.Installer.materializeLocalCopy(entry.Source, worktreePath); err != nil {
+		return fmt.Errorf("re-materialize local skill from %s: %w", entry.Source, err)
 	}
 	setSubtreeReadOnly(worktreePath)
 	res.Installed = append(res.Installed, entry.Name)
@@ -290,11 +304,12 @@ func (r *Reconciler) fixSymlinks(entry *model.LockEntry, projectRoot string, glo
 			return nil
 		}
 	}
-	// For edit-mode entries the canonical EditPath is itself a real directory
-	// that must not be replaced with a self-referential symlink. Identify the
-	// canonical absolute path so we can skip it in the per-target loop.
+	// For edit- and vendor-mode entries the canonical EditPath/VendorPath is
+	// itself a real directory that must not be replaced with a self-referential
+	// symlink. Identify the canonical absolute path so we can skip it in the
+	// per-target loop (siblings still get repointed at it).
 	var canonicalAbs string
-	if entry.IsEdit() {
+	if entry.IsEdit() || entry.IsVendor() {
 		if abs, err := filepath.Abs(target); err == nil {
 			canonicalAbs = normalize(abs)
 		}

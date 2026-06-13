@@ -80,10 +80,11 @@ var (
 // Install mode constants. Empty string means "shared" (default add semantics)
 // for backward compatibility — older v5 locks predate this field.
 const (
-	ModeShared = ""      // symlink → ~/.quiver/worktrees/.../  (default for `qvr add`)
-	ModeEdit   = "edit"  // canonical real dir at EditPath (set by `qvr edit`)
-	ModeLink   = "link"  // absolute path in Source (legacy `qvr link`; read-only compat)
-	ModeLocal  = "local" // immutable copy of a local folder (set by `qvr add --local`)
+	ModeShared = ""       // symlink → ~/.quiver/worktrees/.../  (default for `qvr add`)
+	ModeEdit   = "edit"   // canonical real dir at EditPath (set by `qvr edit`)
+	ModeLink   = "link"   // absolute path in Source (legacy `qvr link`; read-only compat)
+	ModeLocal  = "local"  // immutable copy of a local folder (set by `qvr add --local`)
+	ModeVendor = "vendor" // real files committed into the repo at VendorPath (set by `qvr add --vendor`)
 )
 
 // LocalRegistry is the reserved registry name stamped on `qvr add --local`
@@ -179,6 +180,15 @@ type LockEntry struct {
 	// symlinks point at this directory; siblings beyond the canonical
 	// target carry relative symlinks to it. Empty when Mode != "edit".
 	EditPath string `json:"editPath,omitempty" toml:"editPath,omitempty"`
+
+	// VendorPath is the project-relative path of the canonical vendored
+	// copy when Mode == "vendor" (e.g. ".claude/skills/auth"). Like
+	// EditPath it is a real in-repo directory the canonical target IS,
+	// with sibling targets carrying relative symlinks to it — but the
+	// bytes are tracked by the outer repo (no nested .git), so a teammate
+	// who clones the repo gets the skill files with no store, registry, or
+	// qvr required. Empty when Mode != "vendor".
+	VendorPath string `json:"vendorPath,omitempty" toml:"vendorPath,omitempty"`
 
 	// Targets is the list of agent dirs the skill is symlinked into.
 	Targets []string `json:"targets" toml:"targets"`
@@ -287,6 +297,20 @@ func (e *LockEntry) IsEdit() bool {
 		return false
 	}
 	return e.Mode == ModeEdit
+}
+
+// IsVendor reports whether this entry is vendored: real skill files committed
+// into the repo at VendorPath via `qvr add --vendor`. The canonical agent
+// target dir at VendorPath is itself a real directory (sibling targets repoint
+// at it), and the bytes are version-controlled by the outer repo rather than
+// the qvr store — so the skill travels with a `git clone` without needing a
+// store worktree or a reachable registry. Like edit installs, the shared store
+// worktree is not load-bearing for a vendored skill.
+func (e *LockEntry) IsVendor() bool {
+	if e == nil {
+		return false
+	}
+	return e.Mode == ModeVendor
 }
 
 // LockFile is the on-disk record of installed skills.

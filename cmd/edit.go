@@ -123,6 +123,11 @@ func ejectUnderLock(name, projectRoot, lockPath, projPath string, result **skill
 	if entry.IsLink() {
 		return fmt.Errorf("%s is a link install at %s — edit the source path directly", name, entry.Source)
 	}
+	// Vendored skills are already real, writable files committed in the repo;
+	// there's nothing to eject — point the user at the in-repo dir.
+	if entry.IsVendor() {
+		return fmt.Errorf("%s is vendored at %s — its files are real and editable in the repo; edit them directly", name, entry.VendorPath)
+	}
 	// Already ejected: no-op, return current state.
 	if entry.IsEdit() {
 		*idempotent = true

@@ -28,6 +28,13 @@ var (
 	// ErrNoTargets is returned by Eject when the lock entry records no
 	// installed targets, leaving no agent dir to eject the copy into.
 	ErrNoTargets = errors.New("entry has no installed targets to eject into")
+	// ErrCannotVendorLink is returned by VendorIntoRepo for a link install:
+	// its bytes live at an external path with no store worktree to copy in.
+	ErrCannotVendorLink = errors.New("cannot vendor a link install")
+	// ErrCannotEjectVendor is returned by EjectToTarget for a vendored entry:
+	// its files are already real and writable in the repo, so there is nothing
+	// to eject.
+	ErrCannotEjectVendor = errors.New("cannot eject a vendored install — its files are already editable in the repo")
 )
 
 // EjectRequest drives a `qvr edit` eject.
@@ -79,6 +86,12 @@ func EjectToTarget(req EjectRequest) (*EjectResult, error) {
 	if e.IsLink() {
 		return nil, ErrCannotEjectLink
 	}
+	if e.IsVendor() {
+		// A vendored skill is already real, writable, in-repo files — there is
+		// no store worktree to eject and the canonical target is a real dir, so
+		// the eject rename would refuse to clobber it. Reject explicitly.
+		return nil, ErrCannotEjectVendor
+	}
 	if len(e.Targets) == 0 {
 		return nil, ErrNoTargets
 	}
@@ -128,47 +141,66 @@ func EjectToTarget(req EjectRequest) (*EjectResult, error) {
 // materializeEjectDir resolves the shared-worktree source, copies the skill
 // subtree into a staging sibling dir, restores write bits (the immutable→editable
 // hinge), inits a fresh git history, then atomically renames the staging dir onto
-// the canonical slot — refusing to clobber a real (non-symlink) dir there. The
-// staging-then-rename avoids leaving half-copied state if any step fails midway.
+// the canonical slot. Thin wrapper over copyTreeToCanonical with the edit-mode
+// settings (nested git history seeded).
 func materializeEjectDir(e *model.LockEntry, req EjectRequest, canonicalAbs string) error {
-	// Resolve the shared worktree source: where we'll copy the skill files
-	// from. Falls back to LoadFromPath when the worktree isn't on disk so a
-	// user who deleted ~/.quiver/worktrees/ before invoking edit gets a clean
-	// error instead of an empty copy.
-	sourceDir := EffectiveTarget(e, req.ProjectRoot)
+	return copyTreeToCanonical(e, req.ProjectRoot, canonicalAbs, ".ejecting", true, req.Author, req.AuthorEmail)
+}
+
+// copyTreeToCanonical resolves the entry's current effective source (the shared
+// store worktree or the local copy), copies it into a staging sibling of
+// canonicalAbs, restores write bits, optionally seeds a fresh nested git history,
+// then atomically renames the staging dir onto the canonical agent-dir slot —
+// refusing to clobber a real (non-symlink) dir there. The staging-then-rename
+// avoids leaving half-copied state if any step fails midway.
+//
+// Shared by `qvr edit` (initNestedRepo=true: the eject dir is a standalone fork
+// that `qvr publish` later pushes) and `qvr add --vendor` (initNestedRepo=false:
+// the bytes are tracked by the OUTER project repo, so a nested .git would be both
+// redundant and a committed-repo-inside-a-repo footgun).
+func copyTreeToCanonical(e *model.LockEntry, projectRoot, canonicalAbs, stagingSuffix string, initNestedRepo bool, author, authorEmail string) error {
+	// Resolve the source: where we'll copy the skill files from. Returns ""
+	// when the worktree isn't on disk so a user who deleted ~/.quiver/worktrees/
+	// gets a clean error instead of an empty copy.
+	sourceDir := EffectiveTarget(e, projectRoot)
 	if sourceDir == "" {
-		return fmt.Errorf("eject %s: no source worktree to copy from — run `qvr sync` first", e.Name)
+		return fmt.Errorf("%s: no source worktree to copy from — run `qvr sync` first", e.Name)
 	}
 	if _, err := os.Stat(filepath.Join(sourceDir, "SKILL.md")); err != nil {
-		return fmt.Errorf("eject %s: source %s does not contain SKILL.md: %w", e.Name, sourceDir, err)
+		return fmt.Errorf("%s: source %s does not contain SKILL.md: %w", e.Name, sourceDir, err)
 	}
 
 	// Stage to a sibling tmp dir, then rename onto canonical. Avoids leaving
 	// half-copied state if the copy / git init fails midway.
-	stagingDir := canonicalAbs + ".ejecting"
+	stagingDir := canonicalAbs + stagingSuffix
 	_ = os.RemoveAll(stagingDir)
 	if err := copyDir(sourceDir, stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("copy skill tree: %w", err)
 	}
-	// The shared worktree is frozen read-only and copyDir preserves source
-	// modes, so the freshly-copied edit tree would be read-only. Restore write
-	// bits: this copy is the editable working dir, and initEjectRepo is about
-	// to `git init` and write into it. This is the immutable→editable hinge.
+	// The source worktree is frozen read-only and copyDir preserves source
+	// modes, so the freshly-copied tree would be read-only. Restore write bits:
+	// this copy is the working dir the user (and any `git init` below) writes to.
 	setSubtreeWritable(stagingDir)
-	if err := initEjectRepo(stagingDir, e, req.Author, req.AuthorEmail); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("init edit repo: %w", err)
+	if initNestedRepo {
+		if err := initEjectRepo(stagingDir, e, author, authorEmail); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("init edit repo: %w", err)
+		}
 	}
+	return promoteStagingOntoCanonical(e, stagingDir, canonicalAbs)
+}
 
-	// Remove the existing canonical symlink (or no-op if it isn't there) so
-	// the rename below lands on a clean slot. CreateSymlink earlier may have
-	// pointed it at the shared worktree; if a real dir is there already we
-	// refuse to clobber user content.
+// promoteStagingOntoCanonical removes the existing canonical symlink (or no-op
+// if absent) so the rename lands on a clean slot, then atomically renames the
+// staging dir onto it. CreateSymlink earlier may have pointed the canonical at
+// the shared worktree; if a real dir is there already we refuse to clobber user
+// content. On any failure the staging dir is removed so no half-state lingers.
+func promoteStagingOntoCanonical(e *model.LockEntry, stagingDir, canonicalAbs string) error {
 	if existing, err := os.Lstat(canonicalAbs); err == nil {
 		if existing.Mode()&os.ModeSymlink == 0 {
 			_ = os.RemoveAll(stagingDir)
-			return fmt.Errorf("eject %s: %s exists and is not a symlink — refuse to overwrite", e.Name, canonicalAbs)
+			return fmt.Errorf("%s: %s exists and is not a symlink — refuse to overwrite", e.Name, canonicalAbs)
 		}
 		if err := os.Remove(canonicalAbs); err != nil {
 			_ = os.RemoveAll(stagingDir)
@@ -181,9 +213,108 @@ func materializeEjectDir(e *model.LockEntry, req EjectRequest, canonicalAbs stri
 	}
 	if err := os.Rename(stagingDir, canonicalAbs); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("finalize edit dir: %w", err)
+		return fmt.Errorf("finalize canonical dir: %w", err)
 	}
 	return nil
+}
+
+// VendorRequest drives a `qvr add --vendor` post-install vendoring step.
+type VendorRequest struct {
+	Entry       *model.LockEntry // the freshly-installed lock entry (mutated in place on success)
+	ProjectRoot string           // absolute project root
+	// Global, when true, vendors into the user-global agent dir and writes
+	// VendorPath as an absolute path; project scope (default) writes a
+	// project-relative VendorPath so the lockfile stays portable across clones.
+	Global bool
+}
+
+// VendorResult summarises a vendoring for the caller.
+type VendorResult struct {
+	Skill           string   `json:"skill"`
+	CanonicalTarget string   `json:"canonical_target"`
+	VendorPath      string   `json:"vendor_path"`   // project-relative (or absolute when Global)
+	SiblingLinks    []string `json:"sibling_links"` // absolute paths of repointed sibling symlinks
+}
+
+// VendorIntoRepo promotes a freshly-installed skill's store worktree into a real
+// directory committed into the repo at the alphabetical-first installed target,
+// and repoints any other installed targets at it via relative symlinks. The lock
+// entry is mutated in place: Mode flips to "vendor", VendorPath records the
+// project-relative canonical path, and SubtreeHash is re-sealed against the
+// in-repo dir.
+//
+// Unlike EjectToTarget it seeds NO nested git history — the vendored bytes are
+// tracked by the OUTER project repo, which is exactly what lets the skill travel
+// with a `git clone` (no store, no registry, no qvr needed to read it). It is the
+// `--vendor` counterpart to a normal symlink-into-store install.
+//
+// Idempotent: a second call when Mode is already "vendor" at the same path is a
+// no-op. Refuses link installs (no store worktree to copy from).
+func VendorIntoRepo(req VendorRequest) (*VendorResult, error) {
+	e := req.Entry
+	if e == nil {
+		return nil, errors.New("vendor: nil entry")
+	}
+	if req.ProjectRoot == "" {
+		return nil, errors.New("vendor: project root is required")
+	}
+	if e.IsLink() {
+		return nil, ErrCannotVendorLink
+	}
+	if len(e.Targets) == 0 {
+		return nil, ErrNoTargets
+	}
+
+	canonicalTarget := pickCanonicalTarget(e.Targets)
+	t, ok := model.LookupTarget(canonicalTarget)
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownTarget, canonicalTarget)
+	}
+
+	// Reuse the eject path-derivation: --global → absolute canonical/VendorPath,
+	// project → project-relative. The EjectRequest carries only scope here.
+	scope := EjectRequest{ProjectRoot: req.ProjectRoot, Global: req.Global}
+	canonicalAbs, vendorPathForLock, err := ejectCanonicalPaths(t, e, scope)
+	if err != nil {
+		return nil, err
+	}
+
+	// Idempotent no-op when the entry already records this exact vendoring.
+	if e.IsVendor() && e.VendorPath == vendorPathForLock {
+		return &VendorResult{Skill: e.Name, CanonicalTarget: canonicalTarget, VendorPath: vendorPathForLock}, nil
+	}
+
+	if err := copyTreeToCanonical(e, req.ProjectRoot, canonicalAbs, ".vendoring", false, "", ""); err != nil {
+		return nil, err
+	}
+
+	siblingLinks, err := repointSiblingTargets(e, scope, canonicalTarget, canonicalAbs)
+	if err != nil {
+		return nil, err
+	}
+
+	finalizeVendoredEntry(e, vendorPathForLock, canonicalAbs)
+
+	return &VendorResult{
+		Skill:           e.Name,
+		CanonicalTarget: canonicalTarget,
+		VendorPath:      vendorPathForLock,
+		SiblingLinks:    siblingLinks,
+	}, nil
+}
+
+// finalizeVendoredEntry mutates the entry on success: flips it to mode:vendor,
+// records the VendorPath, and re-seals SubtreeHash against the in-repo dir so
+// drift detection (`qvr lock verify`) has a current baseline. The copy is
+// byte-identical to the store worktree, so the hash normally matches what the
+// install already recorded; re-hashing is defensive and matches eject's pattern.
+// HashSubtreeFromDisk excludes .git/, so the seal agrees with a later verify.
+func finalizeVendoredEntry(e *model.LockEntry, vendorPathForLock, canonicalAbs string) {
+	e.Mode = model.ModeVendor
+	e.VendorPath = vendorPathForLock
+	if h, err := canonical.HashSubtreeFromDisk(canonicalAbs); err == nil {
+		e.SubtreeHash = h
+	}
 }
 
 // ejectCanonicalPaths computes the canonical eject dir and the EditPath recorded

@@ -29,6 +29,7 @@ var (
 	addAs       string
 	addAll      bool
 	addLocal    string
+	addVendor   bool
 )
 
 var addCmd = &cobra.Command{
@@ -102,7 +103,9 @@ func init() {
 	addCmd.Flags().BoolVar(&addAll, "all", false,
 		"install every skill the registry exposes (requires --registry; do not name a skill)")
 	addCmd.Flags().StringVar(&addLocal, "local", "",
-		"install an immutable copy of a skill from a local folder (no registry; `qvr edit` to make it mutable)")
+		"install an immutable copy of a skill from a local folder (no registry; `qvr edit` to make it mutable, or add --vendor to commit it into the repo)")
+	addCmd.Flags().BoolVar(&addVendor, "vendor", false,
+		"commit the skill as real files in the repo (no symlink into the store) so it travels with a `git clone` — no store, registry, or qvr needed to read it. Composes with --local.")
 	rootCmd.AddCommand(addCmd)
 }
 
@@ -333,6 +336,7 @@ func addInstallItem(cmd *cobra.Command, cfg *config.Config, installer *skill.Ins
 		Registry:                 item.registry,
 		SkillPath:                item.skillPath,
 		As:                       addAs,
+		Vendor:                   addVendor,
 		RequireSigned:            cfg.Security.RequireSigned,
 		TrustedAuthors:           trustedAuthorsForRegistry(cfg, item.registry),
 		TrustedAuthorsByRegistry: trustedAuthorsByRegistry(cfg),
@@ -702,6 +706,12 @@ func validateAddModes() error {
 			return fmt.Errorf("--frozen cannot be combined with --local")
 		}
 	}
+	if addVendor && addFrozen {
+		// --frozen pins to the recorded store hash and forbids drift; vendoring
+		// rewrites how the skill lands (real in-repo files), so the two are
+		// contradictory.
+		return fmt.Errorf("--vendor cannot be combined with --frozen")
+	}
 	return nil
 }
 
@@ -763,6 +773,7 @@ func runAddLocal(cmd *cobra.Command, cfg *config.Config, installer *skill.Instal
 			ProjectRoot: projectRoot,
 			LockPath:    lockPath,
 			Force:       addForce,
+			Vendor:      addVendor,
 		})
 		if ierr != nil {
 			printer.Error(fmt.Sprintf("add --local %s: %v", resolved, ierr))
@@ -1272,6 +1283,12 @@ func skillDirForEntry(result *skill.InstallResult, lock *model.LockFile) string 
 		return result.Worktree
 	}
 	worktreePath := skill.EntryWorktreePath(entry)
+	if worktreePath == "" {
+		// No store worktree (vendor/edit/link): the content lives where
+		// result.Worktree points — already at the skill root, so don't join
+		// entry.Path. result.Worktree is EffectiveTarget for these modes.
+		return result.Worktree
+	}
 	if entry.Path == "" || entry.Path == "." {
 		return worktreePath
 	}

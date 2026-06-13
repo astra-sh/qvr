@@ -13,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
+	"github.com/astra-sh/qvr/internal/canonical"
 	"github.com/astra-sh/qvr/internal/model"
 )
 
@@ -108,6 +109,89 @@ func (m *Materializer) MaterializeSubtree(repoPath, commitish, subpath string, r
 		return "", err
 	}
 	return hash.String(), nil
+}
+
+// MaterializeFromDisk copies a skill's content from a local source directory
+// into dest, mirroring MaterializeSubtree's on-disk layout and file-mode rules
+// so canonical.HashSubtreeFromDisk over dest equals the same hash over srcRoot.
+// It walks the filesystem (not git objects) and skips exactly what the canonical
+// hasher excludes (.git/, signature wrappers — canonical.IsExcluded), so a
+// plain-folder `qvr add --local` materializes through the SAME BlobMaterializer
+// seam (reflink/content-store, #205) as a registry install rather than a bespoke
+// recursive copy.
+//
+// Symlinks are recreated as links with the same escaping-target refusal as
+// writeFile; regular/executable files preserve their exec bit. Empty dirs are
+// not created (git doesn't track them and the disk hasher ignores them).
+func (m *Materializer) MaterializeFromDisk(srcRoot, dest string) error {
+	info, err := os.Stat(srcRoot)
+	if err != nil {
+		return fmt.Errorf("stat local source: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("local source is not a directory: %s", srcRoot)
+	}
+	return filepath.WalkDir(srcRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, relErr := filepath.Rel(srcRoot, path)
+		if relErr != nil {
+			return fmt.Errorf("relativize %s: %w", path, relErr)
+		}
+		rel = filepath.ToSlash(rel)
+		if d.IsDir() {
+			// Don't descend into excluded dirs (.git/ above all) — both saves
+			// the walk and matches the hasher, which never counts their files.
+			if rel != "." && canonical.IsExcluded(rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if canonical.IsExcluded(rel) {
+			return nil
+		}
+		fi, statErr := d.Info()
+		if statErr != nil {
+			return fmt.Errorf("stat %s: %w", rel, statErr)
+		}
+		return m.writeDiskEntry(path, filepath.Join(dest, filepath.FromSlash(rel)), fi)
+	})
+}
+
+// writeDiskEntry materializes one filesystem entry at destAbs, preserving the
+// git-relevant mode (symlink / executable / regular) so the disk hash agrees.
+// Regular files flow through the BlobMaterializer seam (reflink) when configured.
+func (m *Materializer) writeDiskEntry(srcPath, destAbs string, fi os.FileInfo) error {
+	if err := os.MkdirAll(filepath.Dir(destAbs), 0o755); err != nil {
+		return fmt.Errorf("create dir for %s: %w", destAbs, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(srcPath)
+		if err != nil {
+			return fmt.Errorf("read symlink %s: %w", srcPath, err)
+		}
+		if t := filepath.ToSlash(target); filepath.IsAbs(target) || strings.HasPrefix(filepath.ToSlash(filepath.Clean(target)), "../") {
+			return fmt.Errorf("refusing symlink %s with escaping target %q", srcPath, t)
+		}
+		return os.Symlink(target, destAbs)
+	}
+	mode := os.FileMode(0o644)
+	if fi.Mode().Perm()&0o111 != 0 {
+		mode = 0o755
+	}
+	read := func() (io.ReadCloser, error) { return os.Open(srcPath) }
+	if m.Blob != nil {
+		if err := m.Blob.WriteBlob(destAbs, mode, read); err != nil {
+			return err
+		}
+	} else if err := copyBlobToFile(destAbs, mode, read); err != nil {
+		return err
+	}
+	if mode == 0o755 {
+		return os.Chmod(destAbs, 0o755)
+	}
+	return nil
 }
 
 // resolveCommitish turns a SHA or ref label into a commit hash. A full 40-hex
