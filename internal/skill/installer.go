@@ -215,9 +215,29 @@ func (in *Installer) Install(req InstallRequest) (*InstallResult, error) {
 		return nil, err
 	}
 	if err := lock.Write(); err != nil {
+		in.rollbackInstallResult(result, req)
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 	return result, nil
+}
+
+// rollbackInstallResult undoes a completed InstallInto when the single-install
+// caller's lock.Write fails: it removes the target symlinks and, for a vendored
+// install, the real canonical directory VendorIntoRepo materialized (a plain
+// symlink rollback can't, since it's a real dir — a retry would otherwise hit
+// "exists and is not a symlink"). Best-effort.
+func (in *Installer) rollbackInstallResult(result *InstallResult, req InstallRequest) {
+	if result == nil {
+		return
+	}
+	for _, t := range result.Targets {
+		if p, perr := ResolveTargetPath(t, result.Name, req.ProjectRoot, req.Global); perr == nil {
+			_ = RemoveSymlink(p)
+		}
+	}
+	if req.Vendor && result.Worktree != "" {
+		_ = os.RemoveAll(result.Worktree)
+	}
 }
 
 // InstallInto runs the full install flow against an already-loaded, in-memory
@@ -1044,7 +1064,7 @@ func (in *Installer) InstallLocal(localPath string, req InstallRequest) (*Instal
 	}
 
 	if err := lock.Write(); err != nil {
-		rollbackLinks(created)
+		rollbackVendoredInstall(created, req.Vendor, worktree)
 		return nil, fmt.Errorf("write lock file: %w", err)
 	}
 	return &InstallResult{
@@ -1155,6 +1175,17 @@ func lintStagedSkill(stagingPath, skillRelPath string) error {
 func rollbackLinks(paths []string) {
 	for _, p := range paths {
 		_ = RemoveSymlink(p)
+	}
+}
+
+// rollbackVendoredInstall removes the created target symlinks and, for a
+// vendored install, the real canonical directory VendorIntoRepo materialized —
+// which rollbackLinks alone can't, since it's a real dir (a retry would
+// otherwise hit "exists and is not a symlink"). Best-effort.
+func rollbackVendoredInstall(created []string, vendor bool, vendorDir string) {
+	rollbackLinks(created)
+	if vendor && vendorDir != "" {
+		_ = os.RemoveAll(vendorDir)
 	}
 }
 
