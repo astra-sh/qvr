@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Clock, Coins, Layers, Library, MessagesSquare, Package } from "lucide-react";
+import { Clock, Layers, Library, MessagesSquare, Package } from "lucide-react";
 import { api, prettyAgent, scopeToken, useFetch, type SkillUsageRow } from "../api";
 import {
   Badge,
@@ -10,13 +10,15 @@ import {
   Loading,
   PageHead,
   Prompt,
-  SkillRowItem,
   RefreshButton,
+  SkillRowItem,
   StatCard,
   StatusBadge,
 } from "../components/qvr";
 import { ActivityCharts, activityCoverage, avgSessionMs } from "../components/ActivityPanel";
-import { fmtCount, fmtCountWhole, fmtDuration, fmtShare, relTimeMs } from "../lib/format";
+import TokenBand from "../components/TokenBand";
+import SkillLedger from "../components/SkillLedger";
+import { fmtCount, fmtDuration, fmtShare, relTimeMs } from "../lib/format";
 
 // Overview — the dashboard home: stat tiles, the activity charts, the
 // scan-gate rollup, what needs attention, and the latest sessions. Version
@@ -78,7 +80,7 @@ export default function Overview() {
             style={{
               display: "grid",
               gridTemplateColumns: activity
-                ? "repeat(6, minmax(0, 1fr))"
+                ? "repeat(5, minmax(0, 1fr))"
                 : "repeat(2, minmax(0, 1fr))",
               gap: 12,
               marginBottom: 18,
@@ -101,12 +103,6 @@ export default function Overview() {
                   sub={`${fmtCount(activity.summary.tools)} tool calls`}
                 />
                 <StatCard
-                  icon={<Coins />}
-                  value={fmtCountWhole(activity.summary.tokens_in + activity.summary.tokens_out)}
-                  label="tokens"
-                  sub={`${fmtCount(activity.summary.tokens_in)} in · ${fmtCount(activity.summary.tokens_out)} out`}
-                />
-                <StatCard
                   icon={<Clock />}
                   value={fmtDuration(activity.summary.duration_ms)}
                   label="session time"
@@ -115,6 +111,12 @@ export default function Overview() {
               </>
             )}
           </div>
+
+          {activity && m && (
+            <div style={{ marginBottom: 18 }}>
+              <TokenBand summary={activity.summary} skills={m.skills} />
+            </div>
+          )}
 
           {activity && <ActivityCharts data={activity} skills={m?.skills ?? []} />}
 
@@ -169,7 +171,17 @@ export default function Overview() {
             </Card>
           </div>
 
-          {m && <NeedsAttention rows={m.skills} auditEnabled={m.audit_enabled} />}
+          {m && <NeedsAttention rows={m.skills} />}
+
+          {m && m.audit_enabled && m.skills.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <SkillLedger
+                rows={m.skills}
+                totalSessions={cov?.totalSessions ?? 0}
+                refreshKey={nonce}
+              />
+            </div>
+          )}
         </>
       )}
     </>
@@ -187,39 +199,27 @@ function GateStat({ value, label }: { value: number; label: string }) {
   );
 }
 
-// NeedsAttention surfaces what a maintainer should look at: blocked gates,
-// disabled skills, and installed-but-never-fired dead weight (top 5).
-function NeedsAttention({
-  rows,
-  auditEnabled,
-}: {
-  rows: SkillUsageRow[];
-  auditEnabled: boolean;
-}) {
-  const attention = rows.filter(
-    (s) =>
-      s.installed &&
-      (s.gate === "blocked" || s.disabled || (auditEnabled && s.invocations === 0)),
-  );
-  if (attention.length === 0) return null;
+// NeedsAttention surfaces the compliance/security callouts the token ledger
+// doesn't: skills with a blocked scan gate or that are disabled. These come from
+// lock metadata, so the section renders regardless of audit status (unlike the
+// ledger). Never-fired dead weight lives in the ledger's idle section instead.
+function NeedsAttention({ rows }: { rows: SkillUsageRow[] }) {
+  const flagged = rows.filter((s) => s.installed && (s.gate === "blocked" || s.disabled));
+  if (flagged.length === 0) return null;
   return (
-    <div className="qvr-section">
+    <div className="qvr-section" style={{ marginTop: 18 }}>
       <h3 className="qvr-cardtitle">needs attention</h3>
       <div style={{ marginTop: 10 }}>
-        {attention.slice(0, 5).map((s) => (
+        {flagged.slice(0, 8).map((s) => (
           <SkillRowItem
             key={s.name}
             to={`/skills/${encodeURIComponent(s.name)}`}
             lead={
               s.gate === "blocked" ? (
                 <StatusBadge value="blocked" />
-              ) : s.disabled ? (
+              ) : (
                 <Badge tone="neutral" dot>
                   disabled
-                </Badge>
-              ) : (
-                <Badge tone="warning" dot>
-                  never fired
                 </Badge>
               )
             }
@@ -231,3 +231,4 @@ function NeedsAttention({
     </div>
   );
 }
+

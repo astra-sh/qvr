@@ -33,7 +33,7 @@ export default function Deadweight() {
   return (
     <>
       <PageHead
-        title="Dead weight"
+        title="Idle"
         sub="Skills that take up lock space but do no observed work in any recorded
 session. Counts cover the sessions qvr has discovered — a back-filled history
 can predate an install, so check the installed date before pruning."
@@ -43,7 +43,7 @@ can predate an install, so check the installed date before pruning."
       {dw.error && <ErrorBox message={dw.error} />}
       {dw.data && !dw.data.audit_enabled && (
         <>
-          <EmptyState title="can't measure dead weight yet">
+          <EmptyState title="can't measure idle skills yet">
             <span>
               usage is unknown until the audit pipeline records sessions — nothing here
               suggests pruning. start measuring:
@@ -55,7 +55,7 @@ can predate an install, so check the installed date before pruning."
         </>
       )}
       {dw.data?.audit_enabled && dw.data.rows.length === 0 && (
-        <EmptyState title="no dead weight">every pinned skill has fired. clean quiver.</EmptyState>
+        <EmptyState title="no idle skills">every pinned skill has fired. clean quiver.</EmptyState>
       )}
       {dw.data?.audit_enabled && dw.data.rows.length > 0 && (
         <Table

@@ -257,7 +257,7 @@ function ReportTab({ report }: { report: SkillReport | null }) {
       <div
         style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 16 }}
       >
-        <Card variant="accent" className="qvr-stat">
+        <Card className="qvr-stat">
           <div
             className={
               "qvr-verhero__num" + (latest?.ref || latest?.commit ? "" : " qvr-verhero__num--unknown")
