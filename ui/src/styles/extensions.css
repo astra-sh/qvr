@@ -180,7 +180,7 @@ a.qvr-skillrow:hover {
 /* Stat card (overview) — the kit builds these inline; named here for reuse.
    The value never wraps ("1d 8h" stays one line); detail beyond the primary
    label goes on its own quieter line so columns align across tiles. */
-.qvr-stat { padding: 16px; }
+.qvr-stat { padding: 16px; display: flex; flex-direction: column; align-items: center; text-align: center; }
 .qvr-stat svg { width: 18px; height: 18px; color: var(--accent); }
 .qvr-stat__num {
   font-family: var(--font-brand);

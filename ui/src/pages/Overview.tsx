@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Clock, Coins, Layers, Library, MessagesSquare, Package } from "lucide-react";
-import { api, prettyAgent, scopeToken, useFetch, type SkillUsageRow } from "../api";
+import { Clock, Layers, Library, MessagesSquare, Package } from "lucide-react";
+import { api, prettyAgent, scopeToken, useFetch } from "../api";
 import {
   Badge,
   Card,
@@ -10,13 +10,14 @@ import {
   Loading,
   PageHead,
   Prompt,
-  SkillRowItem,
   RefreshButton,
   StatCard,
   StatusBadge,
 } from "../components/qvr";
 import { ActivityCharts, activityCoverage, avgSessionMs } from "../components/ActivityPanel";
-import { fmtCount, fmtCountWhole, fmtDuration, fmtShare, relTimeMs } from "../lib/format";
+import TokenBand from "../components/TokenBand";
+import SkillLedger from "../components/SkillLedger";
+import { fmtCount, fmtDuration, fmtShare, relTimeMs } from "../lib/format";
 
 // Overview — the dashboard home: stat tiles, the activity charts, the
 // scan-gate rollup, what needs attention, and the latest sessions. Version
@@ -78,7 +79,7 @@ export default function Overview() {
             style={{
               display: "grid",
               gridTemplateColumns: activity
-                ? "repeat(6, minmax(0, 1fr))"
+                ? "repeat(5, minmax(0, 1fr))"
                 : "repeat(2, minmax(0, 1fr))",
               gap: 12,
               marginBottom: 18,
@@ -101,12 +102,6 @@ export default function Overview() {
                   sub={`${fmtCount(activity.summary.tools)} tool calls`}
                 />
                 <StatCard
-                  icon={<Coins />}
-                  value={fmtCountWhole(activity.summary.tokens_in + activity.summary.tokens_out)}
-                  label="tokens"
-                  sub={`${fmtCount(activity.summary.tokens_in)} in · ${fmtCount(activity.summary.tokens_out)} out`}
-                />
-                <StatCard
                   icon={<Clock />}
                   value={fmtDuration(activity.summary.duration_ms)}
                   label="session time"
@@ -115,6 +110,12 @@ export default function Overview() {
               </>
             )}
           </div>
+
+          {activity && m && (
+            <div style={{ marginBottom: 18 }}>
+              <TokenBand summary={activity.summary} skills={m.skills} />
+            </div>
+          )}
 
           {activity && <ActivityCharts data={activity} skills={m?.skills ?? []} />}
 
@@ -169,7 +170,11 @@ export default function Overview() {
             </Card>
           </div>
 
-          {m && <NeedsAttention rows={m.skills} auditEnabled={m.audit_enabled} />}
+          {m && m.audit_enabled && m.skills.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <SkillLedger rows={m.skills} totalSessions={cov?.totalSessions ?? 0} />
+            </div>
+          )}
         </>
       )}
     </>
@@ -187,47 +192,3 @@ function GateStat({ value, label }: { value: number; label: string }) {
   );
 }
 
-// NeedsAttention surfaces what a maintainer should look at: blocked gates,
-// disabled skills, and installed-but-never-fired dead weight (top 5).
-function NeedsAttention({
-  rows,
-  auditEnabled,
-}: {
-  rows: SkillUsageRow[];
-  auditEnabled: boolean;
-}) {
-  const attention = rows.filter(
-    (s) =>
-      s.installed &&
-      (s.gate === "blocked" || s.disabled || (auditEnabled && s.invocations === 0)),
-  );
-  if (attention.length === 0) return null;
-  return (
-    <div className="qvr-section">
-      <h3 className="qvr-cardtitle">needs attention</h3>
-      <div style={{ marginTop: 10 }}>
-        {attention.slice(0, 5).map((s) => (
-          <SkillRowItem
-            key={s.name}
-            to={`/skills/${encodeURIComponent(s.name)}`}
-            lead={
-              s.gate === "blocked" ? (
-                <StatusBadge value="blocked" />
-              ) : s.disabled ? (
-                <Badge tone="neutral" dot>
-                  disabled
-                </Badge>
-              ) : (
-                <Badge tone="warning" dot>
-                  never fired
-                </Badge>
-              )
-            }
-            name={s.name}
-            right={<span className="qvr-skillrow__reg">{s.registry}</span>}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
