@@ -21,7 +21,7 @@ const scopedNav = [
   { to: "/", label: "Overview", end: true, icon: <LayoutDashboard /> },
   { to: "/sessions", label: "Sessions", icon: <MessagesSquare /> },
   { to: "/skills", label: "Skills", icon: <Package /> },
-  { to: "/deadweight", label: "Dead weight", icon: <Layers /> },
+  { to: "/deadweight", label: "Idle", icon: <Layers /> },
   { to: "/provenance", label: "Provenance", icon: <GitCommitHorizontal /> },
 ];
 

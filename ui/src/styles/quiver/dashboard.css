@@ -188,12 +188,6 @@
   padding: 6px var(--space-3) !important; }
 .ovr-dead td { color: var(--text-subtle); }
 
-/* skill-detail version hero: dark pin card (handoff Screen 2) */
-.ska-stat--pin { background: var(--ink-950); border-color: var(--ink-800); }
-.ska-stat--pin .qvr-verhero__num,
-.ska-stat--pin .qvr-verhero__lead { color: var(--brand-400); }
-.ska-stat--pin .qvr-stat__label { color: var(--ink-400); }
-
 /* ledger accordion drill-down */
 .ovr-ledrow { cursor: pointer; }
 .ovr-ledrow--open { background: var(--accent-soft); }
