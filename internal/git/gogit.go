@@ -577,6 +577,131 @@ func (g *GoGitClient) RefVersions(repoPath string) ([]RefVersion, error) {
 	return out, nil
 }
 
+// CommitGraph walks the commit ancestry reachable from tips (branch/tag names
+// or commit hashes) and returns each commit as a CommitNode carrying its parent
+// hashes, committer time, and subject — the data the dashboard's git-tree
+// version view lays out into lanes. The walk is breadth-first from every tip,
+// deduped by hash, and bounded to at most `limit` nodes (<=0 means unbounded)
+// so a deep history can't blow up the read; when the bound is hit, frontier
+// nodes' parent hashes simply point outside the returned set and the frontend
+// renders them as roots. Tips are resolved through resolveRef (so refs and
+// annotated tags both work) and any tip that won't resolve is skipped rather
+// than failing the whole graph, so a partially-corrupt repo still yields a
+// usable tree. Concrete read helper (not on the GitClient interface), used only
+// by the read-only dashboard.
+func (g *GoGitClient) CommitGraph(repoPath string, tips []string, limit int) ([]CommitNode, error) {
+	repo, err := gogit.PlainOpen(repoPath)
+	if err != nil {
+		return nil, fmt.Errorf("open repo: %w", err)
+	}
+
+	seen := make(map[plumbing.Hash]bool)
+	var queue []plumbing.Hash
+	enqueue := func(h plumbing.Hash) {
+		if !seen[h] {
+			seen[h] = true
+			queue = append(queue, h)
+		}
+	}
+	for _, t := range tips {
+		if t == "" {
+			continue
+		}
+		if h, rerr := resolveRef(repo, t); rerr == nil {
+			enqueue(h)
+		}
+	}
+
+	var out []CommitNode
+	for len(queue) > 0 {
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+		h := queue[0]
+		queue = queue[1:]
+		c, cerr := repo.CommitObject(h)
+		if cerr != nil {
+			continue // unresolvable tip/parent — skip, keep the rest of the graph
+		}
+		subject := c.Message
+		if i := strings.IndexByte(subject, '\n'); i >= 0 {
+			subject = subject[:i]
+		}
+		parents := make([]string, 0, len(c.ParentHashes))
+		for _, p := range c.ParentHashes {
+			parents = append(parents, p.String())
+			enqueue(p)
+		}
+		out = append(out, CommitNode{
+			Hash:    h.String(),
+			Parents: parents,
+			Time:    c.Committer.When,
+			Subject: strings.TrimSpace(subject),
+		})
+	}
+
+	return topoOrderCommits(out), nil
+}
+
+// commitNodeNewerFirst is the readability tie-break: newest committer time
+// first, then hash for a deterministic order.
+func commitNodeNewerFirst(a, b CommitNode) bool {
+	if !a.Time.Equal(b.Time) {
+		return a.Time.After(b.Time)
+	}
+	return a.Hash < b.Hash
+}
+
+// topoOrderCommits returns the nodes ordered children-before-parents, breaking
+// ties by committer time (newest first). A pure time sort can place a parent
+// ahead of its child when they share a committer timestamp (squash merges,
+// normalised CI times); the lane layout then opens disconnected columns because
+// it processes top-to-bottom and expects a child to reserve its parent's lane
+// first. A Kahn pass over the in-window child→parent edges guarantees the
+// invariant regardless of timestamps.
+func topoOrderCommits(nodes []CommitNode) []CommitNode {
+	idx := make(map[string]int, len(nodes))
+	for i := range nodes {
+		idx[nodes[i].Hash] = i
+	}
+	// in-degree = number of in-window children pointing at a node (via parents).
+	indeg := make([]int, len(nodes))
+	for i := range nodes {
+		for _, p := range nodes[i].Parents {
+			if j, ok := idx[p]; ok {
+				indeg[j]++
+			}
+		}
+	}
+	ready := make([]int, 0, len(nodes))
+	for i := range nodes {
+		if indeg[i] == 0 {
+			ready = append(ready, i)
+		}
+	}
+	out := make([]CommitNode, 0, len(nodes))
+	for len(ready) > 0 {
+		// Pop the newest ready node so the order still reads newest-first.
+		sort.Slice(ready, func(a, b int) bool { return commitNodeNewerFirst(nodes[ready[a]], nodes[ready[b]]) })
+		i := ready[0]
+		ready = ready[1:]
+		out = append(out, nodes[i])
+		for _, p := range nodes[i].Parents {
+			if j, ok := idx[p]; ok {
+				if indeg[j]--; indeg[j] == 0 {
+					ready = append(ready, j)
+				}
+			}
+		}
+	}
+	// A real commit DAG is acyclic, so every node is emitted; the length guard is
+	// a defensive backstop that never drops nodes if that assumption is violated.
+	if len(out) < len(nodes) {
+		return append([]CommitNode(nil), nodes...)
+	}
+	return out
+}
+
 // LsRemote lists refs from a remote URL without cloning by shelling out to
 // `git ls-remote`. Peeled annotated-tag lines (`^{}`) are folded in so tags
 // map to their commit hash.
@@ -967,10 +1092,68 @@ func resolveRef(repo *gogit.Repository, ref string) (plumbing.Hash, error) {
 		return tagRef.Hash(), nil
 	}
 
-	// Try as a hash
-	if len(ref) == 40 {
-		return plumbing.NewHash(ref), nil
+	// Try as a hash — full (40 char) or an abbreviated short SHA. Skill spans
+	// record skill.commit as a 7-char short SHA when identity is proved through
+	// a store worktree path, so the version-graph walk passes short SHAs as tips;
+	// resolving them is what lets the lineage graph render for historical
+	// versions (the common case after a pin moves forward).
+	if isHexString(ref) {
+		if len(ref) == 40 {
+			return plumbing.NewHash(ref), nil
+		}
+		if len(ref) >= 4 && len(ref) < 40 {
+			if h, ok := resolveShortHash(repo, ref); ok {
+				return h, nil
+			}
+		}
 	}
 
 	return plumbing.ZeroHash, fmt.Errorf("cannot resolve ref %q", ref)
+}
+
+// isHexString reports whether s is non-empty and all lowercase hex digits — the
+// shape of a (possibly abbreviated) commit hash.
+func isHexString(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// resolveShortHash expands an abbreviated commit-hash prefix to its full hash by
+// scanning commit objects. It resolves only when exactly one commit matches: an
+// ambiguous prefix (two commits sharing it — possible in a large registry, where
+// git itself errors) returns false so the caller falls back rather than
+// silently decorating the wrong commit. O(commits); reached only for hex strings
+// that aren't a branch or tag (actual short SHAs), and only on the read-only
+// dashboard's version-graph path.
+func resolveShortHash(repo *gogit.Repository, prefix string) (plumbing.Hash, bool) {
+	iter, err := repo.CommitObjects()
+	if err != nil {
+		return plumbing.ZeroHash, false
+	}
+	defer iter.Close()
+
+	errStop := errors.New("stop")
+	var found plumbing.Hash
+	count := 0
+	walkErr := iter.ForEach(func(c *object.Commit) error {
+		if strings.HasPrefix(c.Hash.String(), prefix) {
+			found = c.Hash
+			count++
+			if count > 1 {
+				return errStop // ambiguous — stop and refuse to guess
+			}
+		}
+		return nil
+	})
+	if walkErr != nil && !errors.Is(walkErr, errStop) {
+		return plumbing.ZeroHash, false
+	}
+	return found, count == 1
 }
