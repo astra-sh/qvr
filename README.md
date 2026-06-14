@@ -144,17 +144,24 @@ The embedded dashboard — `qvr ui`, baked into the binary, no install — puts 
 whole supply chain on one screen:
 
 <div align="center">
-  <img src="assets/dashboard.png" alt="qvr dashboard — skill report: version pin, provenance, utilization, token cost, per-agent and per-model breakdowns, and recent sessions" width="900" />
+  <img src="assets/qvr-ui-overview.png" alt="qvr dashboard overview — a token-share band by skill, a sortable skill ledger with token-intensity bars and an inline per-agent/trace drill-down, sessions over time, and per-skill latency and version lineage" width="900" />
 </div>
 
-- **Skills & registries** — drill from a registry to a single skill: files,
-  agent targets, scan results, version pins, and full version history.
-- **Sessions & traces** — every recorded session, down to individual turn,
-  tool, and skill spans.
+- **Overview** — where your tokens actually go: a token-share band by skill and a
+  sortable **skill ledger** (tokens in/out, token-intensity, sessions,
+  invocations) with an inline drill-down to per-agent cost and recent traces,
+  plus sessions over time. Tokens are the source of truth — no dollar estimates
+  guessed across API and subscription plans.
+- **Skill report** — per skill: a multi-lane **git-tree of the version lineage**
+  (which commit fired and how it behaved), per-agent and per-model token cuts,
+  utilization over time, and **latency** (exclusive per-call) alongside
+  session-attributed duration.
+- **Sessions & traces** — every recorded session with token totals, wall-clock
+  duration, and per-turn span detail down to cached-vs-fresh token splits.
 - **Provenance** — where every installed byte came from, by author and
   signature status.
-- **Dead weight** — skills that are installed but have never fired, and stale
-  skills with no recent runs. Stop paying context for skills nobody uses.
+- **Idle** — skills installed but never fired, plus stale skills with no recent
+  runs. Stop paying context for skills nobody uses.
 
 > [!NOTE]
 > Traceability is the foundation for *optimizing* skills: once every run is
@@ -252,6 +259,7 @@ source ─► registry add ─► scan ─► lint ─► add ─► edit ─►
 qvr registry add <git-url>        # index any git repo as a skill source
 qvr add <skill>[@ref]             # scan, lock, symlink into every target agent
 qvr add --global <skill>          # ambient: available in every session
+qvr add --vendor <skill>          # commit real files into the repo — travels with a git clone, no store/registry needed
 qvr switch <skill> --latest       # follow the latest semver tag
 qvr outdated                      # pinned SHAs vs. upstream tips
 ```
