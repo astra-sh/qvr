@@ -75,6 +75,7 @@ type codexPayload struct {
 	// response_item: function_call
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"` // JSON string of the call args
+	Input     string `json:"input"`     // custom_tool_call body (e.g. apply_patch patch text)
 	CallID    string `json:"call_id"`
 
 	// response_item: function_call_output
@@ -229,6 +230,17 @@ func (st *codexState) handleResponseItem(p codexPayload, ts int64) {
 		if st.cur != nil {
 			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, false)
 		}
+	case "custom_tool_call":
+		// Codex's freeform tools (e.g. apply_patch) arrive as custom_tool_call
+		// with the call body in `input`, not `arguments`. Without this case the
+		// file-writing call is silently dropped from the trace.
+		st.ensure(ts)
+		st.cur.addCodexCustomTool(p, ts, st.sessionID, st.valid)
+		st.cur.bump(ts)
+	case "custom_tool_call_output":
+		if st.cur != nil {
+			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, false)
+		}
 	}
 }
 
@@ -245,6 +257,15 @@ func (t *turn) addCodexTool(p codexPayload, ts int64, sessionID string, valid ma
 	cmd := commandFromArgs(args)
 	ref := resolveSkillRef(p.Name, args, cmd, "", valid)
 	t.addToolInvocation(p.Name, p.CallID, p.Arguments, cmd, ref, ts, sessionID)
+}
+
+// addCodexCustomTool turns a custom_tool_call (e.g. apply_patch) into a child
+// span. Its body rides in `input` (raw patch text), not a JSON `arguments`
+// string, so it is passed straight through; skill attribution still works if
+// the call touches a path under a skills/<name>/ directory.
+func (t *turn) addCodexCustomTool(p codexPayload, ts int64, sessionID string, valid map[string]bool) {
+	ref := resolveSkillRef(p.Name, nil, "", p.Input, valid)
+	t.addToolInvocation(p.Name, p.CallID, p.Input, "", ref, ts, sessionID)
 }
 
 const skillsInstructionsTag = "<skills_instructions>"
