@@ -87,29 +87,26 @@ func TestOpsPromote_Gate(t *testing.T) {
 }
 
 // TestPromoteDecision unit-tests the pure gate logic across its three branches.
+// Inputs are passed explicitly (no flag globals), so sub-tests stay independent.
 func TestPromoteDecision(t *testing.T) {
 	rs := &resolvedSkill{Name: "guard-tests", Commit: "abc1234"}
 
 	t.Run("passing eval clears it", func(t *testing.T) {
-		promoteForce = false
-		d := promoteDecision(rs, &store.EvalRunRow{ID: 7, Pass: true})
+		d := promoteDecision(rs, &store.EvalRunRow{ID: 7, Pass: true}, false, "")
 		if !d.Promoted || d.Forced {
 			t.Errorf("want promoted, not forced: %+v", d)
 		}
 	})
 	t.Run("no eval refuses", func(t *testing.T) {
-		promoteForce = false
-		if d := promoteDecision(rs, nil); d.Promoted {
+		if d := promoteDecision(rs, nil, false, ""); d.Promoted {
 			t.Errorf("want refusal, got %+v", d)
 		}
 	})
 	t.Run("force overrides", func(t *testing.T) {
-		promoteForce = true
-		d := promoteDecision(rs, nil)
+		d := promoteDecision(rs, nil, true, "shipping anyway")
 		if !d.Promoted || !d.Forced {
 			t.Errorf("want forced promote: %+v", d)
 		}
-		promoteForce = false
 	})
 }
 

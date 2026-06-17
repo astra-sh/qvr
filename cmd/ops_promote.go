@@ -58,7 +58,7 @@ func runOpsPromote(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("look up eval history for %s: %w", rs.Name, err)
 	}
-	decision := promoteDecision(rs, passing)
+	decision := promoteDecision(rs, passing, promoteForce, promoteReason)
 
 	if outputFormat == "json" {
 		if err := printer.JSON(decision); err != nil {
@@ -84,13 +84,13 @@ type promoteDecisionResult struct {
 	Message  string `json:"message"`
 }
 
-func promoteDecision(rs *resolvedSkill, passing *store.EvalRunRow) promoteDecisionResult {
-	d := promoteDecisionResult{Skill: rs.Name, Commit: shortCommit(rs.Commit), Reason: promoteReason}
+func promoteDecision(rs *resolvedSkill, passing *store.EvalRunRow, force bool, reason string) promoteDecisionResult {
+	d := promoteDecisionResult{Skill: rs.Name, Commit: shortCommit(rs.Commit), Reason: reason}
 	switch {
 	case passing != nil:
 		d.Promoted = true
 		d.Message = fmt.Sprintf("%s @ %s is backed by a passing eval (run #%d) — clear to promote", rs.Name, shortCommit(rs.Commit), passing.ID)
-	case promoteForce:
+	case force:
 		d.Promoted = true
 		d.Forced = true
 		d.Message = fmt.Sprintf("%s @ %s promoted WITHOUT a passing eval (--force-no-eval)", rs.Name, shortCommit(rs.Commit))
