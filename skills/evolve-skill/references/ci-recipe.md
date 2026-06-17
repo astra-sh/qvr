@@ -18,7 +18,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSL https://quiver.sh/install | sh    # install qvr
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25' }
+      # Install a PINNED version, verified through the Go module checksum
+      # database — unlike `curl … | sh`, which executes unauthenticated network
+      # content in the runner (a MITM / compromised CDN / DNS hijack would run
+      # arbitrary code with full CI secrets access). Pin the tag you trust.
+      - run: go install github.com/astra-sh/qvr@v0.28.1
       - run: qvr audit enable && qvr audit discover
       # Grade each skill that ships an evals.yaml; non-zero exit fails the job.
       - run: |
