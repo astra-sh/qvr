@@ -145,6 +145,12 @@ func (s *sqliteStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) (i
 	if _, err := tx.ExecContext(ctx, `DELETE FROM trace_cursors WHERE session_id = ?`, id); err != nil {
 		return 0, fmt.Errorf("store: delete session cursor: %w", err)
 	}
+	// Annotations are human verdicts on this session; a hard session delete
+	// removes them too (nothing left to annotate). A rederive does NOT reach
+	// here, so verdicts survive re-derivation — only a full purge clears them.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM annotations WHERE session_id = ?`, id); err != nil {
+		return 0, fmt.Errorf("store: delete session annotations: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: delete session commit: %w", err)
 	}

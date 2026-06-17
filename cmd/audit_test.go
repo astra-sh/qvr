@@ -99,6 +99,12 @@ func runRoot(t *testing.T, stdin []byte, args ...string) (string, string, error)
 		ingestAgent, ingestSession, ingestCwd = "", "", ""
 		discoverAgents, discoverSince = nil, ""
 		discoverKeepAll, discoverDryRun = false, false
+		// SkillOps + annotation command flags (same persistence hazard).
+		evalSkillDir, evalSuite, evalSession = "", "", ""
+		annotateOutcome, annotateNote, annotateSkill, annotateAuthor = "", "", "", ""
+		annotationsSession, annotationsSkill, annotationsSince = "", "", ""
+		promoteReason, promoteSkillDir, lineageSince = "", "", ""
+		promoteForce = false
 	})
 	return stdout, stderr, err
 }

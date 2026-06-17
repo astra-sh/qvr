@@ -134,6 +134,7 @@ func persistDerivation(ctx context.Context, s Store, sessionID uuid.UUID) (int, 
 		Skills:          d.Meta.Skills,
 		TokensIn:        d.Meta.TokensIn,
 		TokensOut:       d.Meta.TokensOut,
+		Outcome:         d.Meta.Outcome,
 		DeriverVersion:  derive.Version,
 	}
 	return len(out), hasSkill, s.ReplaceSessionDerivation(ctx, meta, out)

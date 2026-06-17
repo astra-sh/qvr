@@ -28,3 +28,11 @@ func nullInt64Ptr(v sql.NullInt64) *int64 {
 	n := v.Int64
 	return &n
 }
+
+// boolToInt maps a Go bool to SQLite's 0/1 integer encoding.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}

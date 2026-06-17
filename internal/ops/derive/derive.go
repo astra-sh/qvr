@@ -42,7 +42,14 @@ import (
 // resultDisplay (string OR object) no longer drops the whole item. Dispatch
 // is also mixed-agent safe: the majority transcript agent owns the session,
 // so a stale external writer's foreign rows can't blank it.
-const Version = 7
+// v8: outcome signal — TOOL/SKILL spans carry qvr.outcome
+// (success/failure/blocked; absent = unknown), derived from the result's error
+// flag plus a denial/interrupt marker for blocked (hook-deny lives in hook
+// payloads the deriver never sees, so transcript-silent denial is failure).
+// SessionMeta carries a worst-of-spans rollup (Outcome), and the OTLP span
+// status code now reflects it (ERROR for failure/blocked) instead of a
+// hardcoded OK. Rederive backfills outcome onto historical sessions.
+const Version = 8
 
 // KindSkill is the Quiver span category for a skill load/invocation within a
 // turn. It exists so the trace makes skill usage a first-class, queryable stage
@@ -79,6 +86,10 @@ type SessionMeta struct {
 	// only at session level (hermes, copilot), and a deriver-set value wins.
 	TokensIn  *int64
 	TokensOut *int64
+	// Outcome is the session-level rollup of its TOOL/SKILL spans' qvr.outcome:
+	// the worst seen (failure > blocked > success), or "" when no span carried an
+	// outcome (rendered unknown, never a fabricated success).
+	Outcome string
 }
 
 // Derivation is one session's full derived projection: the unified meta plus
@@ -211,6 +222,7 @@ func finalizeMeta(d *Derivation, rows []*ops.RawTrace) {
 	}
 	fillMetaFromSpans(m, d.Spans)
 	fillMetaTokens(m, d.Spans)
+	fillMetaOutcome(m, d.Spans)
 	// Formats without in-file timestamps derive zero time bounds; fall back to
 	// the capture times so the session still buckets into the right day.
 	if m.StartedMs == 0 && len(rows) > 0 {
@@ -286,6 +298,36 @@ func fillMetaTokens(m *SessionMeta, spans []Span) {
 	if m.TokensOut == nil {
 		m.TokensOut = out
 	}
+}
+
+// outcomeRank orders outcomes by severity for the session rollup: a worse
+// outcome on any span dominates. Unknown/absent ranks below an explicit
+// success, so a session with one graded success reads success, not unknown.
+var outcomeRank = map[string]int{
+	OutcomeSuccess: 1,
+	OutcomeBlocked: 2,
+	OutcomeFailure: 3,
+}
+
+// fillMetaOutcome rolls the TOOL/SKILL spans' qvr.outcome into a single
+// session-level verdict: the worst outcome any span carried. Spans without an
+// outcome (LLM turns, calls whose result was never seen) don't vote; a session
+// where none voted stays "" (unknown), never a fabricated success.
+func fillMetaOutcome(m *SessionMeta, spans []Span) {
+	best, bestRank := "", 0
+	for _, sp := range spans {
+		if sp.Kind != KindTool && sp.Kind != KindSkill {
+			continue
+		}
+		v, ok := sp.Attributes[OutcomeKey].(string)
+		if !ok {
+			continue
+		}
+		if r := outcomeRank[v]; r > bestRank {
+			best, bestRank = v, r
+		}
+	}
+	m.Outcome = best
 }
 
 // addAttrTokens folds one span's token attribute value into a running

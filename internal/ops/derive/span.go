@@ -17,6 +17,7 @@ package derive
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 )
 
 // Default resource/scope identifiers stamped on emitted spans. Vendor-neutral.
@@ -34,6 +35,62 @@ const (
 	KindTool  = "TOOL"
 	KindChain = "CHAIN"
 )
+
+// OutcomeKey is the Quiver per-span result attribute on TOOL/SKILL spans: did
+// the call succeed, fail, or get blocked? It is derived purely from the
+// transcript — a tool result's error flag and, for a denied/interrupted call,
+// its text — so it stays a regenerable projection. Its ABSENCE means unknown
+// (the call never reported a result); we never fabricate a success. The session
+// read model rolls these up into SessionMeta.Outcome (worst-of-spans).
+const OutcomeKey = "qvr.outcome"
+
+const (
+	OutcomeSuccess = "success"
+	OutcomeFailure = "failure"
+	OutcomeBlocked = "blocked"
+	OutcomeUnknown = "unknown"
+)
+
+// classifyOutcome maps a tool result to an outcome. A non-error result is a
+// success; an error the transcript marks as a user denial or interrupt is
+// blocked (a governance signal, not a tool defect); any other error is a
+// failure.
+func classifyOutcome(result string, isError bool) string {
+	if !isError {
+		return OutcomeSuccess
+	}
+	if isBlockedResult(result) {
+		return OutcomeBlocked
+	}
+	return OutcomeFailure
+}
+
+// blockedResultMarkers are substrings a harness writes into a tool result when
+// the user REJECTED or INTERRUPTED the call rather than the tool failing on its
+// own (observed in real Claude Code stores). Matched case-insensitively. This
+// is the only "blocked" source available to a pure deriver: hook-deny decisions
+// live in hook payloads, which the deriver never sees (capture filters to
+// transcript rows), so denial that a transcript doesn't echo derives to failure.
+var blockedResultMarkers = []string{
+	"the user doesn't want to proceed",
+	"tool use was rejected",
+	"user doesn't want to take this action",
+	"request interrupted by user",
+	"[request interrupted",
+}
+
+func isBlockedResult(result string) bool {
+	if result == "" {
+		return false
+	}
+	low := strings.ToLower(result)
+	for _, m := range blockedResultMarkers {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
+}
 
 // Span is one derived span. Times are epoch milliseconds. Attributes use OTel
 // GenAI semantic-convention keys (e.g. "gen_ai.operation.name",
@@ -116,12 +173,28 @@ func (s Span) otlpSpan() map[string]any {
 		"startTimeUnixNano": msToNano(s.StartMs),
 		"endTimeUnixNano":   msToNano(end),
 		"attributes":        attrs,
-		"status":            map[string]any{"code": 1},
+		"status":            map[string]any{"code": otlpStatusCode(s.Attributes)},
 	}
 	if s.ParentSpanID != "" {
 		obj["parentSpanId"] = s.ParentSpanID
 	}
 	return obj
+}
+
+// otlpStatusCode maps a span's outcome to an OTLP status code: a failed or
+// blocked call is ERROR(2), an explicit success is OK(1), and anything without
+// an outcome (LLM turns, calls whose result was never seen) is UNSET(0), the
+// OTel default. Before this, every span emitted OK(1) unconditionally — a
+// failed tool call looked successful to any OTLP backend.
+func otlpStatusCode(attrs map[string]any) int {
+	switch attrs[OutcomeKey] {
+	case OutcomeFailure, OutcomeBlocked:
+		return 2
+	case OutcomeSuccess:
+		return 1
+	default:
+		return 0
+	}
 }
 
 // ToOTLP renders a batch of spans as a single OTLP resourceSpans payload. For
