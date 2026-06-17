@@ -34,7 +34,7 @@ func TestEvalRuns_RoundTrip(t *testing.T) {
 		t.Fatal("expected a non-zero run id")
 	}
 
-	all, err := st.ListEvalRuns(ctx, &EvalRunFilter{SkillName: "triage-issue"})
+	all, err := st.ListEvalRuns(ctx, &EvalRunFilter{SkillName: "triage-issue", IncludeCases: true})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

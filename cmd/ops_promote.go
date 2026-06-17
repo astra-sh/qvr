@@ -110,24 +110,24 @@ func promoteDecision(rs *resolvedSkill, passing *store.EvalRunRow, force bool, r
 	return d
 }
 
-// latestPassingEval returns the newest passing eval run for the skill's locked
-// commit, or nil when there is none. A skill with no locked commit ("") can't be
-// evidence-gated by commit, so it returns nil (promotion then requires
-// --force-no-eval). A store error is propagated, NOT swallowed — otherwise a
-// transient DB failure would read as "no passing eval" and silently block (or
-// mislead) a CI gate.
+// latestPassingEval returns the commit's eval verdict when it is clear to
+// promote: the MOST RECENT run for the locked commit, but only if that run
+// passed. The freshest verdict governs — a newer failing run is NOT overridden
+// by an older pass, so a known regression can't be promoted past. A skill with
+// no locked commit ("") can't be evidence-gated by commit, so it returns nil
+// (promotion then requires --force-no-eval). A store error is propagated, NOT
+// swallowed — otherwise a transient DB failure would read as "no passing eval"
+// and silently block (or mislead) a CI gate.
 func latestPassingEval(cmd *cobra.Command, s store.Store, rs *resolvedSkill) (*store.EvalRunRow, error) {
 	if rs.Commit == "" {
 		return nil, nil
 	}
-	runs, err := s.ListEvalRuns(cmd.Context(), &store.EvalRunFilter{SkillName: rs.Name, SkillCommit: rs.Commit})
+	runs, err := s.ListEvalRuns(cmd.Context(), &store.EvalRunFilter{SkillName: rs.Name, SkillCommit: rs.Commit, Limit: 1})
 	if err != nil {
 		return nil, err
 	}
-	for _, r := range runs { // newest-first
-		if r.Pass {
-			return r, nil
-		}
+	if len(runs) > 0 && runs[0].Pass { // newest-first; the latest verdict wins
+		return runs[0], nil
 	}
 	return nil, nil
 }

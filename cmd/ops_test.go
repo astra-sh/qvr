@@ -1,13 +1,63 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/astra-sh/qvr/internal/config"
 	"github.com/astra-sh/qvr/internal/ops/store"
+	"github.com/spf13/cobra"
 )
+
+// TestLatestPassingEval_NewestVerdictWins pins the gate semantics: the most
+// recent eval for the locked commit governs, so a newer FAIL is not overridden
+// by an older PASS.
+func TestLatestPassingEval_NewestVerdictWins(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, store.OpenOptions{Path: filepath.Join(t.TempDir(), "skillops.db")})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	put := func(ts int64, pass bool) {
+		t.Helper()
+		if _, e := st.PutEvalRun(ctx, &store.EvalRunRow{
+			SkillName: "g", SkillCommit: "c1", Suite: "s",
+			StartedAt: time.Unix(ts, 0).UTC(), Pass: pass,
+		}); e != nil {
+			t.Fatalf("put: %v", e)
+		}
+	}
+	rs := &resolvedSkill{Name: "g", Commit: "c1"}
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx) // cobra.Command.Context() is nil until set
+
+	// older PASS, newer FAIL → gate must NOT clear.
+	put(1000, true)
+	put(2000, false)
+	got, err := latestPassingEval(cmd, st, rs)
+	if err != nil {
+		t.Fatalf("latestPassingEval: %v", err)
+	}
+	if got != nil {
+		t.Errorf("newest verdict is a FAIL; gate must not clear (got run #%d)", got.ID)
+	}
+
+	// a fresh PASS lands → gate clears again.
+	put(3000, true)
+	got, err = latestPassingEval(cmd, st, rs)
+	if err != nil {
+		t.Fatalf("latestPassingEval: %v", err)
+	}
+	if got == nil {
+		t.Error("newest verdict is a PASS; gate should clear")
+	}
+}
 
 // TestOpsEval_NoDatabase pins the helpful error when nothing has been captured.
 func TestOpsEval_NoDatabase(t *testing.T) {

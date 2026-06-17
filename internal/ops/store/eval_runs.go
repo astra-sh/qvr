@@ -39,6 +39,10 @@ type EvalRunFilter struct {
 	SkillCommit string
 	Since       *time.Time
 	Limit       int
+	// IncludeCases loads each run's per-case verdict rows (an extra query per
+	// run). Off by default so header-only callers (lineage, the promote gate)
+	// don't pay an N+1 they never read.
+	IncludeCases bool
 }
 
 // PutEvalRun inserts a run and its case rows in one tx, returning the new run id.
@@ -79,25 +83,11 @@ func (s *sqliteStore) PutEvalRun(ctx context.Context, r *EvalRunRow) (int64, err
 	return id, nil
 }
 
-// ListEvalRuns returns runs matching the filter, newest-first, each with its
-// case rows loaded.
+// ListEvalRuns returns runs matching the filter, newest-first. Per-case rows are
+// loaded only when the filter sets IncludeCases (header-only callers skip the
+// N+1).
 func (s *sqliteStore) ListEvalRuns(ctx context.Context, f *EvalRunFilter) ([]*EvalRunRow, error) {
-	var where []string
-	var args []any
-	if f != nil {
-		if f.SkillName != "" {
-			where = append(where, "skill_name = ?")
-			args = append(args, f.SkillName)
-		}
-		if f.SkillCommit != "" {
-			where = append(where, "skill_commit = ?")
-			args = append(args, f.SkillCommit)
-		}
-		if f.Since != nil {
-			where = append(where, "started_at >= ?")
-			args = append(args, f.Since.UTC())
-		}
-	}
+	where, args := evalRunWhere(f)
 	q := `SELECT id, skill_name, skill_commit, suite, session_id, started_at, passed, failed, pass FROM eval_runs`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
@@ -128,14 +118,46 @@ func (s *sqliteStore) ListEvalRuns(ctx context.Context, f *EvalRunFilter) ([]*Ev
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for _, r := range out {
+	if f != nil && f.IncludeCases {
+		if err := s.attachEvalCases(ctx, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// evalRunWhere builds the WHERE clauses and args for an eval-run filter.
+func evalRunWhere(f *EvalRunFilter) ([]string, []any) {
+	var where []string
+	var args []any
+	if f == nil {
+		return where, args
+	}
+	if f.SkillName != "" {
+		where = append(where, "skill_name = ?")
+		args = append(args, f.SkillName)
+	}
+	if f.SkillCommit != "" {
+		where = append(where, "skill_commit = ?")
+		args = append(args, f.SkillCommit)
+	}
+	if f.Since != nil {
+		where = append(where, "started_at >= ?")
+		args = append(args, f.Since.UTC())
+	}
+	return where, args
+}
+
+// attachEvalCases loads each run's per-case verdict rows in place.
+func (s *sqliteStore) attachEvalCases(ctx context.Context, runs []*EvalRunRow) error {
+	for _, r := range runs {
 		cases, err := s.evalCases(ctx, r.ID)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		r.Cases = cases
 	}
-	return out, nil
+	return nil
 }
 
 func (s *sqliteStore) evalCases(ctx context.Context, runID int64) ([]EvalCaseRow, error) {
