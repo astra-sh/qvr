@@ -68,10 +68,20 @@ func runOpsPromote(cmd *cobra.Command, args []string) error {
 		printer.Info(decision.Message)
 	}
 	if !decision.Promoted {
-		return fmt.Errorf("refusing to promote %s: no passing eval for commit %s (run `qvr ops eval run %s`, or pass --force-no-eval)",
-			rs.Name, shortCommit(rs.Commit), rs.Name)
+		return promoteRefusalError(rs)
 	}
 	return nil
+}
+
+// promoteRefusalError builds the refusal, guiding the user to the path that can
+// actually unblock them. For an unlocked skill (no commit), `qvr ops eval run`
+// would just record under an empty commit and loop back to this same refusal —
+// so --force-no-eval is the only real way forward and the message says so.
+func promoteRefusalError(rs *resolvedSkill) error {
+	if rs.Commit == "" {
+		return fmt.Errorf("refusing to promote %s: it has no locked commit to evidence-gate on — pass --force-no-eval to promote anyway, or install it through the lock so eval verdicts can pin to its commit", rs.Name)
+	}
+	return fmt.Errorf("refusing to promote %s: no passing eval for commit %s — run `qvr ops eval run %s`, or pass --force-no-eval", rs.Name, shortCommit(rs.Commit), rs.Name)
 }
 
 // promoteDecisionResult is the JSON/text shape of a promote check.

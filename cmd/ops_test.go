@@ -64,9 +64,11 @@ func TestOpsPromote_Gate(t *testing.T) {
 	dir := writeGuardTestsFixture(t)
 	seedSession(t, cfg, sessionSeed{StartedMs: 1000, Skill: "guard-tests", Outcome: "success", Tools: []string{"Bash"}})
 
-	// No eval recorded yet → refuse.
-	if _, _, err := runRoot(t, nil, "ops", "promote", "guard-tests", "--skill-dir", dir); err == nil {
-		t.Error("expected promote to refuse without a passing eval")
+	// No eval recorded yet (and no locked commit) → refuse, and point at the
+	// only path that can actually unblock: --force-no-eval.
+	_, _, err := runRoot(t, nil, "ops", "promote", "guard-tests", "--skill-dir", dir)
+	if err == nil || !strings.Contains(err.Error(), "force-no-eval") {
+		t.Errorf("want a refusal guiding to --force-no-eval, got %v", err)
 	}
 
 	// Forced → allowed, and the JSON records the override.

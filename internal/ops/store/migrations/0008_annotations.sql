@@ -17,3 +17,5 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 CREATE INDEX IF NOT EXISTS idx_annotations_session ON annotations(session_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_skill ON annotations(skill);
+-- created_at backs the --since range filter on `audit annotations` / `ops lineage`.
+CREATE INDEX IF NOT EXISTS idx_annotations_created ON annotations(created_at);
