@@ -51,7 +51,13 @@ var graderValidators = map[string]func(GraderSpec) error{
 		return need(g.Expect != "", "needs `expect`")
 	},
 	"text": func(g GraderSpec) error {
-		return need(len(g.Contains) > 0 || len(g.Reject) > 0, "needs `contains` or `reject`")
+		switch {
+		case len(g.Contains) == 0 && len(g.Reject) == 0:
+			return fmt.Errorf("needs `contains` or `reject`")
+		case g.On != "" && g.On != "final_message":
+			return fmt.Errorf("unknown `on` field %q (want final_message)", g.On)
+		}
+		return nil
 	},
 	"tool_sequence": func(g GraderSpec) error {
 		return need(len(g.Sequence) > 0, "needs `sequence`")
@@ -114,13 +120,16 @@ func gradeText(g GraderSpec, e *Evidence) GraderResult {
 }
 
 // evidenceField selects the text body a text grader reads. final_message is the
-// default and only field today; an unknown name falls back to it.
+// default and only field today. An unknown name returns "" (defensive: the
+// manifest validator already rejects unknown `on` values, so a typo fails at
+// load time rather than silently grading the wrong field here). Add new fields
+// to this switch AND to the text validator together.
 func evidenceField(name string, e *Evidence) string {
 	switch name {
 	case "", "final_message":
 		return e.FinalMessage
 	default:
-		return e.FinalMessage
+		return ""
 	}
 }
 

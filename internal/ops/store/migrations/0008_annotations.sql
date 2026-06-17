@@ -7,6 +7,13 @@
 -- skill scopes the verdict to one skill within the session. Append-only: a
 -- session can accrue several verdicts over time (the latest by created_at wins
 -- for consumers that want one).
+--
+-- DELIBERATELY no `REFERENCES session_meta(session_id)` FK: the rederive write
+-- path is `INSERT OR REPLACE INTO session_meta`, and under REPLACE SQLite first
+-- DELETEs the conflicting row — which would fire an ON DELETE CASCADE and wipe
+-- every annotation on each rederive, destroying the durable human verdicts this
+-- table exists to preserve. Cleanup on a genuine session purge is handled
+-- explicitly in store.DeleteSession instead (a deliberate app-layer invariant).
 CREATE TABLE IF NOT EXISTS annotations (
   session_id  TEXT NOT NULL,
   skill       TEXT,

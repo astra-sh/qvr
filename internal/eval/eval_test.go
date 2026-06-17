@@ -21,6 +21,8 @@ func TestParse_RejectsNoOpGraders(t *testing.T) {
 		{"outcome no expect", "type: outcome", true},
 		{"text ok", "type: text\n            contains: [\"x\"]", false},
 		{"text empty", "type: text", true},
+		{"text on final_message", "type: text\n            on: final_message\n            contains: [\"x\"]", false},
+		{"text on unknown", "type: text\n            on: message\n            contains: [\"x\"]", true},
 		{"sequence empty", "type: tool_sequence", true},
 		{"constraint empty", "type: tool_constraint", true},
 		{"constraint maxTools ok", "type: tool_constraint\n            maxTools: 5", false},
