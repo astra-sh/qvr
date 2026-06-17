@@ -54,7 +54,10 @@ func runOpsPromote(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	passing := latestPassingEval(cmd, s, rs)
+	passing, err := latestPassingEval(cmd, s, rs)
+	if err != nil {
+		return fmt.Errorf("look up eval history for %s: %w", rs.Name, err)
+	}
 	decision := promoteDecision(rs, passing)
 
 	if outputFormat == "json" {
@@ -98,20 +101,23 @@ func promoteDecision(rs *resolvedSkill, passing *store.EvalRunRow) promoteDecisi
 }
 
 // latestPassingEval returns the newest passing eval run for the skill's locked
-// commit, or nil. A skill with no locked commit ("") can't be evidence-gated by
-// commit, so this returns nil (promotion then requires --force-no-eval).
-func latestPassingEval(cmd *cobra.Command, s store.Store, rs *resolvedSkill) *store.EvalRunRow {
+// commit, or nil when there is none. A skill with no locked commit ("") can't be
+// evidence-gated by commit, so it returns nil (promotion then requires
+// --force-no-eval). A store error is propagated, NOT swallowed — otherwise a
+// transient DB failure would read as "no passing eval" and silently block (or
+// mislead) a CI gate.
+func latestPassingEval(cmd *cobra.Command, s store.Store, rs *resolvedSkill) (*store.EvalRunRow, error) {
 	if rs.Commit == "" {
-		return nil
+		return nil, nil
 	}
 	runs, err := s.ListEvalRuns(cmd.Context(), &store.EvalRunFilter{SkillName: rs.Name, SkillCommit: rs.Commit})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	for _, r := range runs { // newest-first
 		if r.Pass {
-			return r
+			return r, nil
 		}
 	}
-	return nil
+	return nil, nil
 }

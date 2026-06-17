@@ -34,7 +34,6 @@ func BuildEvidence(meta *store.SessionMetaRow, spans []*store.SpanRow) *Evidence
 		SessionID:  meta.SessionID.String(),
 		Outcome:    meta.Outcome,
 		Skills:     append([]string(nil), meta.Skills...),
-		Tools:      int(meta.Tools),
 		Turns:      int(meta.Turns),
 		DurationMs: meta.DurationMs(),
 	}
@@ -57,6 +56,12 @@ func BuildEvidence(meta *store.SessionMetaRow, spans []*store.SpanRow) *Evidence
 		}
 	}
 	e.FinalMessage = lastLLMText
+	// Tools counts the same tool-named spans the tool_constraint grader walks
+	// (ToolSequence, which includes the skill-load call), so a `maxTools` ceiling
+	// means the same thing whether an author writes it under a behavior or a
+	// tool_constraint grader. (Distinct from meta.Tools, which excludes SKILL
+	// spans and feeds the session list, not the gate.)
+	e.Tools = len(e.ToolSequence)
 	return e
 }
 
@@ -87,7 +92,7 @@ func lastAssistantText(attrs map[string]any) string {
 		return ""
 	}
 	for _, m := range slices.Backward(msgs) {
-		if m.Content != "" {
+		if m.Role == "assistant" && m.Content != "" {
 			return m.Content
 		}
 	}

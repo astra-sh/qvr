@@ -85,7 +85,7 @@ func runOpsEval(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if _, err := s.PutEvalRun(cmd.Context(), evalRunRow(rs, result)); err != nil {
+	if _, err := s.PutEvalRun(cmd.Context(), evalRunRow(rs, result, evalSuite)); err != nil {
 		return fmt.Errorf("record eval run: %w", err)
 	}
 
@@ -99,9 +99,10 @@ func runOpsEval(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// evalRunRow flattens a run result into the persisted row + its case rows.
-func evalRunRow(rs *resolvedSkill, r *eval.RunResult) *store.EvalRunRow {
-	suite := evalSuite
+// evalRunRow flattens a run result into the persisted row + its case rows. The
+// requested suite is passed in (not read from the flag global) so the function
+// is pure and testable in isolation.
+func evalRunRow(rs *resolvedSkill, r *eval.RunResult, suite string) *store.EvalRunRow {
 	if suite == "" {
 		suite = "*"
 	}

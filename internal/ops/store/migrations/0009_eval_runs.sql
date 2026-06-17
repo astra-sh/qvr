@@ -18,7 +18,7 @@ CREATE INDEX IF NOT EXISTS idx_eval_runs_skill ON eval_runs(skill_name, skill_co
 CREATE INDEX IF NOT EXISTS idx_eval_runs_started ON eval_runs(started_at);
 
 CREATE TABLE IF NOT EXISTS eval_case_results (
-  eval_run_id   INTEGER NOT NULL,
+  eval_run_id   INTEGER NOT NULL REFERENCES eval_runs(id) ON DELETE CASCADE,
   suite         TEXT NOT NULL,
   case_name     TEXT NOT NULL,
   pass          INTEGER NOT NULL,
