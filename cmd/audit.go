@@ -26,9 +26,11 @@ instantly). Each session's verbatim trace lands in a local SQLite database,
 attributed to the exact locked skill version that ran. Query it with
 'qvr audit logs' / 'qvr audit sessions'.
 
-The everyday surface is enable/disable, discover, status, sessions, logs, and
-export. The remaining subcommands (ingest, raw, spans, rederive, gc) are
-low-level plumbing the maintenance paths use and are hidden from this list.`,
+The everyday surface is enable/disable, discover, status, sessions, logs,
+export, and annotate/annotations (record and read human verdicts on what a
+skill actually did — the feedback a self-improvement loop reads). The remaining
+subcommands (ingest, raw, spans, rederive, gc) are low-level plumbing the
+maintenance paths use and are hidden from this list.`,
 	// Reject a typo'd subcommand (`qvr audit enabel`) with a non-zero exit
 	// instead of silently printing help (issue #169 — the #120 fix missed this
 	// parent). No args still prints help.

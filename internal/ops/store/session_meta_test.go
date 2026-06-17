@@ -205,6 +205,35 @@ func i64Equal(a, b *int64) bool {
 	return *a == *b
 }
 
+// TestSessionMetaOutcome_RoundTrip pins the nullable outcome column: a set
+// verdict reads back, and "" (no span carried an outcome) reads back as "".
+func TestSessionMetaOutcome_RoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	withOutcome, unknown := uuid.New(), uuid.New()
+	o := metaFor(withOutcome, "claude-code", 1000, "code-review")
+	o.Outcome = "failure"
+	if err := st.ReplaceSessionDerivation(ctx, o, nil); err != nil {
+		t.Fatalf("derive with outcome: %v", err)
+	}
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(unknown, "codex", 2000, "tdd"), nil); err != nil {
+		t.Fatalf("derive without outcome: %v", err)
+	}
+
+	got, err := st.GetSessionMeta(ctx, withOutcome)
+	if err != nil || got == nil {
+		t.Fatalf("get: %v %v", got, err)
+	}
+	if got.Outcome != "failure" {
+		t.Errorf("outcome = %q, want failure", got.Outcome)
+	}
+	got2, _ := st.GetSessionMeta(ctx, unknown)
+	if got2 == nil || got2.Outcome != "" {
+		t.Errorf("outcome = %q, want \"\" (unknown)", got2.Outcome)
+	}
+}
+
 // TestGetSessionMeta_AbsentIsNil pins the no-row contract: nil, not an error.
 func TestGetSessionMeta_AbsentIsNil(t *testing.T) {
 	st := openTestStore(t)

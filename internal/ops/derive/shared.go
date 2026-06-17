@@ -234,6 +234,7 @@ func applyResultTo(sp *Span, result string, ts int64, isError bool) {
 	if isError {
 		sp.Attributes["error.type"] = "tool_failure"
 	}
+	sp.Attributes[OutcomeKey] = classifyOutcome(result, isError)
 	if ts > sp.StartMs {
 		sp.EndMs = ts
 	}

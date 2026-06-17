@@ -1,6 +1,17 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
+
+// noSuchTable reports a "missing table" error — the condition a read-only open
+// hits when the DB predates a migration that adds a table (read-only opens skip
+// migrations.Apply). Callers degrade to an empty result, mirroring the
+// stale-column fallback the session_meta read path uses.
+func noSuchTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
+}
 
 // nullableString maps "" → SQL NULL so empty Go strings round-trip as NULL
 // columns rather than empty-string columns.
@@ -27,4 +38,12 @@ func nullInt64Ptr(v sql.NullInt64) *int64 {
 	}
 	n := v.Int64
 	return &n
+}
+
+// boolToInt maps a Go bool to SQLite's 0/1 integer encoding.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

@@ -305,10 +305,12 @@ func (t *turn) applyToolResult(b claudeBlock, ts int64) {
 		return
 	}
 	sp := &t.tools[idx]
-	sp.Attributes["gen_ai.tool.call.result"] = decodeToolResultText(b.Content)
+	result := decodeToolResultText(b.Content)
+	sp.Attributes["gen_ai.tool.call.result"] = result
 	if b.IsError {
 		sp.Attributes["error.type"] = "tool_failure"
 	}
+	sp.Attributes[OutcomeKey] = classifyOutcome(result, b.IsError)
 	if ts > sp.StartMs {
 		sp.EndMs = ts
 	}
