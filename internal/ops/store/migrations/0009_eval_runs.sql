@@ -3,12 +3,17 @@
 -- skill's evals.yaml; the verdict is pinned to the exact locked commit that
 -- ran, so lineage can show "at commit abc the safety suite failed; at def it
 -- passed". Per-case rows carry the granular pass/fail + reason.
+-- session_id DELIBERATELY has no FK to session_meta: an eval_run is durable
+-- lineage evidence keyed by {skill, commit} and OUTLIVES the session it graded.
+-- store.DeleteSession NULLs this pointer on a genuine purge (keeping the verdict,
+-- dropping the stale id) rather than cascading the verdict away — the same
+-- app-layer-invariant choice migration 0008 makes for annotations.
 CREATE TABLE IF NOT EXISTS eval_runs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   skill_name    TEXT NOT NULL,
   skill_commit  TEXT NOT NULL,
   suite         TEXT NOT NULL,         -- requested suite, or '*' for all
-  session_id    TEXT,                  -- the graded session
+  session_id    TEXT,                  -- the graded session (nullable; see note above)
   started_at    DATETIME NOT NULL,
   passed        INTEGER NOT NULL,
   failed        INTEGER NOT NULL,

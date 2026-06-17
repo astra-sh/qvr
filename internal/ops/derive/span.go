@@ -44,11 +44,13 @@ const (
 // read model rolls these up into SessionMeta.Outcome (worst-of-spans).
 const OutcomeKey = "qvr.outcome"
 
+// The three outcome values a span can carry. "Unknown" is NOT a value — it is
+// the ABSENCE of the attribute (and the empty session rollup), so every
+// comparison site checks against "" rather than a sentinel string.
 const (
 	OutcomeSuccess = "success"
 	OutcomeFailure = "failure"
 	OutcomeBlocked = "blocked"
-	OutcomeUnknown = "unknown"
 )
 
 // classifyOutcome maps a tool result to an outcome. A non-error result is a
