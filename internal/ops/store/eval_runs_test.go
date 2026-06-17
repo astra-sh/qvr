@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // TestEvalRuns_RoundTrip pins the write/read path: a run and its case rows land
@@ -62,5 +64,53 @@ func TestEvalRuns_RequiresRow(t *testing.T) {
 	st := openTestStore(t)
 	if _, err := st.PutEvalRun(context.Background(), nil); err == nil {
 		t.Error("expected an error for a nil eval run")
+	}
+}
+
+// TestListEvalRuns_MissingTableIsEmpty pins the read-only-upgrade fallback: a DB
+// that predates migration 0009 (tables absent, migrations skipped on a
+// read-only open) yields an empty result, not a "no such table" error.
+func TestListEvalRuns_MissingTableIsEmpty(t *testing.T) {
+	st := openTestStore(t)
+	sq, ok := st.(*sqliteStore)
+	if !ok {
+		t.Fatal("expected *sqliteStore")
+	}
+	if _, err := sq.db.Exec(`DROP TABLE eval_case_results; DROP TABLE eval_runs;`); err != nil {
+		t.Fatalf("drop tables: %v", err)
+	}
+	got, err := st.ListEvalRuns(context.Background(), &EvalRunFilter{SkillName: "x"})
+	if err != nil || got != nil {
+		t.Errorf("missing table: got (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
+// TestDeleteSession_NullsEvalRunSession proves an eval verdict OUTLIVES the
+// session it graded (durable lineage), with its now-stale session_id nulled.
+func TestDeleteSession_NullsEvalRunSession(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	sid := uuid.New()
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(sid, "claude-code", 1000, "guard-tests"), nil); err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	if _, err := st.PutEvalRun(ctx, &EvalRunRow{
+		SkillName: "guard-tests", SkillCommit: "abc1234", Suite: "s",
+		SessionID: sid.String(), Passed: 1, Pass: true,
+	}); err != nil {
+		t.Fatalf("put eval run: %v", err)
+	}
+	if _, err := st.DeleteSession(ctx, sid); err != nil {
+		t.Fatalf("delete session: %v", err)
+	}
+	runs, err := st.ListEvalRuns(ctx, &EvalRunFilter{SkillName: "guard-tests"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Fatalf("eval verdict did not survive session delete: got %d", len(runs))
+	}
+	if runs[0].SessionID != "" {
+		t.Errorf("stale session_id not cleared: %q", runs[0].SessionID)
 	}
 }

@@ -151,6 +151,13 @@ func (s *sqliteStore) DeleteSession(ctx context.Context, sessionID uuid.UUID) (i
 	if _, err := tx.ExecContext(ctx, `DELETE FROM annotations WHERE session_id = ?`, id); err != nil {
 		return 0, fmt.Errorf("store: delete session annotations: %w", err)
 	}
+	// An eval_run is keyed by {skill, commit} and is durable lineage evidence,
+	// so it OUTLIVES the graded session — but its session_id would otherwise
+	// dangle. Null it instead of deleting the verdict, removing the stale
+	// pointer while keeping the gate history intact.
+	if _, err := tx.ExecContext(ctx, `UPDATE eval_runs SET session_id = NULL WHERE session_id = ?`, id); err != nil {
+		return 0, fmt.Errorf("store: clear session eval refs: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("store: delete session commit: %w", err)
 	}

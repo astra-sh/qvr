@@ -110,6 +110,9 @@ func (s *sqliteStore) ListEvalRuns(ctx context.Context, f *EvalRunFilter) ([]*Ev
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
+		if noSuchTable(err) {
+			return nil, nil // pre-0009 DB opened read-only: no runs yet, not an error
+		}
 		return nil, fmt.Errorf("store: list eval runs: %w", err)
 	}
 	defer rows.Close()

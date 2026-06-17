@@ -80,6 +80,9 @@ func (s *sqliteStore) ListAnnotations(ctx context.Context, f *AnnotationFilter) 
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
+		if noSuchTable(err) {
+			return nil, nil // pre-0008 DB opened read-only: no annotations yet, not an error
+		}
 		return nil, fmt.Errorf("store: list annotations: %w", err)
 	}
 	defer rows.Close()

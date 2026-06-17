@@ -56,6 +56,24 @@ func TestAnnotations_RequiresOutcome(t *testing.T) {
 	}
 }
 
+// TestListAnnotations_MissingTableIsEmpty pins the read-only-upgrade fallback: a
+// DB predating migration 0008 yields an empty result, not a "no such table"
+// error (the path `qvr audit annotations` / `ops lineage` hit read-only).
+func TestListAnnotations_MissingTableIsEmpty(t *testing.T) {
+	st := openTestStore(t)
+	sq, ok := st.(*sqliteStore)
+	if !ok {
+		t.Fatal("expected *sqliteStore")
+	}
+	if _, err := sq.db.Exec(`DROP TABLE annotations;`); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+	got, err := st.ListAnnotations(context.Background(), &AnnotationFilter{Skill: "x"})
+	if err != nil || got != nil {
+		t.Errorf("missing table: got (%v, %v), want (nil, nil)", got, err)
+	}
+}
+
 // TestAnnotations_SurviveRederive proves the whole point of a separate table:
 // re-deriving a session (which replaces spans + session_meta) does NOT touch
 // the human verdict.
