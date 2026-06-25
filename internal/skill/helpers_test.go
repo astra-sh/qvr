@@ -215,6 +215,95 @@ func seedRemoteWithTags(t *testing.T, skills map[string]string, tags ...string) 
 	return remote
 }
 
+// seedRemoteTwoCommits builds a bare remote whose main holds TWO commits: C1
+// introduces skill `name`, C2 advances main with an unrelated change. Returns
+// the remote path and C1's full hash. A `--depth=1` clone of this remote (via a
+// file:// URL, so git honours the depth) fetches only C2's objects, leaving C1
+// unreachable — the exact "the lock pinned an older commit, then upstream moved
+// on" shape the shallow-clone self-heal must recover from.
+func seedRemoteTwoCommits(t *testing.T, name, body string) (remote, c1 string) {
+	t.Helper()
+	r, sr, wt := newSeedRepo(t)
+	seed := wt.Filesystem.Root()
+	writeSeedSkills(t, seed, wt, map[string]string{name: body})
+	first := commitSeedMain(t, sr, wt)
+
+	// C2: a second commit so main's tip advances past C1.
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("advance\n"), 0o644); err != nil {
+		t.Fatalf("write advance file: %v", err)
+	}
+	if _, err := wt.Add("README.md"); err != nil {
+		t.Fatalf("add advance file: %v", err)
+	}
+	if _, err := wt.Commit("advance main", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("commit advance: %v", err)
+	}
+	head, err := sr.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if err := sr.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"), head.Hash(),
+	)); err != nil {
+		t.Fatalf("set main to C2: %v", err)
+	}
+	pushSeedAndSetHEAD(t, sr, r, []gogitcfg.RefSpec{"refs/heads/main:refs/heads/main"})
+	return r, first.String()
+}
+
+// seedRemoteSkillDeletedAtHead builds a bare remote whose main has two commits:
+// C1 adds skill `name` at skills/<name>, C2 deletes it (upstream dropped the
+// skill). Returns the remote path and C1's hash. HEAD no longer carries the
+// skill, so only a commit-pinned restore (registry + locked path + locked
+// commit) can still resolve it — the reproducibility case for `qvr sync`.
+func seedRemoteSkillDeletedAtHead(t *testing.T, name, body string) (remote, c1 string) {
+	t.Helper()
+	r, sr, wt := newSeedRepo(t)
+	seed := wt.Filesystem.Root()
+	writeSeedSkills(t, seed, wt, map[string]string{name: body})
+	first := commitSeedMain(t, sr, wt)
+
+	// C2: delete the skill so HEAD's tree no longer has skills/<name>.
+	if err := os.RemoveAll(filepath.Join(seed, "skills", name)); err != nil {
+		t.Fatalf("rm skill: %v", err)
+	}
+	if _, err := wt.Commit("remove skill upstream", &gogit.CommitOptions{
+		All:    true, // stage the deletion of the tracked SKILL.md
+		Author: &object.Signature{Name: "Test", Email: "t@t", When: time.Now()},
+	}); err != nil {
+		t.Fatalf("commit delete: %v", err)
+	}
+	head, err := sr.Head()
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if err := sr.Storer.SetReference(plumbing.NewHashReference(
+		plumbing.NewBranchReferenceName("main"), head.Hash(),
+	)); err != nil {
+		t.Fatalf("set main to C2: %v", err)
+	}
+	pushSeedAndSetHEAD(t, sr, r, []gogitcfg.RefSpec{"refs/heads/main:refs/heads/main"})
+	return r, first.String()
+}
+
+// objPresent reports whether the bare repo at bareRepo holds the commit object
+// for sha — the probe for "is this commit in the (possibly shallow) clone".
+func objPresent(t *testing.T, bareRepo, sha string) bool {
+	t.Helper()
+	repo, err := gogit.PlainOpen(bareRepo)
+	if err != nil {
+		t.Fatalf("open bare %s: %v", bareRepo, err)
+	}
+	_, err = repo.CommitObject(plumbing.NewHash(sha))
+	return err == nil
+}
+
+// registryIsFull reports whether the bare clone at bareRepo is a full clone
+// (all heads + tags), i.e. it was deepened from its original latest-only state.
+func registryIsFull(bareRepo string) bool { return git.IsFullClone(bareRepo) }
+
 // installerTestHarness wires up a real registry manager, worktree manager,
 // and git client against an isolated QUIVER_HOME.
 type installerTestHarness struct {

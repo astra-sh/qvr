@@ -215,6 +215,32 @@ func renderSyncCleanVerdict(sr *syncReconcileResult) {
 	}
 }
 
+// renderSyncChangeVerdict prints the one-line "what changed" recap for a sync
+// that actually did work — the default minimal surface in place of per-item
+// narration. Silent when nothing changed (renderSyncCleanVerdict owns the
+// "Already in sync" line) and when only errors occurred (the errors are the
+// output). The full per-item list is available under --verbose.
+func renderSyncChangeVerdict(result *skill.ReconcileResult) {
+	var parts []string
+	if n := len(result.Installed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d restored", n))
+	}
+	if n := len(result.SymlinksFixed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d linked", n))
+	}
+	if n := len(result.Removed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%s removed", output.Plural(n, "orphan")))
+	}
+	if len(parts) == 0 {
+		return
+	}
+	verb := "Synced"
+	if n := len(result.Errors); n > 0 {
+		verb = fmt.Sprintf("Synced with %s", output.Plural(n, "error"))
+	}
+	printer.Success(fmt.Sprintf("%s — %s", verb, strings.Join(parts, ", ")))
+}
+
 // syncReconcileResult carries the outputs of the under-lock reconcile pass
 // (runSyncReconcile) back to runSync for rendering and exit-code decisions.
 type syncReconcileResult struct {
@@ -452,27 +478,34 @@ func renderSyncSummary(result *skill.ReconcileResult, atOrAboveThreshold map[str
 	for _, w := range projWarnings {
 		printer.Warning(w)
 	}
-	for _, name := range result.Installed {
-		if sev, ok := atOrAboveThreshold[name]; ok {
-			// Tag restored skills that triggered findings ≥ block_severity
-			// so a top-down read of the output doesn't end on a clean tick
-			// when the just-restored skill has a critical finding.
-			printer.Warning(fmt.Sprintf("restored %s — scan found %s findings (see above)", name, sev))
-		} else {
-			printer.Success(fmt.Sprintf("Restored %s", name))
+	// Per-item play-by-play. Under --check the list IS the result (the diff a CI
+	// gate asserts on), so it always shows; a normal sync narrates per-item only
+	// under --verbose and otherwise prints the one-line verdict built by
+	// renderSyncChangeVerdict below. Items ≥ block_severity are not tagged here —
+	// the rolled-up advisory after the loops carries that.
+	showItems := syncCheck || printer.Verbose
+	emit := func(msg string) {
+		if showItems {
+			printer.Info(msg)
 		}
 	}
-	for _, path := range result.SymlinksFixed {
-		printer.Info(fmt.Sprintf("Linked %s", path))
+	for _, name := range result.Installed {
+		emit(fmt.Sprintf("Restored %s", name))
 	}
-	for _, path := range result.Removed {
-		printer.Warning(fmt.Sprintf("removed orphan %s", path))
+	for _, path := range result.SymlinksFixed {
+		emit(fmt.Sprintf("Linked %s", path))
 	}
 	for _, skipped := range result.Skipped {
-		printer.Info(fmt.Sprintf("Skipped %s", skipped))
+		emit(fmt.Sprintf("Skipped %s", skipped))
+	}
+	for _, path := range result.Removed {
+		emit(fmt.Sprintf("Removed orphan %s", path))
 	}
 	for _, e := range result.Errors {
 		printer.Error(e)
+	}
+	if !syncCheck {
+		renderSyncChangeVerdict(result)
 	}
 	if len(atOrAboveThreshold) > 0 {
 		names := make([]string, 0, len(atOrAboveThreshold))
@@ -821,14 +854,16 @@ func autoRegisterRegistriesFromLock(lock *model.LockFile, dryRun bool) {
 		verb = "would register"
 	}
 	var added []string
-	var warned bool
+	// warned dedups the URL-mismatch warning to once per registry: many lock
+	// entries can share one registry (every skill from mattpocock/skills, say),
+	// and without this the same advisory prints once per skill.
+	warned := map[string]bool{}
 	for _, entry := range lock.Entries() {
-		if autoRegisterEntry(entry, cfg, verb) {
+		if autoRegisterEntry(entry, cfg, verb, warned) {
 			added = append(added, entry.Registry)
 		}
 	}
 	if len(added) == 0 {
-		_ = warned
 		return
 	}
 	if dryRun {
@@ -847,7 +882,7 @@ func autoRegisterRegistriesFromLock(lock *model.LockFile, dryRun bool) {
 // it was added. A registry already configured with a different URL is left
 // alone and warned about (collision safety); link/empty/absolute-path entries
 // are skipped. In-memory mutation only — the caller persists cfg once.
-func autoRegisterEntry(entry *model.LockEntry, cfg *config.Config, verb string) bool {
+func autoRegisterEntry(entry *model.LockEntry, cfg *config.Config, verb string, warned map[string]bool) bool {
 	if entry == nil || entry.IsLink() {
 		return false
 	}
@@ -866,10 +901,20 @@ func autoRegisterEntry(entry *model.LockEntry, cfg *config.Config, verb string) 
 	existing, ok := cfg.Registries[entry.Registry]
 	if !ok {
 		cfg.Registries[entry.Registry] = config.RegistryConfig{URL: entry.Source}
-		fmt.Fprintf(printer.Err, "%s registry %q → %s (from qvr.lock)\n", verb, entry.Registry, entry.Source)
+		// Auto-registration is plumbing the user didn't ask to see — show it only
+		// under --verbose. A dry-run is the exception: announcing what *would* be
+		// registered is the whole point of the preview (verb is "would register").
+		if printer.Verbose || verb == "would register" {
+			fmt.Fprintf(printer.Err, "%s registry %q → %s (from qvr.lock)\n", verb, entry.Registry, entry.Source)
+		}
 		return true
 	}
-	if existing.URL != entry.Source {
+	// Compare canonically: a lock Source of "…/skills.git" and a config URL of
+	// "…/skills" point at the same repo, so a bare ".git"/trailing-slash/case
+	// difference is not a real mismatch and must not warn. Only a genuinely
+	// different remote is worth surfacing — once per registry (warned dedup).
+	if registry.CanonicalRepoURL(existing.URL) != registry.CanonicalRepoURL(entry.Source) && !warned[entry.Registry] {
+		warned[entry.Registry] = true
 		fmt.Fprintf(printer.Err,
 			"%s registry %q already configured with a different URL; lock expects %s, config has %s — leaving config unchanged\n",
 			printer.StyleErr().BoldYellow("warning:"), entry.Registry, entry.Source, existing.URL)
@@ -919,9 +964,17 @@ func scanRestoredEntry(ctx context.Context, entry *model.LockEntry, cfg *config.
 	// misleading the user into thinking the restore was aborted when in
 	// fact the symlink was created two lines later (bug #59).
 	gate, gerr := scanAndGate(ctx, skillDir, cfg, scanGateOptions{
-		Action:   "sync",
-		Subject:  entry.Name,
-		WarnOnly: true,
+		Action:  "sync",
+		Subject: entry.Name,
+		// Sync is restorative — the lock already committed to these refs, so a
+		// rescan is informational, not a decision point. WarnOnly keeps the
+		// wording honest (never "blocked"); Quiet collapses the per-finding dump
+		// to a one-line banner + a `qvr scan <name>` hint so a multi-skill sync
+		// doesn't bury the restore output under findings the user can't act on
+		// inline anyway.
+		WarnOnly:  true,
+		Quiet:     true,
+		QuietHint: fmt.Sprintf("run `qvr scan %s` to see the full report", entry.Name),
 	})
 	if gerr != nil || gate == nil || gate.Result == nil {
 		return "", false

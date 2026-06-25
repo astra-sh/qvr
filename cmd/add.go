@@ -760,7 +760,7 @@ func runAddLocal(cmd *cobra.Command, cfg *config.Config, installer *skill.Instal
 		return fmt.Errorf("add --local: %w", err)
 	}
 	if resolved != addLocal {
-		printer.Info(fmt.Sprintf("Discovered skill at %s", resolved))
+		printer.Step(fmt.Sprintf("Discovered skill at %s", resolved))
 	}
 
 	var result *skill.InstallResult
@@ -1032,10 +1032,13 @@ func ensureRegistryFor(ctx context.Context, mgr *registry.Manager, cloneURL stri
 		return "", fmt.Errorf("auto-register %s: %w", cloneURL, err)
 	}
 	if printer.Format != output.FormatJSON {
+		// Auto-registering the skill's source registry is plumbing incidental to
+		// the add the user asked for — verbose-tier, not part of the default
+		// surface (the "Added <skill>" verdict).
 		if reg.SkillCount < 0 {
-			printer.Info(fmt.Sprintf("Registered %s as %q", reg.URL, reg.Name))
+			printer.Step(fmt.Sprintf("Registered %s as %q", reg.URL, reg.Name))
 		} else {
-			printer.Info(fmt.Sprintf("Registered %s as %q (%s)", reg.URL, reg.Name, output.Plural(reg.SkillCount, "skill")))
+			printer.Step(fmt.Sprintf("Registered %s as %q (%s)", reg.URL, reg.Name, output.Plural(reg.SkillCount, "skill")))
 		}
 	}
 	return name, nil

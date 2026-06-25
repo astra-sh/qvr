@@ -217,12 +217,12 @@ func renderRegistryAddText(cmd *cobra.Command, reg *model.Registry, cfg *config.
 	if reg.SkippedCount > 0 {
 		printer.Hint(fmt.Sprintf("run `qvr registry update %s --verbose` for skip reasons", reg.Name))
 	}
-	printer.Info(registryTrustSummary(reg, cfg, fetchRegistryOwnerSignals(cmd.Context(), reg, cfg)))
+	printer.Step(registryTrustSummary(reg, cfg, fetchRegistryOwnerSignals(cmd.Context(), reg, cfg)))
 	// Proactive diagnostic: a default (latest-only) clone can't install tags or
 	// older versions. Tell the user how to get them rather than letting a later
 	// `qvr add skill@v1` fail mysteriously.
 	if !full {
-		printer.Info("Fetched the default branch only (fast)")
+		printer.Step("Fetched the default branch only (fast)")
 		printer.Hint(fmt.Sprintf("to install specific tags or older versions, re-add with `qvr registry add %s --full`", reg.URL))
 	}
 }

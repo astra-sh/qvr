@@ -214,6 +214,93 @@ func TestInstall_AtVersion_LatestOnlyRegistry(t *testing.T) {
 	}
 }
 
+// TestInstall_PinCommit_ShallowCloneSelfHeals is the reproducibility guard for
+// the shallow-clone hole: a lock that pinned an older commit (C1) must still
+// restore after a latest-only (shallow) clone's branch advanced past it.
+// Materialization first fails — C1's objects were never fetched into the depth=1
+// clone — and the installer deepens the clone to full history in place, retries,
+// and lands the worktree at C1. Without the self-heal this dead-ended with a
+// misleading "version not available" error and sync left the skill uninstalled.
+func TestInstall_PinCommit_ShallowCloneSelfHeals(t *testing.T) {
+	h := newHarness(t)
+	remote, c1 := seedRemoteTwoCommits(t, "code-review", codeReviewSkill)
+
+	// Latest-only, depth=1 — via file:// so git honours --depth and the clone is
+	// genuinely shallow (a local-path clone would silently ignore --depth).
+	if _, err := h.manager.AddWithOptions(context.Background(), "acme", "file://"+remote,
+		registry.AddOptions{Depth: 1, Full: false}); err != nil {
+		t.Fatalf("latest-only registry add: %v", err)
+	}
+	bare := registry.RegistryPath("acme")
+	if objPresent(t, bare, c1) {
+		t.Fatalf("precondition failed: shallow clone already holds C1 %s — test proves nothing", c1)
+	}
+
+	res, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "code-review",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+		PinCommit:   c1,
+	})
+	if err != nil {
+		t.Fatalf("PinCommit install should self-heal a shallow clone, got: %v", err)
+	}
+	if res.Commit != c1 {
+		t.Errorf("installed commit = %s, want C1 %s", res.Commit, c1)
+	}
+	if !objPresent(t, bare, c1) {
+		t.Errorf("self-heal should have fetched C1 into the clone")
+	}
+	if !registryIsFull(bare) {
+		t.Errorf("self-heal should have deepened the clone to a full clone")
+	}
+	if _, err := os.Stat(res.Worktree); err != nil {
+		t.Errorf("worktree missing after self-heal: %v", err)
+	}
+}
+
+// TestInstall_PinCommit_RestoresSkillDeletedUpstream is the reproducibility
+// guard for resolution (vs materialization): a `qvr sync` restore must resolve a
+// skill's SKILL.md at the LOCKED commit, not today's HEAD. When upstream deletes
+// (or renames) a skill, a plain by-name/HEAD resolution can't find it — but
+// pinning registry + locked path + locked commit restores it from the commit the
+// lock recorded.
+func TestInstall_PinCommit_RestoresSkillDeletedUpstream(t *testing.T) {
+	h := newHarness(t)
+	remote, c1 := seedRemoteSkillDeletedAtHead(t, "code-review", codeReviewSkill)
+	h.addRegistry(t, "acme", remote) // full clone — isolates this from the shallow-clone path
+
+	// Precondition: the skill is gone at HEAD, so an ordinary by-name install
+	// (no registry/path/commit pin, resolves against the HEAD index) fails.
+	if _, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "code-review",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+	}); err == nil {
+		t.Fatal("precondition: skill should be unresolvable at HEAD, but a HEAD install succeeded")
+	}
+
+	// Commit-pinned restore: registry + locked path + locked commit resolves the
+	// skill from C1 even though HEAD dropped it.
+	res, err := h.installer.Install(skill.InstallRequest{
+		Skill:       "code-review",
+		Targets:     []string{"claude"},
+		ProjectRoot: h.project,
+		Registry:    "acme",
+		SkillPath:   "skills/code-review",
+		PinCommit:   c1,
+	})
+	if err != nil {
+		t.Fatalf("commit-pinned restore of an upstream-deleted skill should succeed, got: %v", err)
+	}
+	if res.Commit != c1 {
+		t.Errorf("installed commit = %s, want C1 %s", res.Commit, c1)
+	}
+	if _, err := os.Stat(filepath.Join(res.Worktree, "skills", "code-review", "SKILL.md")); err != nil {
+		t.Errorf("restored worktree missing SKILL.md: %v", err)
+	}
+}
+
 func TestInstall_AtomicOnBadRef(t *testing.T) {
 	h := newHarness(t)
 	remote := seedRemote(t, map[string]string{"code-review": codeReviewSkill})

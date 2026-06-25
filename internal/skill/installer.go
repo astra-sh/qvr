@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -55,6 +56,14 @@ var (
 	// branches). The remedy is re-adding the registry with --full, so this is
 	// distinct from a genuinely nonexistent ref in a full clone.
 	ErrVersionNotAvailable = errors.New("version not available in a latest-only registry")
+
+	// ErrCommitUnreachable means a lock-pinned commit isn't present in the local
+	// clone even after deepening it to full history — the commit was force-pushed
+	// over or pruned upstream, so it can't be reproduced. Distinct from
+	// ErrVersionNotAvailable (a shallow clone that self-heals via deepening): this
+	// one survived the deepen-and-retry and is genuinely gone. Re-pinning is the
+	// only recovery.
+	ErrCommitUnreachable = errors.New("pinned commit unreachable upstream")
 )
 
 // InstallRequest describes a desired install.
@@ -389,39 +398,22 @@ func (in *Installer) materializeIfNeeded(plan *installPlan) (string, error) {
 	if _, err := os.Stat(finalPath); err == nil {
 		return "", nil
 	}
-	// Materialize the skill subtree DIRECTLY from the bare repo's git
-	// objects — no `git worktree`, no git subprocess. The bytes + modes
-	// written are chosen so the disk hash agrees with the bare-commit hash
-	// (see internal/skill/materialize.go). Scope mirrors the prior sparse
-	// patterns: a root skill coexisting with siblings gets SKILL.md +
-	// recognized content dirs; a non-root skill its subtree; a lone root
-	// the whole repo.
-	//
-	// Clear any stale staging dir from a prior crash before writing. This
-	// lives here (not in resolveInstall) so resolveInstall stays a pure
-	// function safe to memoize across the pre-pass and the serial loop.
-	_ = os.RemoveAll(stagingPath)
-	mat := &Materializer{Blob: in.Blob}
-	sha, err := mat.MaterializeSubtree(loc.RepoPath, plan.resolvedSHA, loc.Entry.Path, plan.rootCoexists, stagingPath)
+	// Materialize the skill subtree DIRECTLY from the bare repo's git objects —
+	// no `git worktree`, no git subprocess (see internal/skill/materialize.go).
+	sha, err := in.tryMaterialize(plan)
+	// Self-heal a latest-only (shallow) clone whose branch advanced past this
+	// lock-pinned commit: the commit's objects were never fetched, so the restore
+	// can't reproduce them. Deepen the clone to full history in place (the
+	// in-place `--full`) and retry once — a pinned restore must survive upstream
+	// moving on. Gated on a full clone so a genuinely missing commit there fails
+	// fast instead of paying for a pointless re-fetch.
+	if errors.Is(err, ErrCommitMissing) && !git.IsFullClone(loc.RepoPath) {
+		if derr := in.Git.DeepenToFull(context.Background(), loc.RepoPath); derr == nil {
+			sha, err = in.tryMaterialize(plan)
+		}
+	}
 	if err != nil {
-		_ = os.RemoveAll(stagingPath)
-		// The skill's subtree isn't present at this commit — typically it
-		// was added to the repo after that commit. Surface the actionable
-		// "pick a ref where the skill exists" message (#178).
-		if errors.Is(err, ErrSubtreeAbsent) {
-			return "", fmt.Errorf("%w: skill %q (%s) does not exist at %s (%s) — the skill was likely added to the repo after that commit; run `qvr version list %s` to find a ref where it exists",
-				ErrSkillAbsentAtRef, plan.name, loc.Entry.Path, plan.version, registry.ShortSHA(plan.resolvedSHA), plan.name)
-		}
-		// A latest-only registry (default-branch clone) has no tags or other
-		// branches, so an explicitly-pinned version simply isn't on disk.
-		// Point the user at --full instead of dumping a raw error. Only when
-		// the user actually pinned a version and the registry isn't a full
-		// clone — a missing ref in a full clone is a genuine "no such ref".
-		if plan.explicitVersion && !git.IsFullClone(loc.RepoPath) {
-			return "", fmt.Errorf("%w: %q not found in registry %q — it was cloned latest-only (default branch). Re-add with all versions: `qvr registry add %s --full`, then retry",
-				ErrVersionNotAvailable, plan.version, loc.RegistryName, loc.RegistryURL)
-		}
-		return "", fmt.Errorf("materialize skill: %w", err)
+		return "", in.materializeError(plan, err)
 	}
 	// The subtree materialized, but if the skill's own SKILL.md isn't in the
 	// written tree the skill simply doesn't exist at this commit. Catch that
@@ -452,6 +444,47 @@ func (in *Installer) materializeIfNeeded(plan *installPlan) (string, error) {
 		}
 	}
 	return sha, nil
+}
+
+// tryMaterialize clears any stale staging dir (from a prior crash or a failed
+// first attempt) and materializes the skill subtree directly from the bare
+// repo's git objects. Split out of materializeIfNeeded so the deepen-and-retry
+// self-heal can re-run the exact same attempt after unshallowing the clone. Pure
+// w.r.t. resolveInstall's memoizability — the staging clear lives here, not in
+// the resolver.
+func (in *Installer) tryMaterialize(plan *installPlan) (string, error) {
+	_ = os.RemoveAll(plan.stagingPath)
+	mat := &Materializer{Blob: in.Blob}
+	return mat.MaterializeSubtree(plan.loc.RepoPath, plan.resolvedSHA, plan.loc.Entry.Path, plan.rootCoexists, plan.stagingPath)
+}
+
+// materializeError maps a failed materialization to an actionable, user-facing
+// error and cleans the staging dir. It runs only after the deepen-and-retry
+// self-heal has had its chance, so an ErrCommitMissing here means the pinned
+// commit is genuinely unreachable, not merely un-fetched.
+func (in *Installer) materializeError(plan *installPlan, err error) error {
+	loc := plan.loc
+	_ = os.RemoveAll(plan.stagingPath)
+	switch {
+	case errors.Is(err, ErrSubtreeAbsent):
+		// The commit is present but the skill's subtree isn't — typically the
+		// skill was added to the repo after that commit (#178).
+		return fmt.Errorf("%w: skill %q (%s) does not exist at %s (%s) — the skill was likely added to the repo after that commit; run `qvr version list %s` to find a ref where it exists",
+			ErrSkillAbsentAtRef, plan.name, loc.Entry.Path, plan.version, registry.ShortSHA(plan.resolvedSHA), plan.name)
+	case errors.Is(err, ErrCommitMissing):
+		// Survived the deepen-and-retry (or the clone was already full): the
+		// pinned commit is gone upstream (force-push/prune). Re-pinning is the
+		// only recovery — `--full` can't fetch a commit no ref reaches.
+		return fmt.Errorf("%w: commit %s for skill %q is no longer reachable in registry %q — upstream may have force-pushed or pruned it; run `qvr update %s` to re-pin to the current %s",
+			ErrCommitUnreachable, registry.ShortSHA(plan.resolvedSHA), plan.name, loc.RegistryName, plan.name, plan.version)
+	case plan.explicitVersion && !git.IsFullClone(loc.RepoPath):
+		// A latest-only clone genuinely lacks an explicitly-pinned ref (no tags /
+		// other branches). Point at --full rather than dumping a raw error.
+		return fmt.Errorf("%w: %q not found in registry %q — it was cloned latest-only (default branch). Re-add with all versions: `qvr registry add %s --full`, then retry",
+			ErrVersionNotAvailable, plan.version, loc.RegistryName, loc.RegistryURL)
+	default:
+		return fmt.Errorf("materialize skill: %w", err)
+	}
 }
 
 // gateInstallTrust resolves git-native provenance plus the commit author for the
@@ -676,14 +709,16 @@ func mergeProvenance(prior, fresh *model.ProvenanceRef, commitAuthor string) *mo
 //     so the user sees who has what instead of the misleading
 //     "create worktree: reference not found" from the old single-pick
 //     path. Closes the wrong-pick-then-error half of issue #101.
-func (in *Installer) resolveSkill(name, version, registryName, skillPath string) (*registry.SkillLocation, string, error) {
+func (in *Installer) resolveSkill(name, version, registryName, skillPath, pinCommit string) (*registry.SkillLocation, string, error) {
 	// Fast path: the caller pinned an exact skill directory (e.g. from a
-	// `qvr add <blob-url>` spec) under a single registry. Resolve just that
-	// SKILL.md instead of indexing the entire registry. A miss (stale path,
-	// root-level skill, name↔dir mismatch) falls through to the by-name lookup
-	// below, so this is a pure speedup and never changes what resolves.
+	// `qvr add <blob-url>` spec, or a `qvr sync` restore) under a single
+	// registry. Resolve just that SKILL.md instead of indexing the entire
+	// registry. pinCommit reads it at the LOCKED commit so a restore still
+	// resolves a skill upstream has since renamed or deleted; empty pinCommit
+	// reads HEAD (the add-time behavior). A miss (stale path, root-level skill,
+	// name↔dir mismatch) falls through to the by-name lookup below.
 	if skillPath != "" && registryName != "" {
-		if loc, err := in.Registry.FindSkillAtPath(registryName, skillPath); err == nil {
+		if loc, err := in.Registry.FindSkillAtPath(registryName, skillPath, pinCommit); err == nil {
 			return loc, "", nil
 		}
 	}
@@ -1464,7 +1499,7 @@ func (in *Installer) resolveInstall(req *InstallRequest) (*installPlan, error) {
 		return nil, err
 	}
 
-	loc, ambiguityWarning, err := in.resolveSkill(name, version, req.Registry, req.SkillPath)
+	loc, ambiguityWarning, err := in.resolveSkill(name, version, req.Registry, req.SkillPath, req.PinCommit)
 	if err != nil {
 		return nil, err
 	}

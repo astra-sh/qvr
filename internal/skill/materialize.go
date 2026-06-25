@@ -23,6 +23,14 @@ import (
 // the user gets an actionable message instead of a raw tree-walk failure.
 var ErrSubtreeAbsent = errors.New("skill subtree absent at commit")
 
+// ErrCommitMissing means the commit object itself is not present in the local
+// bare clone — distinct from ErrSubtreeAbsent (commit present, subtree isn't).
+// It is the signature of a latest-only (shallow, single-branch) clone whose
+// branch has advanced past a lock-pinned commit, dropping that commit's objects.
+// Installer maps it to a deepen-and-retry self-heal so a pinned restore survives
+// upstream advancing.
+var ErrCommitMissing = errors.New("commit not present in local clone")
+
 // BlobMaterializer is the seam through which a skill's blob bytes are written
 // to disk. The default (nil) path is a plain stream copy; the reflink/hardlink
 // content-store implementation (#205) plugs in here without the materializer
@@ -75,6 +83,12 @@ func (m *Materializer) MaterializeSubtree(repoPath, commitish, subpath string, r
 	}
 	c, err := repo.CommitObject(hash)
 	if err != nil {
+		// A missing object (not a corrupt repo) means the commit simply isn't in
+		// this clone — surface it as ErrCommitMissing so the installer can deepen
+		// the clone and retry rather than dead-ending.
+		if errors.Is(err, plumbing.ErrObjectNotFound) {
+			return "", fmt.Errorf("%w: %s", ErrCommitMissing, hash)
+		}
 		return "", fmt.Errorf("load commit %s: %w", hash, err)
 	}
 	rootTree, err := c.Tree()

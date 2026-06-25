@@ -738,8 +738,10 @@ func (m *Manager) FindSkillIn(skillName, registryName string) (*SkillLocation, e
 // in a large registry. registryName may be a bare leaf (e.g. `skills` for
 // `acme/skills`). Returns an error when the directory holds no installable
 // skill — callers fall back to the by-name full-index lookup, so a stale or
-// root-level path still resolves, just without the speedup.
-func (m *Manager) FindSkillAtPath(registryName, skillDir string) (*SkillLocation, error) {
+// root-level path still resolves, just without the speedup. ref pins which
+// commit's SKILL.md is read (empty/HEAD for add-time; the locked commit for a
+// reproducible sync restore of a skill upstream may have since renamed).
+func (m *Manager) FindSkillAtPath(registryName, skillDir, ref string) (*SkillLocation, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
@@ -753,7 +755,7 @@ func (m *Manager) FindSkillAtPath(registryName, skillDir string) (*SkillLocation
 	}
 
 	repoPath := RegistryPath(resolved)
-	entry, err := m.Indexer.BuildEntry(repoPath, skillDir)
+	entry, err := m.Indexer.BuildEntryAt(repoPath, skillDir, ref)
 	if err != nil {
 		return nil, fmt.Errorf("no skill at %q in registry %q: %w", skillDir, resolved, err)
 	}
@@ -806,23 +808,25 @@ func (m *Manager) FindSkillForSource(skillName, registryName, sourceURL string) 
 // (credentials stripped, lowercased, trailing "/" and ".git" ignored) so a lock
 // entry's Source resolves to its registry despite cosmetic URL differences.
 func registryNameForURL(cfg *config.Config, want string) string {
-	target := canonicalRepoURL(want)
+	target := CanonicalRepoURL(want)
 	if target == "" {
 		return ""
 	}
 	for name, rc := range cfg.Registries {
-		if canonicalRepoURL(rc.URL) == target {
+		if CanonicalRepoURL(rc.URL) == target {
 			return name
 		}
 	}
 	return ""
 }
 
-// canonicalRepoURL reduces a clone URL to a comparison key: credentials
+// CanonicalRepoURL reduces a clone URL to a comparison key: credentials
 // stripped, lowercased, trailing slash and ".git" suffix removed. Best-effort —
 // a URL that won't sanitize (e.g. a local path used in tests) falls back to a
-// trimmed/lowercased form so matching still has a chance.
-func canonicalRepoURL(raw string) string {
+// trimmed/lowercased form so matching still has a chance. Exported so callers
+// outside this package (e.g. sync's lock→config auto-register) compare clone
+// URLs the same way and don't treat a bare ".git" difference as a real mismatch.
+func CanonicalRepoURL(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return ""

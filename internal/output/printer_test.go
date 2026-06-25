@@ -87,7 +87,10 @@ func TestTruncDesc_BoundaryUnchangedAt60(t *testing.T) {
 
 func TestPrefixes_PlainWhenNotTerminal(t *testing.T) {
 	var out, errBuf bytes.Buffer
-	p := &output.Printer{Out: &out, Err: &errBuf, Format: output.FormatText}
+	// Verbose so Hint/Detail render — this test is about plain (non-ANSI)
+	// formatting of every prefix method, not the verbosity gate (covered by
+	// TestVerbosityGate).
+	p := &output.Printer{Out: &out, Err: &errBuf, Format: output.FormatText, Verbose: true}
 
 	p.Success("Added skill")
 	p.Error("add failed")
@@ -104,6 +107,38 @@ func TestPrefixes_PlainWhenNotTerminal(t *testing.T) {
 	}
 	if strings.Contains(out.String()+errBuf.String(), "\x1b[") {
 		t.Errorf("non-terminal writers must not receive ANSI escapes")
+	}
+}
+
+// TestVerbosityGate pins the minimal-by-default contract: Hint, Detail, and Step
+// are suppressed unless Verbose; Success/Error/Warning/Info always print.
+func TestVerbosityGate(t *testing.T) {
+	emit := func(p *output.Printer) {
+		p.Success("verdict")
+		p.Error("boom")
+		p.Warning("careful")
+		p.Info("primary")
+		p.Step("restored x")
+		p.Hint("you could")
+		p.Detail("elaboration")
+	}
+
+	var qOut, qErr bytes.Buffer
+	emit(&output.Printer{Out: &qOut, Err: &qErr, Format: output.FormatText}) // Verbose false
+	if got := qOut.String(); got != "✓ verdict\nprimary\n" {
+		t.Errorf("quiet stdout = %q — Step/Detail must be suppressed", got)
+	}
+	if got := qErr.String(); got != "error: boom\nwarning: careful\n" {
+		t.Errorf("quiet stderr = %q — Hint must be suppressed", got)
+	}
+
+	var vOut, vErr bytes.Buffer
+	emit(&output.Printer{Out: &vOut, Err: &vErr, Format: output.FormatText, Verbose: true})
+	if got := vOut.String(); got != "✓ verdict\nprimary\nrestored x\n  elaboration\n" {
+		t.Errorf("verbose stdout = %q — Step/Detail must print", got)
+	}
+	if got := vErr.String(); got != "error: boom\nwarning: careful\nhint: you could\n" {
+		t.Errorf("verbose stderr = %q — Hint must print", got)
 	}
 }
 

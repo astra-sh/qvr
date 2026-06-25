@@ -51,6 +51,7 @@ func setupCreatedSkillProject(t *testing.T, name string) (remote string) {
 func TestRunPublish_CreatedSkill_RegistryRoutesToGreenfield(t *testing.T) {
 	remote := setupCreatedSkillProject(t, "my-skill")
 	resetPublishFlags(t)
+	printer.Verbose = true // the consume-mode follow-up is verbose-tier guidance now
 	publishRegistry = "acme"
 	publishMessage = "add my-skill"
 	publishCmd.SetContext(context.Background())

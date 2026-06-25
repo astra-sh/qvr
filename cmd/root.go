@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/astra-sh/qvr/internal/output"
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ import (
 
 var (
 	outputFormat string
+	verbose      bool
 	printer      *output.Printer
 
 	// Build provenance — overridden at link time via -ldflags (see Makefile and
@@ -62,6 +64,10 @@ var rootCmd = &cobra.Command{
 			format = output.FormatJSON
 		}
 		printer = output.New(format)
+		// --verbose (or QVR_VERBOSE) opts into play-by-play output. The env var
+		// is the escape hatch for scripts/CI that can't easily inject the flag;
+		// the explicit flag always wins when set.
+		printer.Verbose = verbose || envTrue("QVR_VERBOSE")
 		return nil
 	},
 	Version: version,
@@ -111,8 +117,21 @@ func Execute() {
 	os.Exit(1)
 }
 
+// envTrue reports whether an env var is set to a truthy value (1/true/yes/on,
+// case-insensitive). Anything unparseable or unset is false, so a stray value
+// never silently flips verbosity on.
+func envTrue(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "output", "text", "output format (text|json)")
+	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "show play-by-play progress, hints, and per-item detail")
 	rootCmd.SetVersionTemplate("qvr version {{.Version}}\n")
 	// Force-materialise cobra's auto-generated `completion` parent command
 	// so we can override its RunE. Without this, `qvr completion <garbage>`

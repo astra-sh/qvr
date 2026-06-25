@@ -188,16 +188,18 @@ func renderGateFindings(opts scanGateOptions, res *security.ScanResult, threshol
 	if subject == "" {
 		subject = res.Skill
 	}
-	style := printer.StyleErr()
-	// Lint is advisory and surfaced whether or not there are security findings,
-	// so a non-conformant-but-safe skill still warns. Suppressed in Quiet mode
-	// (batch `add --all`) to keep first-time installs uncluttered.
-	if res.Lint != nil && !res.Lint.Valid && !opts.Quiet {
-		fmt.Fprintf(printer.Err, "%s %s %s: lint found %s %s\n",
-			style.BoldYellow("warning:"), action, subject,
-			output.Plural(res.Lint.Count, "issue"),
-			style.Dim(fmt.Sprintf("(advisory — install proceeds; run `qvr lint %s`)", subject)))
+	// Minimal-by-default: findings BELOW block_severity (and advisory lint) are
+	// informational, so the gate stays silent unless --verbose. Findings at/above
+	// the threshold always render — keyed off the real threshold breach, not the
+	// `blocked` param, because WarnOnly (sync) forces blocked=false yet a
+	// threshold-meeting finding still needs to surface (just with warning wording,
+	// not "blocked"). The per-skill scan ref is persisted to the lock regardless,
+	// and `qvr scan <name>` always prints the full report on demand.
+	if !exceedsThreshold(res, threshold) && !printer.Verbose {
+		return
 	}
+	style := printer.StyleErr()
+	renderLintAdvisory(opts, res, action, subject)
 	if len(res.Findings) == 0 {
 		return
 	}
@@ -234,6 +236,21 @@ func renderGateFindings(opts scanGateOptions, res *security.ScanResult, threshol
 		fmt.Fprintf(printer.Err, "%s pass --no-scan to override, or `qvr config set security.block_severity <higher>` to relax the gate\n",
 			style.BoldCyan("hint:"))
 	}
+}
+
+// renderLintAdvisory surfaces a skill's lint non-conformance as an advisory
+// warning, independent of any security findings — a non-conformant-but-safe
+// skill still warns. Suppressed in Quiet mode (batch `add --all`) to keep
+// first-time installs uncluttered.
+func renderLintAdvisory(opts scanGateOptions, res *security.ScanResult, action, subject string) {
+	if res.Lint == nil || res.Lint.Valid || opts.Quiet {
+		return
+	}
+	style := printer.StyleErr()
+	fmt.Fprintf(printer.Err, "%s %s %s: lint found %s %s\n",
+		style.BoldYellow("warning:"), action, subject,
+		output.Plural(res.Lint.Count, "issue"),
+		style.Dim(fmt.Sprintf("(advisory — install proceeds; run `qvr lint %s`)", subject)))
 }
 
 // severityTag renders a finding's severity as a colour-coded `[SEVERITY]`

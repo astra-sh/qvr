@@ -469,6 +469,74 @@ func TestAutoRegisterRegistriesFromLock_RealRunWritesConfig(t *testing.T) {
 	}
 }
 
+// A config URL that differs from the lock Source only by a ".git" suffix points
+// at the SAME repo, so auto-register must NOT warn about a mismatch. Pre-fix the
+// naive string compare flagged every such entry, dumping one spurious "already
+// configured with a different URL" per skill in a multi-skill sync.
+func TestAutoRegisterRegistriesFromLock_DotGitSuffixIsNotAMismatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	// Config has the registry WITHOUT the ".git" suffix.
+	if err := config.Save(&config.Config{
+		Registries: map[string]config.RegistryConfig{
+			"matt": {URL: "https://github.com/mattpocock/skills"},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	lock := model.NewLockFile(filepath.Join(t.TempDir(), model.LockFileName))
+	// Three skills from the one registry, all with the ".git" Source.
+	for _, name := range []string{"tdd", "triage", "diagnose"} {
+		lock.Put(&model.LockEntry{
+			Name:     name,
+			Registry: "matt",
+			Source:   "https://github.com/mattpocock/skills.git",
+			Ref:      "main",
+			Commit:   "abc1234",
+		})
+	}
+
+	out := captureSyncStderr(t, func() {
+		autoRegisterRegistriesFromLock(lock, false /*dryRun*/)
+	})
+	if strings.Contains(out, "already configured with a different URL") {
+		t.Errorf(".git-suffix difference warned as a mismatch; output:\n%s", out)
+	}
+}
+
+// A genuinely different remote URL still warns — but exactly ONCE per registry,
+// not once per lock entry that references it.
+func TestAutoRegisterRegistriesFromLock_GenuineMismatchWarnsOnce(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("QUIVER_HOME", home)
+	if err := config.Save(&config.Config{
+		Registries: map[string]config.RegistryConfig{
+			"matt": {URL: "https://github.com/someone-else/skills.git"},
+		},
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	lock := model.NewLockFile(filepath.Join(t.TempDir(), model.LockFileName))
+	for _, name := range []string{"tdd", "triage", "diagnose"} {
+		lock.Put(&model.LockEntry{
+			Name:     name,
+			Registry: "matt",
+			Source:   "https://github.com/mattpocock/skills.git",
+			Ref:      "main",
+			Commit:   "abc1234",
+		})
+	}
+
+	out := captureSyncStderr(t, func() {
+		autoRegisterRegistriesFromLock(lock, false /*dryRun*/)
+	})
+	if n := strings.Count(out, "already configured with a different URL"); n != 1 {
+		t.Errorf("genuine mismatch warned %d times, want exactly 1; output:\n%s", n, out)
+	}
+}
+
 // TestRunSync_DriftFailsByDefault is the #118 regression. Pre-fix, sync
 // printed a `!` drift line and exited 0 unless --strict was passed. An
 // attacker who tampered ~/.quiver/worktrees/<sha>/ silently poisoned

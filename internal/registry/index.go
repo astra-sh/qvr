@@ -271,13 +271,25 @@ func (idx *Indexer) indexSkillDirs(repoPath string, kept []string) ([]SkillIndex
 // can coexist with siblings (RootCoexists), which only the full index can
 // detect, so those go through BuildIndex.
 func (idx *Indexer) BuildEntry(repoPath, skillDir string) (SkillIndexEntry, error) {
+	return idx.BuildEntryAt(repoPath, skillDir, "HEAD")
+}
+
+// BuildEntryAt is BuildEntry pinned to a specific commit-ish instead of HEAD.
+// A reproducible restore (`qvr sync`) must resolve the skill's SKILL.md from the
+// LOCKED commit, not today's tip — otherwise a skill that upstream later renamed
+// or deleted can no longer be found even though its objects are still in the
+// clone. An empty ref means HEAD (the ordinary add-time behavior).
+func (idx *Indexer) BuildEntryAt(repoPath, skillDir, ref string) (SkillIndexEntry, error) {
 	skillDir = strings.Trim(skillDir, "/")
 	if skillDir == "" || skillDir == "." {
 		return SkillIndexEntry{}, fmt.Errorf("%w: targeted index needs a non-root skill directory", ErrIndexBuildFailed)
 	}
+	if ref == "" {
+		ref = "HEAD"
+	}
 
 	mdPath := skillDir + "/SKILL.md"
-	blob, err := idx.Git.ReadBlob(repoPath, "HEAD", mdPath)
+	blob, err := idx.Git.ReadBlob(repoPath, ref, mdPath)
 	if err != nil {
 		return SkillIndexEntry{}, fmt.Errorf("%w: read %s: %v", ErrIndexBuildFailed, mdPath, err)
 	}

@@ -28,6 +28,11 @@ type Printer struct {
 	Out    io.Writer
 	Err    io.Writer
 	Format Format
+	// Verbose opts into play-by-play output: per-item progress (Step), follow-up
+	// Hints, and de-emphasised Detail lines. Off by default so every command's
+	// default surface is the essential outcome plus anything actionable (errors,
+	// warnings, the final verdict). Set from the global -v/--verbose flag.
+	Verbose bool
 }
 
 // New creates a new Printer with the given format.
@@ -72,24 +77,39 @@ func (p *Printer) Warning(msg string) {
 
 // Hint prints a follow-up suggestion with a uv-style `hint:` prefix. Hints
 // go to stderr — they are guidance about the run, not command output, so
-// piped stdout stays clean (text mode only).
+// piped stdout stays clean. Suppressed unless --verbose: a hint is optional
+// next-step guidance, never the outcome, so it stays out of the default
+// minimal surface (text mode only).
 func (p *Printer) Hint(msg string) {
-	if p.Format == FormatText {
+	if p.Format == FormatText && p.Verbose {
 		fmt.Fprintf(p.Err, "%s %s\n", p.StyleErr().BoldCyan("hint:"), msg)
 	}
 }
 
-// Info prints an info message (text mode only).
+// Info prints an info message (text mode only). Info is a command's PRIMARY
+// output (list rows, status, the queried result), so it is NOT gated by
+// verbosity — gate play-by-play progress with Step, not Info.
 func (p *Printer) Info(msg string) {
 	if p.Format == FormatText {
 		fmt.Fprintln(p.Out, msg)
 	}
 }
 
+// Step prints a single line of play-by-play progress (e.g. "Restored X",
+// "Linked Y", "Registered Z") — the per-item narration of a multi-step
+// command. Suppressed unless --verbose so the default surface is the final
+// verdict, not every intermediate step (text mode only).
+func (p *Printer) Step(msg string) {
+	if p.Format == FormatText && p.Verbose {
+		fmt.Fprintln(p.Out, msg)
+	}
+}
+
 // Detail prints an indented, de-emphasised follow-up line under a preceding
-// Success/Info line (text mode only).
+// Success/Info line. Suppressed unless --verbose — it is secondary elaboration,
+// not the outcome (text mode only).
 func (p *Printer) Detail(msg string) {
-	if p.Format == FormatText {
+	if p.Format == FormatText && p.Verbose {
 		fmt.Fprintf(p.Out, "  %s\n", p.StyleOut().Dim(msg))
 	}
 }

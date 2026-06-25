@@ -787,7 +787,10 @@ func renderVerifyText(out *VerifyOutput) {
 				printer.Warning(fmt.Sprintf("  %s: expected %s, got %s", d.Field, shortHashLabel(d.Expected), shortHashLabel(d.Actual)))
 			}
 			if r.Mode == "edit" {
-				printer.Hint(fmt.Sprintf("%s is in edit mode — local edits are expected; run `qvr lock verify --repair` to re-pin the hash", r.Name))
+				// The repair remedy accompanies a reported drift, so it stays
+				// visible by default (a Warning, like sync's renderDriftReport) —
+				// it is actionable guidance about a problem, not an optional hint.
+				printer.Warning(fmt.Sprintf("%s is in edit mode — local edits are expected; run `qvr lock verify --repair` to re-pin the hash", r.Name))
 			}
 		case skill.VerifyStatusRepaired:
 			if r.OldSubtreeHash != "" {

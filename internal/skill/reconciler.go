@@ -213,12 +213,20 @@ func (r *Reconciler) restoreShared(entry *model.LockEntry, lock *model.LockFile,
 			pin = entry.Commit
 		}
 		if _, err := r.Installer.Install(InstallRequest{
-			Skill:                    ref,
-			Targets:                  entry.Targets,
-			Global:                   global,
-			ProjectRoot:              projectRoot,
-			PinCommit:                pin,
-			As:                       aliasFlag,
+			Skill:       ref,
+			Targets:     entry.Targets,
+			Global:      global,
+			ProjectRoot: projectRoot,
+			PinCommit:   pin,
+			As:          aliasFlag,
+			// Pin resolution to the LOCKED registry + subtree path so a restore
+			// reproduces exactly what the lock records — never a same-named skill
+			// in a different registry. Without these, resolution falls back to a
+			// global by-name search that picks the alphabetically-first registry
+			// publishing the name (e.g. a stray `diagnose` in another registry) or
+			// fails outright for a nested skill the flat name index doesn't reach.
+			Registry:                 entry.Registry,
+			SkillPath:                entry.Path,
 			RequireSigned:            opts.RequireSigned,
 			TrustedAuthors:           opts.TrustedAuthorsByRegistry[entry.Registry],
 			TrustedAuthorsByRegistry: opts.TrustedAuthorsByRegistry,

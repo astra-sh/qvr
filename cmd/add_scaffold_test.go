@@ -77,6 +77,7 @@ func TestRunAdd_FailedAdd_PreexistingLockUntouched(t *testing.T) {
 // printed) while still exiting non-zero.
 func TestRunAdd_MixedBatch_ScaffoldsAndExits1(t *testing.T) {
 	project, _ := setupProjectFileTest(t)
+	printer.Verbose = true // the qvr.toml hint is verbose-tier guidance now
 
 	err := runAdd(addCmd, []string{"code-review", "no-such-skill"})
 	if err == nil {
