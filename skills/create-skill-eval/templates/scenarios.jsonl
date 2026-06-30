@@ -1,0 +1,5 @@
+{"id": "s1_basic", "input": "<a normal, easy case>", "expected": "<the ideal output>"}
+{"id": "s2_tricky", "input": "<a case exercising the skill's tricky branch>", "expected": "<ideal>"}
+{"id": "s3_regression", "input": "<an i/o pair pinning a bug you already fixed, so it can't regress>", "expected": "<ideal>"}
+{"id": "s4_unicode", "input": "<a unicode / special-character case>", "expected": "<ideal>"}
+{"id": "s5_openended", "input": "<a case with no single right answer — judged by the rubric only, so it carries NO 'expected' field>"}

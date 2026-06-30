@@ -803,6 +803,20 @@ func (m *Manager) FindSkillForSource(skillName, registryName, sourceURL string) 
 	return m.FindSkill(skillName)
 }
 
+// RegistryNameForURL returns the configured registry whose clone URL refers to
+// the same repo as want, or "" when none match (or config can't be loaded).
+// Exported so the installer can honor a lock entry's recorded Source — e.g. a
+// fork a skill was migrated to via `qvr publish --fork --migrate`, which clears
+// Registry but sets Source — when scoping a bare re-add to its pinned origin,
+// the same resolution FindSkillForSource uses.
+func (m *Manager) RegistryNameForURL(want string) string {
+	cfg, err := config.Load()
+	if err != nil {
+		return ""
+	}
+	return registryNameForURL(cfg, want)
+}
+
 // registryNameForURL returns the configured registry whose clone URL refers to
 // the same repo as want, or "" when none match. Comparison is canonicalised
 // (credentials stripped, lowercased, trailing "/" and ".git" ignored) so a lock

@@ -374,7 +374,11 @@ func checkoutPublishBranch(repo *gogit.Repository, wt *gogit.Worktree, branch, a
 	return wt.Checkout(&gogit.CheckoutOptions{Branch: localRef})
 }
 
-// copyDir recursively copies src → dst, skipping .git and common OS noise.
+// copyDir recursively copies src → dst, skipping .git, common OS noise, and
+// generated Python bytecode caches (__pycache__/*.pyc). The bytecode is a
+// rebuildable artifact of running a skill's eval.py, never source — letting it
+// ride along would snapshot machine-specific .pyc files into a published fork
+// even though the source eval stays byte-frozen.
 func copyDir(src, dst string) error {
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return err
@@ -391,7 +395,8 @@ func copyDir(src, dst string) error {
 			return nil
 		}
 		base := filepath.Base(rel)
-		if strings.HasPrefix(rel, ".git") || base == ".DS_Store" || base == "Thumbs.db" {
+		if strings.HasPrefix(rel, ".git") || base == ".DS_Store" || base == "Thumbs.db" ||
+			base == "__pycache__" || strings.HasSuffix(base, ".pyc") || strings.HasSuffix(base, ".pyo") {
 			if info.IsDir() {
 				return filepath.SkipDir
 			}
