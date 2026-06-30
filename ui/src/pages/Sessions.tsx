@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { RefreshCw } from "lucide-react";
-import { api, prettyAgent, scopeToken, useFetch, type DiscoverReport } from "../api";
+import {
+  api,
+  prettyAgent,
+  scopeToken,
+  useFetch,
+  type DiscoverReport,
+  type SessionScore,
+} from "../api";
 import {
   Badge,
   Button,
@@ -9,6 +16,7 @@ import {
   ErrorBox,
   Field,
   Loading,
+  MultiSelect,
   PageHead,
   RefreshButton,
   Select,
@@ -35,7 +43,10 @@ const KNOWN_AGENTS = [
 
 export default function Sessions() {
   const [agent, setAgent] = useState("");
-  const [skill, setSkill] = useState("");
+  // Skills + versions are multi-select checklists: a session matches ANY chosen
+  // skill AND ANY chosen version (the server ORs within each).
+  const [skills, setSkills] = useState<string[]>([]);
+  const [versions, setVersions] = useState<string[]>([]);
   const [since, setSince] = useState("");
   const [until, setUntil] = useState("");
   // Token sort is server-side (the list is limit-truncated), so it lives in
@@ -43,33 +54,79 @@ export default function Sessions() {
   const [sortTokens, setSortTokens] = useState(false);
 
   // Re-fetch whenever the scope or any filter changes (the key encodes them all).
-  const key = `sessions:${scopeToken()}:${agent}|${skill}|${since}|${until}|${sortTokens}`;
+  const key = `sessions:${scopeToken()}:${agent}|${skills.join(",")}|${versions.join(",")}|${since}|${until}|${sortTokens}`;
   // 10s polling keeps the list live against the server's background scan.
   const { data, error, loading, reload } = useFetch(
-    () => api.sessions({ agent, skill, since, until, sort: sortTokens ? "tokens" : undefined }),
+    () =>
+      api.sessions({ agent, skills, versions, since, until, sort: sortTokens ? "tokens" : undefined }),
     key,
     10_000,
   );
 
-  // Skill dropdown options: installed skills in scope, unioned with any skill
-  // seen in the current rows (covers skills used but since removed/ejected).
+  // Facets for the checklists come from the whole scoped DB, not the truncated
+  // page: the per-skill usage rollup carries every skill and the distinct
+  // versions each one ran, so a skill's older versions show up even when no
+  // recent session used them. Installed skills + the loaded rows fill any gap.
+  const metrics = useFetch(() => api.metricsSkills(), `sessions-metrics:${scopeToken()}`);
   const skillsList = useFetch(() => api.skills(), `sessions-skills:${scopeToken()}`);
+
   const agentOptions = useMemo(() => {
     const set = new Set(KNOWN_AGENTS);
     data?.forEach((s) => s.agent_name && set.add(s.agent_name));
     return [...set].sort();
   }, [data]);
+
   const skillOptions = useMemo(() => {
     const set = new Set<string>();
+    metrics.data?.skills?.forEach((s) => set.add(s.name));
     skillsList.data?.forEach((s) => set.add(s.name));
     data?.forEach((s) => s.skills?.forEach((n) => set.add(n)));
     return [...set].sort();
-  }, [skillsList.data, data]);
+  }, [metrics.data, skillsList.data, data]);
 
-  const active = agent || skill || since || until;
+  // skill → its distinct versions, from the DB rollup, with anything seen in the
+  // loaded rows folded in. "unknown" is dropped — filtering by it matches nothing
+  // (skill.version is empty there), so it would be a dead option.
+  const skillVersions = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const add = (skill: string, v?: string) => {
+      if (!v || v === "unknown") return;
+      const set = m.get(skill) ?? new Set<string>();
+      set.add(v);
+      m.set(skill, set);
+    };
+    metrics.data?.skills?.forEach((s) => s.versions?.forEach((v) => add(s.name, v)));
+    data?.forEach((s) => s.skill_versions?.forEach((v) => add(v.skill, v.version)));
+    return m;
+  }, [metrics.data, data]);
+
+  // Version options narrow to the selected skills (all skills when none chosen),
+  // newest-first.
+  const versionOptions = useMemo(() => {
+    const scope = skills.length > 0 ? skills : [...skillVersions.keys()];
+    const set = new Set<string>();
+    scope.forEach((sk) => skillVersions.get(sk)?.forEach((v) => set.add(v)));
+    return [...set].sort().reverse();
+  }, [skills, skillVersions]);
+
+  // Changing the skill set re-scopes the versions; drop any selected version that
+  // no longer belongs to a chosen skill so the filter can't strand a dead value.
+  const onSkillsChange = (next: string[]) => {
+    setSkills(next);
+    setVersions((prev) => {
+      if (prev.length === 0) return prev;
+      const scope = next.length > 0 ? next : [...skillVersions.keys()];
+      const allowed = new Set<string>();
+      scope.forEach((sk) => skillVersions.get(sk)?.forEach((v) => allowed.add(v)));
+      return prev.filter((v) => allowed.has(v));
+    });
+  };
+
+  const active = agent || skills.length > 0 || versions.length > 0 || since || until;
   const clear = () => {
     setAgent("");
-    setSkill("");
+    setSkills([]);
+    setVersions([]);
     setSince("");
     setUntil("");
   };
@@ -98,15 +155,23 @@ export default function Sessions() {
             ))}
           </Select>
         </Field>
-        <Field label="skill">
-          <Select value={skill} onChange={(e) => setSkill(e.target.value)}>
-            <option value="">all</option>
-            {skillOptions.map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </Select>
+        <Field label="skills">
+          <MultiSelect
+            options={skillOptions}
+            selected={skills}
+            onChange={onSkillsChange}
+            noun="skills"
+            emptyText="no skills yet"
+          />
+        </Field>
+        <Field label="versions">
+          <MultiSelect
+            options={versionOptions}
+            selected={versions}
+            onChange={setVersions}
+            noun="versions"
+            emptyText={skills.length > 0 ? "no versions for these skills" : "no versions yet"}
+          />
         </Field>
         <Field label="from">
           <DateInput value={since} onChange={setSince} />
@@ -137,6 +202,8 @@ export default function Sessions() {
               <Th>session</Th>
               <Th>agent</Th>
               <Th>skills</Th>
+              <Th>version</Th>
+              <Th>score</Th>
               <Th>started</Th>
               <Th>turns</Th>
               <Th>tools</Th>
@@ -179,6 +246,22 @@ export default function Sessions() {
                   <span className="qvr-table__muted">—</span>
                 )}
               </Td>
+              <Td>
+                {s.skill_versions && s.skill_versions.length > 0 ? (
+                  <span style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {s.skill_versions.map((v) => (
+                      <Badge key={`${v.skill}@${v.version}`} tone="neutral" title={v.commit || undefined}>
+                        {v.version}
+                      </Badge>
+                    ))}
+                  </span>
+                ) : (
+                  <span className="qvr-table__muted">—</span>
+                )}
+              </Td>
+              <Td>
+                <ScoreCell scores={s.scores} />
+              </Td>
               <Td muted>{fmtEpochMs(s.started_ms)}</Td>
               <Td muted>{s.turns}</Td>
               <Td muted>{s.tools}</Td>
@@ -191,6 +274,37 @@ export default function Sessions() {
         </Table>
       )}
     </>
+  );
+}
+
+// ScoreCell renders a session's BYO-grader verdict in the list. It prefers the
+// "score" metric — the one compare's version-cohort rollup aggregates — and falls
+// back to whatever metric the session was graded under, so a grade written under a
+// custom metric still shows a number (with the metric in its tooltip) rather than
+// a misleading dash. Ungraded sessions read "—", matching the version column's
+// empty state. The value is the grader's number verbatim; we don't color by a
+// pass/fail scale we can't assume.
+function ScoreCell({ scores }: { scores?: SessionScore[] }) {
+  const list = scores ?? [];
+  if (list.length === 0) return <span className="qvr-table__muted">—</span>;
+  const metric = list.some((s) => s.metric === "score")
+    ? "score"
+    : [...list].sort((a, b) => a.metric.localeCompare(b.metric))[0].metric;
+  const rows = list
+    .filter((s) => s.metric === metric)
+    .sort((a, b) => a.skill.localeCompare(b.skill));
+  return (
+    <span style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+      {rows.map((r) => (
+        <Badge
+          key={r.skill}
+          tone="neutral"
+          title={`${r.skill} · ${r.metric}${r.grader ? ` · grader ${r.grader}` : ""}`}
+        >
+          {r.value.toFixed(2)}
+        </Badge>
+      ))}
+    </span>
   );
 }
 

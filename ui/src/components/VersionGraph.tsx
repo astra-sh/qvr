@@ -136,6 +136,18 @@ function NodeBody({ node }: { node: VersionGraphNode }) {
       {u && (
         <span className="qvr-graph__chips">
           <Tag>{fmtCount(u.invocations)} runs</Tag>
+          {/* BYO-grader pass-rate for this version (metric "score"); absent =
+              ungraded, omit rather than imply a 0 verdict. */}
+          {u.meanScore != null && (
+            <Tag
+              lead="★"
+              title={`mean score over ${fmtCount(u.graded ?? 0)} graded run${
+                (u.graded ?? 0) === 1 ? "" : "s"
+              } (qvr audit annotate)`}
+            >
+              {u.meanScore.toFixed(2)}
+            </Tag>
+          )}
           {/* Absent token side = the sessions reported none; omit, never show 0. */}
           {u.tokensIn != null && <Tag lead="↑">{fmtCount(u.tokensIn)} tok</Tag>}
           {u.tokensOut != null && <Tag lead="↓">{fmtCount(u.tokensOut)} tok</Tag>}

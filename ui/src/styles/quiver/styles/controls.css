@@ -112,6 +112,10 @@
   font-family: var(--font-mono); font-size: var(--text-sm); cursor: pointer;
   transition: border-color var(--dur-fast) var(--ease-out);
 }
+/* Compact variant for inline use inside the detail header's meta strip, where a
+   full-height control would break the 13px mono rhythm. */
+.qvr-select--sm { height: 22px; padding: 0 var(--space-6) 0 var(--space-2); font-size: var(--text-xs); border-radius: var(--radius-sm); }
+.qvr-select-wrap:has(.qvr-select--sm) svg { right: var(--space-2); width: 12px; height: 12px; }
 .qvr-select:hover { border-color: var(--border-strong); }
 .qvr-select:focus-visible { outline: none; border-color: var(--accent-line); box-shadow: var(--glow-amber); }
 .qvr-select-wrap svg { position: absolute; right: var(--space-3); width: 14px; height: 14px; color: var(--text-faint); pointer-events: none; }
@@ -130,6 +134,50 @@
 .qvr-check input:checked + .qvr-check__box { background: var(--accent); border-color: var(--accent); }
 .qvr-check input:checked + .qvr-check__box svg { opacity: 1; transform: scale(1); }
 .qvr-check input:focus-visible + .qvr-check__box { box-shadow: var(--ring); }
+
+/* ---------- Multi-select (checklist) ---------- */
+.qvr-multi { position: relative; display: inline-flex; }
+.qvr-multi__trigger {
+  display: inline-flex; align-items: center; gap: var(--space-2);
+  height: var(--control-h); padding: 0 var(--space-3);
+  background: var(--surface-inset); color: var(--text);
+  border: var(--border-w) solid var(--border); border-radius: var(--radius-md);
+  font-family: var(--font-mono); font-size: var(--text-sm); cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.qvr-multi__trigger:hover { border-color: var(--border-strong); }
+.qvr-multi__trigger--active { border-color: var(--accent-line); color: var(--accent); }
+.qvr-multi__trigger:focus-visible { outline: none; border-color: var(--accent-line); box-shadow: var(--glow-amber); }
+.qvr-multi__trigger svg { color: var(--text-faint); flex: none; }
+.qvr-multi__label { max-width: 18ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qvr-multi__pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  min-width: max(100%, 200px); max-width: 340px;
+  background: var(--surface-raised);
+  border: var(--border-w) solid var(--border-strong); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md); padding: var(--space-2);
+  animation: qvr-multi-in var(--dur-fast) var(--ease-out);
+}
+@keyframes qvr-multi-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.qvr-multi__clear {
+  display: block; width: 100%; text-align: left;
+  padding: var(--space-1) var(--space-2); margin-bottom: var(--space-1);
+  background: none; border: none; cursor: pointer;
+  font-family: var(--font-ui); font-size: var(--text-xs); letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-faint); transition: color var(--dur-fast) var(--ease-out);
+}
+.qvr-multi__clear:hover { color: var(--accent); }
+.qvr-multi__list { max-height: 280px; overflow-y: auto; display: flex; flex-direction: column; gap: 1px; }
+.qvr-multi__opt {
+  width: 100%; padding: var(--space-2); border-radius: var(--radius-sm);
+  transition: background var(--dur-fast) var(--ease-out);
+}
+.qvr-multi__opt:hover { background: var(--surface-inset); }
+.qvr-multi__opt-label {
+  font-family: var(--font-mono); font-size: var(--text-sm); color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qvr-multi__empty { padding: var(--space-2); margin: 0; font-family: var(--font-ui); font-size: var(--text-sm); color: var(--text-faint); }
 
 /* ---------- Switch ---------- */
 .qvr-switch { display: inline-flex; align-items: center; gap: var(--space-3); cursor: pointer; font-family: var(--font-ui); font-size: var(--text-sm); color: var(--text); user-select: none; }
