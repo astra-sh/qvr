@@ -54,7 +54,11 @@ func seedWorktree(t *testing.T, e *model.LockEntry) string {
 		t.Fatalf("mkdir worktree: %v", err)
 	}
 	skillMD := filepath.Join(dir, "SKILL.md")
-	if err := os.WriteFile(skillMD, []byte("---\nname: code-review\ndescription: x\n---\n"), 0o644); err != nil {
+	// The on-disk body MUST match the body skillRows simulates the agent loading
+	// ("# code review\n\n## Instructions\n") so the switched-after-run guard
+	// (resolvedBodyMatches) confirms this is the version that ran; a
+	// frontmatter-only fixture would model an impossible capture.
+	if err := os.WriteFile(skillMD, []byte("---\nname: code-review\ndescription: x\n---\n# code review\n\n## Instructions\n"), 0o644); err != nil {
 		t.Fatalf("write SKILL.md: %v", err)
 	}
 	return skillMD
@@ -70,6 +74,87 @@ func crEntry(commit string) *model.LockEntry {
 		Path:        "skills/code-review",
 		SubtreeHash: "sha256:6d478",
 		Targets:     []string{"claude"},
+	}
+}
+
+// TestEnrich_MultiSegRegistry_And_SwitchGuard pins two correctness properties
+// for operating multiple versions across agents:
+//
+//  1. A multi-segment registry ("qa/evolve") resolves: its worktree path carries
+//     an extra segment that previously broke store-path proof entirely, so every
+//     run silently fell through to current-lock containment.
+//  2. The switched-after-run guard: when the install is switched between a run
+//     and its (lagged) discovery, the symlink resolves to the WRONG version —
+//     identity is withheld rather than mis-stamped, so the run keeps its
+//     run-immutable body digest and never conflates with a different version.
+//
+// QVR_HOME is placed under ".quiver" so worktree paths match the real store
+// layout the store-path detector keys on.
+func TestEnrich_MultiSegRegistry_And_SwitchGuard(t *testing.T) {
+	home := filepath.Join(t.TempDir(), ".quiver")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QVR_HOME", home)
+
+	eA := &model.LockEntry{
+		Name: "code-review", Registry: "qa/evolve", Source: "file:///tmp/reg.git",
+		Ref: "v0.5.0", Commit: "aaaaaa1000000000000000000000000000000000",
+		Path: "skills/code-review", SubtreeHash: "sha256:AAAA", Targets: []string{"claude"},
+	}
+	writeGlobalLock(t, home, eA)
+	seedWorktree(t, eA) // on-disk body == the body skillRows simulates loading
+
+	proj := t.TempDir()
+	link := filepath.Join(proj, ".claude", "skills", "code-review")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillDirA := filepath.Join(registry.WorktreePath(eA.Registry, eA.Name, registry.ShortSHA(eA.Commit)), eA.Path)
+	if err := os.Symlink(skillDirA, link); err != nil {
+		t.Fatal(err)
+	}
+
+	// (1) Matching load → multi-segment registry resolves AND identity proves.
+	rowsA := skillRows(uuid.New(), proj, link)
+	dA, _ := derive.DeriveSession(rowsA)
+	derive.EnrichSkillIdentity(dA.Spans, rowsA, nil)
+	spA := skillSpan(t, dA.Spans)
+	if spA.Attributes["skill.registry"] != "qa/evolve" {
+		t.Fatalf("multi-segment registry must resolve, got registry=%v", spA.Attributes["skill.registry"])
+	}
+	if spA.Attributes["skill.version"] != "v0.5.0" {
+		t.Errorf("matching load must prove version, got %v", spA.Attributes["skill.version"])
+	}
+
+	// (2) Switch the install to a DIFFERENT version+body, then re-derive the run
+	// that loaded A. It must NOT inherit B's identity.
+	eB := *eA
+	eB.Commit = "bbbbbb2000000000000000000000000000000000"
+	eB.SubtreeHash = "sha256:BBBB"
+	skillDirB := filepath.Join(registry.WorktreePath(eB.Registry, eB.Name, registry.ShortSHA(eB.Commit)), eB.Path)
+	if err := os.MkdirAll(skillDirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDirB, "SKILL.md"),
+		[]byte("---\nname: code-review\n---\n# a totally different body that never ran\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeGlobalLock(t, home, &eB)
+	os.Remove(link)
+	if err := os.Symlink(skillDirB, link); err != nil {
+		t.Fatal(err)
+	}
+
+	rowsS := skillRows(uuid.New(), proj, link)
+	dS, _ := derive.DeriveSession(rowsS)
+	derive.EnrichSkillIdentity(dS.Spans, rowsS, nil)
+	spS := skillSpan(t, dS.Spans)
+	if spS.Attributes["skill.version"] != nil {
+		t.Errorf("switched-after-run must withhold version (no conflation), got %v", spS.Attributes["skill.version"])
+	}
+	if ch, _ := spS.Attributes["skill.content_hash"].(string); ch == "" {
+		t.Errorf("withheld load must keep its run-immutable body digest")
 	}
 }
 
@@ -117,8 +202,8 @@ func TestEnrich_Codex_LoadPathInWorktreeIsVerified(t *testing.T) {
 	if v, _ := sp.Attributes["skill.version"].(string); v != e.Ref {
 		t.Errorf("proven load must stamp skill.version (the verified signal); got %v, attrs=%v", v, sp.Attributes)
 	}
-	if sp.Attributes["skill.commit"] != e.Commit {
-		t.Errorf("verified load should assert the locked commit, got %v", sp.Attributes["skill.commit"])
+	if got := sp.Attributes["skill.commit"]; got != registry.ShortSHA(e.Commit) {
+		t.Errorf("verified load should assert the locked commit as a canonical short SHA, got %v", got)
 	}
 }
 
@@ -158,5 +243,57 @@ func TestEnrich_Codex_ShadowingEjectIsUnverified(t *testing.T) {
 	}
 	if sp.Attributes["skill.name"] != "code-review" {
 		t.Errorf("the bare name should survive, got %v", sp.Attributes["skill.name"])
+	}
+}
+
+// TestEscalateUnresolvedIdentity pins the lock-independent escalation: a run
+// resolved off-checkout (codex commit-only, or claude body-digest-only) inherits
+// the full identity another session already proved for the SAME run-immutable
+// evidence — so a version labels uniformly regardless of the current checkout.
+// An already-full span is left untouched.
+func TestEscalateUnresolvedIdentity(t *testing.T) {
+	full := &model.LockEntry{
+		Registry: "qa/evolve", Ref: "v0.5.0", Commit: "2c20399",
+		SubtreeHash: "sha256:afcdd32b",
+	}
+	byCommit := func(c string) *model.LockEntry {
+		if c == "2c20399" {
+			return full
+		}
+		return nil
+	}
+	byContent := func(h string) *model.LockEntry {
+		if h == "sha256:body05" {
+			return full
+		}
+		return nil
+	}
+
+	spans := []derive.Span{
+		// codex off-checkout: commit-only, no subtree.
+		{Kind: derive.KindSkill, Attributes: map[string]any{"skill.name": "slugify-title", "skill.commit": "2c20399"}},
+		// claude off-checkout: body-digest content_hash, no commit/subtree.
+		{Kind: derive.KindSkill, Attributes: map[string]any{"skill.name": "slugify-title", "skill.content_hash": "sha256:body05"}},
+		// already full: must not be re-resolved.
+		{Kind: derive.KindSkill, Attributes: map[string]any{"skill.name": "x", "skill.version": "v9", "skill.subtree_hash": "sha256:keep"}},
+		// unknown evidence: stays unresolved.
+		{Kind: derive.KindSkill, Attributes: map[string]any{"skill.name": "y", "skill.commit": "deadbee"}},
+	}
+	derive.EscalateUnresolvedIdentity(spans, byCommit, byContent)
+
+	if v := spans[0].Attributes["skill.version"]; v != "v0.5.0" {
+		t.Errorf("commit-only span must escalate to ref, got version=%v", v)
+	}
+	if s := spans[0].Attributes["skill.subtree_hash"]; s != "sha256:afcdd32b" {
+		t.Errorf("escalated span must carry the proven subtree, got %v", s)
+	}
+	if v := spans[1].Attributes["skill.version"]; v != "v0.5.0" {
+		t.Errorf("body-digest span must escalate via content_hash, got version=%v", v)
+	}
+	if v := spans[2].Attributes["skill.version"]; v != "v9" {
+		t.Errorf("already-full span must be untouched, got version=%v", v)
+	}
+	if _, ok := spans[3].Attributes["skill.version"]; ok {
+		t.Errorf("unresolvable evidence must stay unescalated")
 	}
 }

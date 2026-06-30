@@ -81,8 +81,9 @@ func TestRegistryVersionGraph_NilWhenWalkEmpty(t *testing.T) {
 
 func TestLineageVersionGraph_UsageCurrentAndUnknownBucket(t *testing.T) {
 	gc := fakeGrapher{nodes: diamond()}
+	score := 1.0
 	versions := []*store.SkillVersionUsage{
-		{Commit: "b", Invocations: 5, Sessions: 4},
+		{Commit: "b", Invocations: 5, Sessions: 4, Graded: 4, MeanScore: &score},
 		{Commit: "c", Invocations: 3, Sessions: 2},
 		{Ref: "", Commit: "", Invocations: 2, Sessions: 1}, // unknown bucket
 	}
@@ -94,6 +95,11 @@ func TestLineageVersionGraph_UsageCurrentAndUnknownBucket(t *testing.T) {
 	require.NotNil(t, b.Usage)
 	require.Equal(t, int64(5), b.Usage.Invocations)
 	require.True(t, b.Current, "node b matches the pinned commit")
+	// The BYO-grader score threads through to the graph node's usage.
+	require.Equal(t, int64(4), b.Usage.Graded)
+	require.NotNil(t, b.Usage.MeanScore)
+	require.Equal(t, 1.0, *b.Usage.MeanScore)
+	require.Nil(t, nodeBySHA(g, "c").Usage.MeanScore, "ungraded version keeps a nil score")
 
 	c := nodeBySHA(g, "c")
 	require.NotNil(t, c)

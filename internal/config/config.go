@@ -92,6 +92,13 @@ type CacheConfig struct {
 type OpsConfig struct {
 	Enabled bool   `yaml:"enabled" json:"enabled"`
 	DBPath  string `yaml:"db_path,omitempty" json:"db_path,omitempty"`
+	// OutcomeFailureThreshold is the fraction of a session's outcome-bearing
+	// TOOL/SKILL spans that must have FAILED for the session to roll up as a
+	// failure. A minority of errored tool calls amid an otherwise successful
+	// task no longer dooms the whole session. Range (0,1]; 0 or unset uses the
+	// 0.8 default (require >80% failures). Applied at derivation time, so a
+	// change takes effect on the next capture / `qvr audit rederive`.
+	OutcomeFailureThreshold float64 `yaml:"outcome_failure_threshold,omitempty" json:"outcome_failure_threshold,omitempty"`
 }
 
 // RegistryConfig holds configuration for a single registry.

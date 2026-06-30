@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/astra-sh/qvr/internal/config"
 	"github.com/astra-sh/qvr/internal/model"
 	"github.com/astra-sh/qvr/internal/ops"
 	"github.com/google/uuid"
@@ -42,7 +43,38 @@ import (
 // resultDisplay (string OR object) no longer drops the whole item. Dispatch
 // is also mixed-agent safe: the majority transcript agent owns the session,
 // so a stale external writer's foreign rows can't blank it.
-const Version = 7
+// v8: outcome signal — TOOL/SKILL spans carry qvr.outcome
+// (success/failure/blocked; absent = unknown), derived from the result's error
+// flag plus a denial/interrupt marker for blocked (hook-deny lives in hook
+// payloads the deriver never sees, so transcript-silent denial is failure).
+// SessionMeta carries a worst-of-spans rollup (Outcome), and the OTLP span
+// status code now reflects it (ERROR for failure/blocked) instead of a
+// hardcoded OK. Rederive backfills outcome onto historical sessions.
+// v9: a skill LOAD votes too — a SKILL span carries qvr.outcome=success once its
+// load is positively observed (its result, or the post-invocation load record:
+// claude's base-directory injection / copilot's skill.invoked). This is observed
+// evidence, never a fabricated default — only a span we saw load gets it — and a
+// real error/interrupt result still wins. It lets a tool-less advisory/triage
+// skill roll up to success instead of unknown (the flagship eval leads with
+// `outcome: success`). Rederive backfills it onto historical sessions.
+// v10: run-immutable content coordinate — skill.content_hash is fixed by the
+// bytes the transcript captured, never re-read from disk at discover (which
+// re-bound any run found after a switch/edit/publish to the current version).
+// It is the digest of the verbatim skill body the run loaded (claude's
+// base-directory injection minus its per-call "ARGUMENTS:" trailer, or a by-path
+// read's result body), upgraded to the proven subtree hash only when the
+// recorded load path itself pins the version sha. Rederive re-coordinates
+// historical sessions; the disk-walk hashing is gone.
+// v11: clean span tree — each turn emits a root CHAIN span (e.g. "Claude Code
+// Turn") that parents the model span (named for the agent, "Claude"/"Codex")
+// and its tool/skill children; child titles are the short tool name (MCP tools
+// shown as their action, not the mcp__server__ prefix) or the skill name, with
+// the exact tool name kept on gen_ai.tool.name. The root carries the turn
+// Input/Output and trace metadata (qvr.thread_id / qvr.integration /
+// qvr.run_depth / qvr.agent_type); model thinking/reasoning rides on the model
+// span as qvr.reasoning when the transcript captured it unencrypted. Rederive
+// re-projects historical sessions into the new tree.
+const Version = 12
 
 // KindSkill is the Quiver span category for a skill load/invocation within a
 // turn. It exists so the trace makes skill usage a first-class, queryable stage
@@ -79,6 +111,10 @@ type SessionMeta struct {
 	// only at session level (hermes, copilot), and a deriver-set value wins.
 	TokensIn  *int64
 	TokensOut *int64
+	// Outcome is the session-level rollup of its TOOL/SKILL spans' qvr.outcome:
+	// the worst seen (failure > blocked > success), or "" when no span carried an
+	// outcome (rendered unknown, never a fabricated success).
+	Outcome string
 }
 
 // Derivation is one session's full derived projection: the unified meta plus
@@ -211,6 +247,7 @@ func finalizeMeta(d *Derivation, rows []*ops.RawTrace) {
 	}
 	fillMetaFromSpans(m, d.Spans)
 	fillMetaTokens(m, d.Spans)
+	fillMetaOutcome(m, d.Spans)
 	// Formats without in-file timestamps derive zero time bounds; fall back to
 	// the capture times so the session still buckets into the right day.
 	if m.StartedMs == 0 && len(rows) > 0 {
@@ -260,10 +297,17 @@ func fillMetaFromSpans(m *SessionMeta, spans []Span) {
 		case KindTool:
 			m.Tools++
 		}
-		if name, ok := sp.Attributes["skill.name"].(string); ok && name != "" && !seenSkill[name] {
-			seenSkill[name] = true
-			m.Skills = append(m.Skills, name)
-		}
+		appendDistinctAttr(sp, "skill.name", seenSkill, &m.Skills)
+	}
+}
+
+// appendDistinctAttr appends sp's string attribute `key` to *dst when it is
+// present, non-empty, and not yet in seen — the first-use distinct accumulation
+// the skill-name and skill-version session rollups share.
+func appendDistinctAttr(sp Span, key string, seen map[string]bool, dst *[]string) {
+	if v, ok := sp.Attributes[key].(string); ok && v != "" && !seen[v] {
+		seen[v] = true
+		*dst = append(*dst, v)
 	}
 }
 
@@ -285,6 +329,66 @@ func fillMetaTokens(m *SessionMeta, spans []Span) {
 	}
 	if m.TokensOut == nil {
 		m.TokensOut = out
+	}
+}
+
+// DefaultOutcomeFailureThreshold is the fraction of a session's outcome-bearing
+// TOOL/SKILL spans that must have FAILED before the session rolls up as a
+// failure. Require >80% so a minority of errored tool calls amid an otherwise
+// successful task doesn't read as a failed session (the old worst-of-spans rule
+// let a single error doom the session — pollution, not signal).
+const DefaultOutcomeFailureThreshold = 0.8
+
+// outcomeFailureThreshold is the live policy value, defaulting to the constant
+// above. It is process-wide (a single derivation policy, not a per-call input)
+// and overridden from config via ConfigureOutcome.
+var outcomeFailureThreshold = DefaultOutcomeFailureThreshold
+
+// ConfigureOutcome sets the session-failure rollup threshold from config. A
+// value outside (0,1] (including the zero value of an unset field) leaves the
+// 0.8 default in place. Call it once per process before deriving — the `qvr`
+// audit entry points do, so a configured ops.outcome_failure_threshold takes
+// effect on the next capture / rederive.
+func ConfigureOutcome(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if t := cfg.Ops.OutcomeFailureThreshold; t > 0 && t <= 1 {
+		outcomeFailureThreshold = t
+	}
+}
+
+// fillMetaOutcome rolls the TOOL/SKILL spans' qvr.outcome into one session-level
+// verdict. It is failure only when the FAILED fraction of outcome-bearing spans
+// exceeds outcomeFailureThreshold (default >80%); below that, a blocked span (a
+// hard policy denial) still surfaces, else success. Spans without an outcome
+// (LLM turns, calls whose result was never seen) don't vote; a session where
+// none voted stays "" (unknown), never a fabricated success.
+func fillMetaOutcome(m *SessionMeta, spans []Span) {
+	var nSuccess, nFailure, nBlocked int
+	for _, sp := range spans {
+		if sp.Kind != KindTool && sp.Kind != KindSkill {
+			continue
+		}
+		switch v, _ := sp.Attributes[OutcomeKey].(string); v {
+		case OutcomeSuccess:
+			nSuccess++
+		case OutcomeFailure:
+			nFailure++
+		case OutcomeBlocked:
+			nBlocked++
+		}
+	}
+	total := nSuccess + nFailure + nBlocked
+	switch {
+	case total == 0:
+		m.Outcome = "" // unknown — nothing voted
+	case nFailure > 0 && float64(nFailure)/float64(total) > outcomeFailureThreshold:
+		m.Outcome = OutcomeFailure
+	case nBlocked > 0:
+		m.Outcome = OutcomeBlocked
+	default:
+		m.Outcome = OutcomeSuccess
 	}
 }
 

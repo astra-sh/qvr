@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/astra-sh/qvr/internal/config"
+	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/astra-sh/qvr/internal/ops/rawtrace"
 	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/astra-sh/qvr/internal/output"
@@ -54,6 +55,7 @@ func runAuditIngest(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	derive.ConfigureOutcome(cfg)
 
 	files, err := expandIngestArgs(args)
 	if err != nil {

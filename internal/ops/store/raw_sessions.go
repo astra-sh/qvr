@@ -227,6 +227,137 @@ func (s *sqliteStore) SkillsForSessions(ctx context.Context, ids []string) (map[
 	return out, rows.Err()
 }
 
+// SkillVersionCoord is one skill's version coordinate within a session: the
+// proven ref/commit/subtree, straight from the (frozen, persisted) SKILL span
+// attributes. Empty fields mean "not proven" — the caller renders the version
+// label (e.g. derive.SkillVersionLabel) so an unproven run reads "unknown"
+// rather than blank. It exists so consumers don't have to cross-reference the
+// spans table by a time window to learn which version a session ran.
+type SkillVersionCoord struct {
+	Skill       string `json:"skill"`
+	Version     string `json:"version,omitempty"`      // proven ref (skill.version)
+	Commit      string `json:"commit,omitempty"`       // proven short commit
+	SubtreeHash string `json:"subtree_hash,omitempty"` // run-immutable content coordinate
+}
+
+// SkillVersionsForSessions returns the version coordinate of each skill a
+// session used (from its SKILL spans), keyed by session id string. Reads only
+// PERSISTED span attributes — never re-resolves against the live checkout — so a
+// rederive that froze the wrong version can't be masked here.
+func (s *sqliteStore) SkillVersionsForSessions(ctx context.Context, ids []string) (map[string][]SkillVersionCoord, error) {
+	out := map[string][]SkillVersionCoord{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	// Aliases avoid SQLite reserved words ("commit"); Scan reads positionally.
+	q := `SELECT DISTINCT session_id,
+	        json_extract(attributes, '$."skill.name"') AS skill,
+	        COALESCE(json_extract(attributes, '$."skill.version"'), '') AS ver,
+	        COALESCE(json_extract(attributes, '$."skill.commit"'), '') AS commitsha,
+	        COALESCE(json_extract(attributes, '$."skill.subtree_hash"'), '') AS subtree
+	      FROM spans
+	      WHERE session_id IN (` + placeholders(len(ids)) + `)
+	        AND kind = 'SKILL' AND skill IS NOT NULL AND skill != ''
+	      ORDER BY session_id, skill`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: skill versions for sessions: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sid string
+		var c SkillVersionCoord
+		if err := rows.Scan(&sid, &c.Skill, &c.Version, &c.Commit, &c.SubtreeHash); err != nil {
+			return nil, fmt.Errorf("store: scan skill version: %w", err)
+		}
+		out[sid] = append(out[sid], c)
+	}
+	return out, rows.Err()
+}
+
+// SkillCommitIdentity is the full identity qvr already proved for a commit in
+// some session — the lock-INDEPENDENT source for escalating a commit-only span
+// (a run resolved off-checkout) to the same ref/subtree the version carries
+// everywhere else.
+type SkillCommitIdentity struct {
+	Registry    string
+	Ref         string
+	Commit      string
+	SubtreeHash string
+	Source      string
+	Canonical   string
+}
+
+// IdentityForCommit returns the full identity any fully-resolved SKILL span
+// recorded for this (short) commit, or nil when none has resolved it yet. It is
+// how a run pinned to a commit picks up the ref/subtree another session proved,
+// independent of what is checked out now — the cure for label drift across the
+// checkout boundary.
+func (s *sqliteStore) IdentityForCommit(ctx context.Context, commit string) (*SkillCommitIdentity, error) {
+	if commit == "" {
+		return nil, nil
+	}
+	q := `SELECT
+	        COALESCE(json_extract(attributes, '$."skill.registry"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.version"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.subtree_hash"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.source"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.canonical"'), '')
+	      FROM spans
+	      WHERE kind = 'SKILL'
+	        AND json_extract(attributes, '$."skill.commit"') = ?
+	        AND COALESCE(json_extract(attributes, '$."skill.subtree_hash"'), '') != ''
+	      LIMIT 1`
+	id := &SkillCommitIdentity{Commit: commit}
+	err := s.db.QueryRowContext(ctx, q, commit).
+		Scan(&id.Registry, &id.Ref, &id.SubtreeHash, &id.Source, &id.Canonical)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: identity for commit: %w", err)
+	}
+	return id, nil
+}
+
+// IdentityForContentHash returns the full identity any fully-resolved SKILL span
+// recorded for this run-time content_hash (the body digest a symlink-recorded
+// claude load carries when it has no commit in the bytes), or nil. It lets a
+// claude run that was withheld off-checkout inherit the ref/subtree another
+// session proved for the SAME content — the body-digest counterpart of
+// IdentityForCommit, so both agents label uniformly.
+func (s *sqliteStore) IdentityForContentHash(ctx context.Context, contentHash string) (*SkillCommitIdentity, error) {
+	if contentHash == "" {
+		return nil, nil
+	}
+	q := `SELECT
+	        COALESCE(json_extract(attributes, '$."skill.registry"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.version"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.commit"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.subtree_hash"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.source"'), ''),
+	        COALESCE(json_extract(attributes, '$."skill.canonical"'), '')
+	      FROM spans
+	      WHERE kind = 'SKILL'
+	        AND json_extract(attributes, '$."skill.content_hash"') = ?
+	        AND COALESCE(json_extract(attributes, '$."skill.subtree_hash"'), '') != ''
+	      LIMIT 1`
+	id := &SkillCommitIdentity{}
+	err := s.db.QueryRowContext(ctx, q, contentHash).
+		Scan(&id.Registry, &id.Ref, &id.Commit, &id.SubtreeHash, &id.Source, &id.Canonical)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store: identity for content hash: %w", err)
+	}
+	return id, nil
+}
+
 // CountRawSessions counts distinct sessions, optionally scoped to dirs/agent.
 func (s *sqliteStore) CountRawSessions(ctx context.Context, dirs []string, agent string) (int64, error) {
 	where, args := rawScopeWhere(dirs, agent)

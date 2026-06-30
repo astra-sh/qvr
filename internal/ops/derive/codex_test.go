@@ -115,6 +115,82 @@ func TestCodexDerive_TurnToolSkill(t *testing.T) {
 	wantMeta(t, d.Meta, "codex", "list files then read the review skill", "gpt-5.5", 1, 1, "code-review")
 }
 
+// catalogWorktreeMD is the authoritative sha-keyed worktree path Codex declares
+// for code-review in its <skills_instructions> catalog.
+const catalogWorktreeMD = "/Users/x/.quiver/worktrees/raks/code-review/94e539b/skills/code-review/SKILL.md"
+
+// TestCodexCatalogPath_RecoversAfterUninstall: a Codex session loads a skill via
+// a shadow command path (.codex/skills/<name>/SKILL.md — no version), while the
+// injected <skills_instructions> catalog carries the authoritative sha-keyed
+// worktree path. The deriver upgrades the SKILL span's load_path to the catalog
+// path, so enrichment recovers skill.commit from the captured bytes alone — no
+// disk read, and even though the worktree was since uninstalled. This is the
+// real-data extraction gap (codex sessions 019e85a5/019e85b4/019e8a12).
+func TestCodexCatalogPath_RecoversAfterUninstall(t *testing.T) {
+	t.Setenv("QVR_HOME", t.TempDir())
+	sid := uuid.MustParse("019e85a5-0000-7000-8000-000000000001")
+	rows := []*ops.RawTrace{
+		codexRow(sid, 0, `{"timestamp":"2026-06-02T15:31:51.964Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`),
+		codexRow(sid, 1, `{"timestamp":"2026-06-02T15:31:53.950Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<skills_instructions>\n- code-review: Review uncommitted/working changes. (file: `+catalogWorktreeMD+`)\n</skills_instructions>"}]}}`),
+		codexRow(sid, 2, `{"timestamp":"2026-06-02T15:31:54.008Z","type":"event_msg","payload":{"type":"user_message","message":"read the review skill"}}`),
+		codexRow(sid, 3, `{"timestamp":"2026-06-02T15:32:03.518Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1p' .codex/skills/code-review/SKILL.md\"}","call_id":"call_skill"}}`),
+		codexRow(sid, 4, `{"timestamp":"2026-06-02T15:32:06.415Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"done"}}`),
+	}
+
+	d, err := derive.DeriveSession(rows)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	_, _, skill := splitSpanKinds(d.Spans)
+	if skill == nil {
+		t.Fatal("want a SKILL span")
+	}
+	if got, _ := skill.Attributes["skill.load_path"].(string); got != catalogWorktreeMD {
+		t.Errorf("load_path = %q, want catalog worktree path %q (shadow .codex path must be upgraded)", got, catalogWorktreeMD)
+	}
+	// The sha lives in the recorded bytes, so identity resolves with no disk
+	// access — the worktree need not (and here does not) exist.
+	derive.EnrichSkillIdentity(d.Spans, rows, nil)
+	if got, _ := skill.Attributes["skill.commit"].(string); got != "94e539b" {
+		t.Errorf("skill.commit = %q, want 94e539b recovered from catalog bytes", got)
+	}
+}
+
+// TestCodexCatalogPath_IgnoresNonCatalogText is the false-positive guard: a
+// worktree path that appears in ordinary transcript text (an assistant message,
+// a diagnostic dump) — NOT inside a <skills_instructions> catalog — must never be
+// adopted as a load path. Otherwise a session merely printing a path string
+// would be mis-attributed to that version's cohort.
+func TestCodexCatalogPath_IgnoresNonCatalogText(t *testing.T) {
+	t.Setenv("QVR_HOME", t.TempDir())
+	sid := uuid.MustParse("019e85a5-0000-7000-8000-000000000002")
+	rows := []*ops.RawTrace{
+		codexRow(sid, 0, `{"timestamp":"2026-06-02T15:31:51.964Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}`),
+		codexRow(sid, 1, `{"timestamp":"2026-06-02T15:31:54.008Z","type":"event_msg","payload":{"type":"user_message","message":"read the review skill"}}`),
+		codexRow(sid, 2, `{"timestamp":"2026-06-02T15:32:03.518Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1p' .codex/skills/code-review/SKILL.md\"}","call_id":"call_skill"}}`),
+		// A plain assistant message that merely prints the worktree path (e.g.
+		// echoing audit diagnostics) — must NOT be treated as a catalog entry.
+		codexRow(sid, 3, `{"timestamp":"2026-06-02T15:32:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"the file is at (file: `+catalogWorktreeMD+`)"}]}}`),
+		codexRow(sid, 4, `{"timestamp":"2026-06-02T15:32:06.415Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","last_agent_message":"done"}}`),
+	}
+
+	d, err := derive.DeriveSession(rows)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	_, _, skill := splitSpanKinds(d.Spans)
+	if skill == nil {
+		t.Fatal("want a SKILL span")
+	}
+	if got, _ := skill.Attributes["skill.load_path"].(string); got != ".codex/skills/code-review/SKILL.md" {
+		t.Errorf("load_path = %q, want the scraped .codex path unchanged (no catalog ⇒ no upgrade)", got)
+	}
+	derive.EnrichSkillIdentity(d.Spans, rows, nil)
+	if got, ok := skill.Attributes["skill.commit"]; ok {
+		t.Errorf("skill.commit = %v, want none: a worktree path in ordinary text must not attribute a version", got)
+	}
+}
+
 // splitSpanKinds returns the last LLM, TOOL, and SKILL span (each may be nil).
 func splitSpanKinds(spans []derive.Span) (llm, tool, skill *derive.Span) {
 	for i := range spans {

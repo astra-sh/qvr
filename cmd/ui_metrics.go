@@ -322,7 +322,11 @@ type skillReportVersion struct {
 	LastFired   *time.Time `json:"lastFired,omitempty"`
 	TokensIn    *int64     `json:"tokensIn,omitempty"` // absent = no usage reported
 	TokensOut   *int64     `json:"tokensOut,omitempty"`
-	Current     bool       `json:"current,omitempty"`
+	// BYO-grader quality for this version (metric "score"): Graded is the honest
+	// denominator, MeanScore their mean — absent when ungraded (n/a, never 0).
+	Graded    int64    `json:"graded,omitempty"`
+	MeanScore *float64 `json:"meanScore,omitempty"`
+	Current   bool     `json:"current,omitempty"`
 }
 
 type skillReportResponse struct {
@@ -442,6 +446,8 @@ func (s *uiServer) fillSkillReportMetrics(ctx context.Context, resp *skillReport
 				LastFired:   msToTimePtr(v.LastFiredMs),
 				TokensIn:    v.InputTokens,
 				TokensOut:   v.OutputTokens,
+				Graded:      v.Graded,
+				MeanScore:   v.MeanScore,
 				Current:     entry != nil && commitsMatch(entry.Commit, v.Commit),
 			})
 		}

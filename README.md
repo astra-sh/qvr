@@ -137,8 +137,15 @@ qvr audit enable                    # opt in
 qvr audit discover                  # scan agents' native session stores (incremental)
 qvr audit sessions                  # recorded skill-using sessions
 qvr audit logs                      # turn / tool / skill spans
+qvr audit compare <skill>           # A/B a skill's versions, bucketed by content hash
+qvr audit annotate <id> --skill <name> --score 1  # attach your grader's verdict; shows as compare's SCORE
 qvr audit export > traces.jsonl     # OTLP-ready JSONL for Jaeger, Tempo, Honeycomb, …
 ```
+
+`compare` buckets a skill's runs by the content version that produced them and
+shows the before/after deltas; `annotate` records a BYO grader's score against a
+run so `compare` can roll it up as a per-version pass-rate. qvr stores the
+verdict — the grader stays yours.
 
 The embedded dashboard — `qvr ui`, baked into the binary, no install — puts the
 whole supply chain on one screen:

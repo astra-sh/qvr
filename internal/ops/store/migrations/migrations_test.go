@@ -67,7 +67,10 @@ func TestApply_CreatesExpectedTables(t *testing.T) {
 		t.Fatalf("expected migrations to run")
 	}
 
-	wantTables := []string{"audit_events", "sessions", "skill_versions", "self_audits", "schema_migrations"}
+	// The live schema, post-cleanup: 0010 drops the pre-raw-trace legacy tables
+	// (audit_events/sessions/skill_versions/self_audits) and the removed eval
+	// substrate, so a fresh Apply ends with only the tables that have a consumer.
+	wantTables := []string{"raw_traces", "spans", "session_meta", "session_lock_snapshot", "session_score", "schema_migrations"}
 	for _, name := range wantTables {
 		var got string
 		err := db.QueryRow(
@@ -127,17 +130,19 @@ func TestApply_ExpectedIndexes(t *testing.T) {
 	if _, err := Apply(context.Background(), db); err != nil {
 		t.Fatal(err)
 	}
+	// The live indexes, on the raw-trace/spans/session_meta schema. The legacy
+	// idx_events_*/idx_sessions_*/idx_self_audits_* indexes went with their tables
+	// when 0010 dropped them.
 	want := []string{
-		"idx_events_skill_ts",
-		"idx_events_action",
-		"idx_events_sensitive",
-		"idx_events_session_seq",
-		"idx_events_ts",
-		"idx_events_agent_ts",
-		"idx_sessions_started",
-		"idx_sessions_agent",
-		"idx_self_audits_ts",
-		"idx_self_audits_action",
+		"idx_raw_agent_ts",
+		"idx_raw_session_seq",
+		"idx_raw_wd_session",
+		"idx_spans_session",
+		"idx_spans_kind",
+		"idx_spans_skill_name",
+		"idx_spans_skill_content_hash",
+		"idx_spans_skill_outcome",
+		"idx_session_meta_agent",
 	}
 	for _, name := range want {
 		var got string

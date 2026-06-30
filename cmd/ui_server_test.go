@@ -267,6 +267,95 @@ func TestUI_SessionDetail(t *testing.T) {
 	}
 }
 
+// seedGradedSession derives a skill-bearing session in the seeded env's store and
+// grades it under two metrics — the fixture behind the score endpoints. The source
+// id is stored uppercase while the grade is written lowercase, so the join's
+// LOWER() normalization is exercised.
+func seedGradedSession(t *testing.T, root string, sid uuid.UUID) {
+	t.Helper()
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	ctx := context.Background()
+	st, err := store.Open(ctx, store.OpenOptions{Path: ops.DBPath(cfg)})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+
+	meta := &store.SessionMetaRow{
+		SessionID: sid, AgentName: "claude", SourceSessionID: "SESS-GRADED",
+		WorkingDir: root, StartedMs: 10, EndedMs: 20,
+		Skills: []string{"code-reviewer"}, DeriverVersion: derive.Version,
+	}
+	span := &store.SpanRow{
+		SpanID: "sk-graded", TraceID: "tr", SessionID: sid, AgentName: "claude",
+		Kind: "SKILL", Name: "load", StartMs: 10, EndMs: 20,
+		Attributes: `{"skill.name":"code-reviewer"}`, DeriverVersion: derive.Version,
+	}
+	if err := st.ReplaceSessionDerivation(ctx, meta, []*store.SpanRow{span}); err != nil {
+		t.Fatalf("seed derivation: %v", err)
+	}
+	for _, g := range []struct {
+		metric, grader string
+		value          float64
+	}{{"score", "exact", 1.0}, {"rubric", "llm", 0.5}} {
+		if err := st.PutScore(ctx, "claude", "sess-graded", "code-reviewer", g.metric, g.value, g.grader); err != nil {
+			t.Fatalf("put score %s: %v", g.metric, err)
+		}
+	}
+}
+
+// TestUI_SessionScores covers the BYO-grader scores surfaced on both session
+// endpoints: a graded session carries its verdicts on the detail payload and on
+// its list row, joined from session_score by (agent, native id).
+func TestUI_SessionScores(t *testing.T) {
+	root, _ := seedUIEnv(t, true)
+	sid := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	seedGradedSession(t, root, sid)
+
+	h := newUITestServer(t, root)
+
+	// Detail endpoint carries the verdicts.
+	var detail sessionDetail
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions/"+sid.String()), &detail)
+	byMetric := map[string]store.SessionScore{}
+	for _, s := range detail.Scores {
+		byMetric[s.Metric] = s
+	}
+	if len(byMetric) != 2 {
+		t.Fatalf("detail scores = %d, want 2: %+v", len(detail.Scores), detail.Scores)
+	}
+	if s := byMetric["score"]; s.Value != 1.0 || s.Skill != "code-reviewer" || s.Grader != "exact" {
+		t.Errorf("score metric = %+v, want 1.0/code-reviewer/exact", s)
+	}
+	if s := byMetric["rubric"]; s.Value != 0.5 || s.Grader != "llm" {
+		t.Errorf("rubric metric = %+v, want 0.5/llm", s)
+	}
+
+	// List rows carry the same shape next to skill_versions.
+	var views []sessionView
+	mustJSON(t, do(t, h, http.MethodGet, "/api/sessions"), &views)
+	graded := findSessionView(views, sid)
+	if graded == nil {
+		t.Fatalf("graded session %s not in list", sid)
+	}
+	if len(graded.Scores) != 2 {
+		t.Errorf("list row scores = %d, want 2: %+v", len(graded.Scores), graded.Scores)
+	}
+}
+
+// findSessionView returns the list row for sid, or nil.
+func findSessionView(views []sessionView, sid uuid.UUID) *sessionView {
+	for i := range views {
+		if views[i].SessionMetaRow != nil && views[i].SessionID == sid {
+			return &views[i]
+		}
+	}
+	return nil
+}
+
 func TestUI_Skills(t *testing.T) {
 	root, _ := seedUIEnv(t, true)
 	h := newUITestServer(t, root)

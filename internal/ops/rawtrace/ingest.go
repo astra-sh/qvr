@@ -109,7 +109,7 @@ func Ingest(ctx context.Context, s Store, p IngestParams) (*Result, error) {
 
 	// Always (re-)derive: a fresh ingest derives the new rows, and a no-op
 	// re-ingest still refreshes the projection against the current deriver.
-	n, _, derr := persistDerivation(ctx, s, sessionID)
+	n, _, _, derr := persistDerivation(ctx, s, sessionID)
 	res.SpansStored = n
 	res.SpanError = derr
 	return res, nil
@@ -258,6 +258,13 @@ func sniffTranscript(path string) transcriptSniff {
 		}
 	}
 	return out
+}
+
+// SniffWorkingDir reports the working directory a transcript records, or "" when
+// none is recoverable. It is the cheap pre-ingest probe discover uses to scope a
+// scan to one project (--cwd) without parsing the whole file.
+func SniffWorkingDir(path string) string {
+	return sniffTranscript(expandHome(path)).cwd
 }
 
 var uuidRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)

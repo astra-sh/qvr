@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -29,12 +30,22 @@ type SpanRow struct {
 	DerivedAt      time.Time `json:"derived_at"`
 }
 
-// SpanFilter scopes QuerySpans. Nil/zero fields are ignored.
+// SpanFilter scopes QuerySpans. Nil/zero fields are ignored. The skill.* cuts
+// read JSON attributes (skill.name, skill.content_hash, qvr.outcome,
+// skill.activation) via json_extract — they are the evolution loop's grain.
 type SpanFilter struct {
 	SessionID *uuid.UUID
 	Agents    []string
 	Kinds     []string
-	Limit     int
+	// Skills matches skill.name exactly. Versions matches skill.content_hash by
+	// PREFIX (so a short hash works), OR'd across the slice. Statuses matches
+	// qvr.outcome exactly (the run-status cut). Activations matches
+	// skill.activation exactly ("tool" | "path").
+	Skills      []string
+	Versions    []string
+	Statuses    []string
+	Activations []string
+	Limit       int
 }
 
 const insertSpanSQL = `INSERT INTO spans(
@@ -102,28 +113,56 @@ func replaceSessionSpansTx(ctx context.Context, tx *sql.Tx, sessionID uuid.UUID,
 const spanColumns = `span_id, trace_id, parent_span_id, session_id, agent_name,
   kind, name, start_ms, end_ms, attributes, deriver_version, derived_at`
 
-// QuerySpans returns stored spans ordered by (session_id, start_ms).
-func (s *sqliteStore) QuerySpans(ctx context.Context, f *SpanFilter) ([]*SpanRow, error) {
-	var clauses []string
-	var args []any
-	if f != nil {
-		if f.SessionID != nil {
-			clauses = append(clauses, "session_id = ?")
-			args = append(args, f.SessionID.String())
+// JSON-path expressions for the skill.* attribute cuts. Dotted keys require
+// the quoted form; these mirror the writer-side attribute keys in the derive
+// package (skill.content_hash = derive.SkillContentHashKey, etc.).
+const (
+	spanSkillNameExpr    = `json_extract(attributes, '$."skill.name"')`
+	spanContentHashExpr  = `COALESCE(json_extract(attributes, '$."skill.content_hash"'), '')`
+	spanOutcomeExpr      = `COALESCE(json_extract(attributes, '$."qvr.outcome"'), '')`
+	spanActivationExpr   = `COALESCE(json_extract(attributes, '$."skill.activation"'), '')`
+	contentHashHexOffset = 8 // 1-based: skip the "sha256:" prefix (7 chars) to a hex prefix match
+)
+
+// spanWhere builds the WHERE clauses and args for a SpanFilter.
+func spanWhere(f *SpanFilter) (clauses []string, args []any) {
+	if f == nil {
+		return nil, nil
+	}
+	if f.SessionID != nil {
+		clauses = append(clauses, "session_id = ?")
+		args = append(args, f.SessionID.String())
+	}
+	add := func(expr string, vals []string) {
+		if len(vals) == 0 {
+			return
 		}
-		if len(f.Agents) > 0 {
-			clauses = append(clauses, "agent_name IN ("+placeholders(len(f.Agents))+")")
-			for _, a := range f.Agents {
-				args = append(args, a)
-			}
-		}
-		if len(f.Kinds) > 0 {
-			clauses = append(clauses, "kind IN ("+placeholders(len(f.Kinds))+")")
-			for _, k := range f.Kinds {
-				args = append(args, k)
-			}
+		clauses = append(clauses, expr+" IN ("+placeholders(len(vals))+")")
+		for _, v := range vals {
+			args = append(args, v)
 		}
 	}
+	add("agent_name", f.Agents)
+	add("kind", f.Kinds)
+	add(spanSkillNameExpr, f.Skills)
+	add(spanOutcomeExpr, f.Statuses)
+	add(spanActivationExpr, f.Activations)
+	if len(f.Versions) > 0 {
+		// Match each token as a hex PREFIX of the content hash (git-style short
+		// hash), OR'd across the slice.
+		var or []string
+		for _, v := range f.Versions {
+			or = append(or, "substr("+spanContentHashExpr+", "+strconv.Itoa(contentHashHexOffset)+") LIKE ? || '%'")
+			args = append(args, v)
+		}
+		clauses = append(clauses, "("+strings.Join(or, " OR ")+")")
+	}
+	return clauses, args
+}
+
+// QuerySpans returns stored spans ordered by (session_id, start_ms).
+func (s *sqliteStore) QuerySpans(ctx context.Context, f *SpanFilter) ([]*SpanRow, error) {
+	clauses, args := spanWhere(f)
 	q := `SELECT ` + spanColumns + ` FROM spans`
 	if len(clauses) > 0 {
 		q += " WHERE " + strings.Join(clauses, " AND ")

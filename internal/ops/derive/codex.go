@@ -89,6 +89,17 @@ type codexPayload struct {
 
 	// event_msg: token_count
 	Info *codexTokenInfo `json:"info"`
+
+	// response_item: reasoning — a model thinking step. summary carries the
+	// human-readable text when present; encrypted_content (which we never decode)
+	// carries the opaque full reasoning, so a summary-less item contributes no text.
+	Summary []codexReasoningPart `json:"summary"`
+}
+
+// codexReasoningPart is one block of a reasoning item's summary.
+type codexReasoningPart struct {
+	Type string `json:"type"` // "summary_text"
+	Text string `json:"text"`
 }
 
 type codexTokenInfo struct {
@@ -117,12 +128,21 @@ func (codexDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 		return nil, nil
 	}
 	st := &codexState{
-		turnWalk: turnWalk{sessionID: rows[0].SessionID.String()},
+		turnWalk: turnWalk{
+			sessionID:   rows[0].SessionID.String(),
+			agentLabel:  profileFor("codex").model,
+			rootName:    profileFor("codex").rootName,
+			integration: profileFor("codex").integration,
+		},
 		// valid is the authoritative set of skill names Codex injected via
 		// <skills_instructions> for this session. Empty until that block is seen;
 		// while empty, skill-path detection falls back to accepting any
 		// well-formed skills/<name> segment (a still-native signal).
 		valid: map[string]bool{},
+		// catalogPath maps each injected skill name to the authoritative file
+		// path Codex declared for it in <skills_instructions> — the durable,
+		// sha-bearing load coordinate (see codexSkillEntryRe).
+		catalogPath: map[string]string{},
 	}
 	out := &Derivation{}
 
@@ -153,14 +173,152 @@ func (codexDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 		}
 	}
 	st.flush()
+	st.applyCatalogPaths()
+	st.applyNarratedSkills()
 	out.Spans = st.spans
 	return out, nil
+}
+
+// codexSkillIntent{Before,After}Re match the agent narrating a skill use in
+// either word order: the name before "skill" ("using the `code-review` skill",
+// "slugify-title skill") or after it ("Used skill: `slugify-title`", "skill
+// slugify-title"). Both captured names are gated against the injected catalog
+// (valid) in applyNarratedSkills, so a passing phrase like "the right skill" or
+// "skill: foo" can't attribute — only a real, available skill name does. This
+// is the weakest signal and only ADDS a load the path signal missed; the
+// catalog gate is what keeps the broad match from over-attributing.
+var (
+	codexSkillIntentBeforeRe = regexp.MustCompile(`(?i)[\x60'"]?([a-z][a-z0-9-]{1,63})[\x60'"]?\s+skill\b`)
+	codexSkillIntentAfterRe  = regexp.MustCompile(`(?i)\bskills?[:\s]+[\x60'"]?([a-z][a-z0-9-]{1,63})[\x60'"]?`)
+)
+
+// narratedSkillNames extracts every skill name the agent named in a message,
+// in either word order. Gating against the catalog happens later.
+func narratedSkillNames(msg string) []string {
+	var out []string
+	for _, re := range []*regexp.Regexp{codexSkillIntentBeforeRe, codexSkillIntentAfterRe} {
+		for _, m := range re.FindAllStringSubmatch(msg, -1) {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// applyNarratedSkills adds an implicit SKILL span for any catalog skill the
+// agent narrated using but that left no tool/path evidence (the advisory case:
+// the model followed an injected skill without re-reading its SKILL.md). Gated
+// hard: the name must be in the injected catalog AND not already attributed by a
+// stronger signal, so this never double-counts or invents a skill.
+func (st *codexState) applyNarratedSkills() {
+	if len(st.narrated) == 0 {
+		return
+	}
+	attributed := map[string]bool{}
+	for i := range st.spans {
+		if st.spans[i].Kind != KindSkill {
+			continue
+		}
+		if n, _ := st.spans[i].Attributes["skill.name"].(string); n != "" {
+			attributed[n] = true
+		}
+	}
+	added := map[string]bool{}
+	for _, nz := range st.narrated {
+		if !st.valid[nz.name] || attributed[nz.name] || added[nz.name] {
+			continue
+		}
+		parent := st.llmSpanForTime(nz.ts)
+		if parent == nil {
+			continue // no model span to hang it under (shouldn't happen post-flush)
+		}
+		added[nz.name] = true
+		attrs := map[string]any{
+			"session.id":            st.sessionID,
+			"gen_ai.operation.name": "execute_tool",
+			"gen_ai.tool.name":      "Skill",
+			"skill.name":            nz.name,
+			SkillActivationKey:      SkillActivationImplicit,
+			OutcomeKey:              OutcomeSuccess,
+		}
+		if cat := st.catalogPath[nz.name]; cat != "" {
+			attrs["skill.load_path"] = cat
+		}
+		st.spans = append(st.spans, Span{
+			Name:         spanDisplayName(KindSkill, "Skill", nz.name),
+			Kind:         KindSkill,
+			SpanID:       spanID(parent.TraceID, "skill", "implicit#"+nz.name),
+			TraceID:      parent.TraceID,
+			ParentSpanID: parent.SpanID,
+			StartMs:      nz.ts,
+			EndMs:        nz.ts,
+			Attributes:   attrs,
+		})
+	}
+}
+
+// llmSpanForTime returns the model span whose window contains ts (the turn the
+// narration belongs to), falling back to the last model span.
+func (st *codexState) llmSpanForTime(ts int64) *Span {
+	var last *Span
+	for i := range st.spans {
+		if st.spans[i].Kind != KindLLM {
+			continue
+		}
+		last = &st.spans[i]
+		if ts >= st.spans[i].StartMs && ts <= st.spans[i].EndMs {
+			return last
+		}
+	}
+	return last
+}
+
+// applyCatalogPaths upgrades each SKILL span's load_path to the authoritative
+// store-worktree path Codex declared in <skills_instructions>, when the span's
+// own scraped path is not itself a store-worktree path. Codex sessions routinely
+// record a weaker shadow path (a user "read .codex/skills/<name>/SKILL.md", a
+// symlink copy) at call time while the catalog carries the sha-keyed worktree
+// location; preferring the catalog path pins the version in the captured bytes
+// so the run stays attributable after the skill is uninstalled. Strictly gated:
+// the path comes only from a parsed catalog entry (never arbitrary transcript
+// text), and an existing store-path load_path (call-time proof) is left intact.
+func (st *codexState) applyCatalogPaths() {
+	if len(st.catalogPath) == 0 {
+		return
+	}
+	for i := range st.spans {
+		sp := &st.spans[i]
+		if sp.Kind != KindSkill {
+			continue
+		}
+		name, _ := sp.Attributes["skill.name"].(string)
+		cat := st.catalogPath[name]
+		if cat == "" {
+			continue
+		}
+		if _, _, sha := storeWorktreeIdentity(cat); sha == "" {
+			continue // catalog path is not a sha-keyed worktree — nothing durable to add
+		}
+		cur, _ := sp.Attributes["skill.load_path"].(string)
+		if _, _, curSha := storeWorktreeIdentity(cur); curSha != "" {
+			continue // already pinned by a store-worktree path; keep call-time evidence
+		}
+		sp.Attributes["skill.load_path"] = cat
+	}
+}
+
+// codexNarration is one (timestamp, skill name) the agent narrated using, held
+// until the catalog is fully learned and resolved in applyNarratedSkills.
+type codexNarration struct {
+	ts   int64
+	name string
 }
 
 // codexState is the shared turn walk plus the learned skill-name set.
 type codexState struct {
 	turnWalk
-	valid map[string]bool // skill names injected via <skills_instructions>
+	valid       map[string]bool   // skill names injected via <skills_instructions>
+	catalogPath map[string]string // skill name → authoritative declared file path
+	narrated    []codexNarration  // agent-narrated skill uses, resolved at end
 }
 
 // handleEventMsg processes an event_msg envelope: turn open/close, the clean
@@ -177,7 +335,14 @@ func (st *codexState) handleEventMsg(p codexPayload, ts int64) {
 	case "agent_message":
 		st.ensure(ts)
 		if p.Message != "" {
-			st.cur.appendOutput(p.Message)
+			// The final assistant text is also persisted as a response_item
+			// `message` (role assistant), which handleResponseItem folds into
+			// the turn output. That response_item is the source of truth, so
+			// here we only mine narrated skill uses — appending p.Message too
+			// would double the output (the agent_message event mirrors it).
+			for _, name := range narratedSkillNames(p.Message) {
+				st.narrated = append(st.narrated, codexNarration{ts: ts, name: name})
+			}
 		}
 		st.cur.bump(ts)
 	case "token_count":
@@ -203,14 +368,8 @@ func (st *codexState) handleResponseItem(p codexPayload, ts int64) {
 	case "message":
 		blocks := decodeCodexBlocks(p.Content)
 		// Any message (usually the developer one) may carry the
-		// <skills_instructions> registry; learn the skill names from it.
-		for _, b := range blocks {
-			if strings.Contains(b.Text, skillsInstructionsTag) {
-				for name := range parseCodexSkills(b.Text) {
-					st.valid[name] = true
-				}
-			}
-		}
+		// <skills_instructions> registry; learn the skill names + paths from it.
+		st.learnSkills(blocks)
 		// Only assistant output is the turn's text. User/developer
 		// messages here are injected context, not the prompt.
 		if p.Role == "assistant" {
@@ -222,13 +381,19 @@ func (st *codexState) handleResponseItem(p codexPayload, ts int64) {
 			}
 			st.cur.bump(ts)
 		}
+	case "reasoning":
+		st.ensure(ts)
+		for _, s := range p.Summary {
+			st.cur.appendReasoning(s.Text)
+		}
+		st.cur.bump(ts)
 	case "function_call":
 		st.ensure(ts)
 		st.cur.addCodexTool(p, ts, st.sessionID, st.valid)
 		st.cur.bump(ts)
 	case "function_call_output":
 		if st.cur != nil {
-			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, false)
+			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, codexOutputIsError(p.Output))
 		}
 	case "custom_tool_call":
 		// Codex's freeform tools (e.g. apply_patch) arrive as custom_tool_call
@@ -239,7 +404,27 @@ func (st *codexState) handleResponseItem(p codexPayload, ts int64) {
 		st.cur.bump(ts)
 	case "custom_tool_call_output":
 		if st.cur != nil {
-			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, false)
+			st.cur.applyResult(p.CallID, decodeCodexOutput(p.Output), ts, codexOutputIsError(p.Output))
+		}
+	}
+}
+
+// learnSkills records each skill's name and authoritative file path from any
+// <skills_instructions> block among the message blocks. The path (a sha-keyed
+// worktree location for a qvr-managed skill) is the durable load coordinate
+// applyCatalogPaths later stamps onto the skill's spans.
+func (st *codexState) learnSkills(blocks []codexBlock) {
+	for _, b := range blocks {
+		if !strings.Contains(b.Text, skillsInstructionsTag) {
+			continue
+		}
+		for name, path := range parseCodexSkills(b.Text) {
+			st.valid[name] = true
+			if path != "" {
+				if _, seen := st.catalogPath[name]; !seen {
+					st.catalogPath[name] = path
+				}
+			}
 		}
 	}
 }
@@ -274,14 +459,22 @@ const skillsInstructionsTag = "<skills_instructions>"
 //
 //   - code-review: Review pending changes ... (file: /path/.../skills/code-review/SKILL.md)
 //
-// capturing the skill name (the file path is implied by the name segment).
-var codexSkillEntryRe = regexp.MustCompile(`(?m)^\s*-\s+([a-z0-9][a-z0-9-]{0,63}):.*\(file:`)
+// capturing the skill name AND the authoritative file path Codex declares for
+// it. That path is the install location — for a qvr-managed skill a sha-keyed
+// worktree path (…/worktrees/<reg>/<skill>/<sha7>/…) — so it pins the version in
+// the captured transcript bytes and stays recoverable even after the skill is
+// uninstalled and its directory is gone. The path is the durable load coordinate
+// the scraped command path (a shadow copy like .codex/skills/<name>/SKILL.md)
+// usually lacks. Capture is anchored to the catalog line's "(file:" marker, so a
+// message that merely prints a worktree path elsewhere is never matched.
+var codexSkillEntryRe = regexp.MustCompile(`(?m)^\s*-\s+([a-z0-9][a-z0-9-]{0,63}):.*\(file:\s*([^)]+?)\s*\)`)
 
-// parseCodexSkills extracts the skill names from a <skills_instructions> block.
-func parseCodexSkills(text string) map[string]bool {
-	out := map[string]bool{}
+// parseCodexSkills extracts each skill's name and its declared file path from a
+// <skills_instructions> block. The path is "" only when the entry omits it.
+func parseCodexSkills(text string) map[string]string {
+	out := map[string]string{}
 	for _, m := range codexSkillEntryRe.FindAllStringSubmatch(text, -1) {
-		out[m[1]] = true
+		out[m[1]] = strings.TrimPrefix(strings.TrimSpace(m[2]), "file://")
 	}
 	return out
 }
@@ -317,4 +510,45 @@ func decodeCodexOutput(raw json.RawMessage) string {
 		}
 	}
 	return string(raw)
+}
+
+// codexOutputIsError reports whether a function_call_output carries a failure
+// signal. Codex does not set a separate error flag on the result envelope the
+// way Claude's tool_result does — it folds the outcome into the output payload:
+// an exec result is an object {output, metadata:{exit_code}} (commonly
+// double-encoded as a JSON string), and some tools attach an explicit success
+// bool. Without reading it, every codex tool/skill result derived to success and
+// a codex session's observed outcome could never be failure/blocked — wrong for
+// the one non-Claude agent with native skill detection.
+//
+// Defensive by construction: a plain-string output (no structured envelope) and
+// any shape lacking both signals report no error, so the common case is
+// unchanged — only an explicit success:false or a non-zero exit_code flips it.
+func codexOutputIsError(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	// The envelope may be a JSON object directly, or a JSON STRING containing
+	// that object (codex double-encodes exec results); unwrap one string layer.
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		raw = json.RawMessage(s)
+	}
+	var obj struct {
+		Success  *bool `json:"success"`
+		Metadata *struct {
+			ExitCode *int `json:"exit_code"`
+		} `json:"metadata"`
+	}
+	if json.Unmarshal(raw, &obj) != nil {
+		return false // plain text output: no structured failure signal
+	}
+	switch {
+	case obj.Success != nil:
+		return !*obj.Success
+	case obj.Metadata != nil && obj.Metadata.ExitCode != nil:
+		return *obj.Metadata.ExitCode != 0
+	default:
+		return false
+	}
 }

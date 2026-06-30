@@ -36,6 +36,10 @@ type versionGraphUsage struct {
 	LastFired   *time.Time `json:"lastFired,omitempty"`
 	TokensIn    *int64     `json:"tokensIn,omitempty"`
 	TokensOut   *int64     `json:"tokensOut,omitempty"`
+	// BYO-grader quality for this version (metric "score"): Graded is the honest
+	// denominator, MeanScore their mean — absent when ungraded (n/a, never 0).
+	Graded    int64    `json:"graded,omitempty"`
+	MeanScore *float64 `json:"meanScore,omitempty"`
 }
 
 // versionGraphNode is one commit in the DAG. Parents are the commit's parent
@@ -212,5 +216,7 @@ func versionUsage(v *store.SkillVersionUsage) *versionGraphUsage {
 		LastFired:   msToTimePtr(v.LastFiredMs),
 		TokensIn:    v.InputTokens,
 		TokensOut:   v.OutputTokens,
+		Graded:      v.Graded,
+		MeanScore:   v.MeanScore,
 	}
 }

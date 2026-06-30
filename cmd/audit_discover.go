@@ -13,6 +13,7 @@ import (
 var (
 	discoverAgents  []string
 	discoverSince   string
+	discoverCwd     string
 	discoverKeepAll bool
 	discoverDryRun  bool
 )
@@ -30,7 +31,8 @@ Scans are incremental: a stat ledger remembers every file seen, so an
 unchanged store costs almost nothing and re-running is always safe. Sessions
 that provably used no skill are counted but not stored (qvr keeps
 skill-attributed evidence, not generic transcripts); pass --keep-all to
-import everything. Only agents qvr can derive spans for are scanned.`,
+import everything — including sessions a prior plain discover already skipped,
+not just freshly seen ones. Only agents qvr can derive spans for are scanned.`,
 	Args: cobra.NoArgs,
 	RunE: runAuditDiscover,
 }
@@ -39,7 +41,8 @@ func init() {
 	f := auditDiscoverCmd.Flags()
 	f.StringSliceVar(&discoverAgents, "agent", nil, "only scan these agents (e.g. claude, codex)")
 	f.StringVar(&discoverSince, "since", "", "only files modified since this time (e.g. 90d, 24h, or RFC3339)")
-	f.BoolVar(&discoverKeepAll, "keep-all", false, "also record sessions that used no skill")
+	f.StringVar(&discoverCwd, "cwd", "", "only record sessions whose working directory is at or under this path (scopes a cohort capture)")
+	f.BoolVar(&discoverKeepAll, "keep-all", false, "also record sessions that used no skill (re-evaluates files a prior scan skipped)")
 	f.BoolVar(&discoverDryRun, "dry-run", false, "report what would be scanned without storing anything")
 	auditCmd.AddCommand(auditDiscoverCmd)
 }
@@ -50,7 +53,7 @@ func runAuditDiscover(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	opts := discover.Options{KeepAll: discoverKeepAll, DryRun: discoverDryRun}
+	opts := discover.Options{KeepAll: discoverKeepAll, DryRun: discoverDryRun, Cwd: discoverCwd}
 	for _, a := range discoverAgents {
 		opts.Agents = append(opts.Agents, canonicalAgentFlag(a))
 	}

@@ -13,10 +13,14 @@ import (
 )
 
 var (
-	logsAgent   string
-	logsKind    string
-	logsSession string
-	logsLimit   int
+	logsAgent      string
+	logsKind       string
+	logsSession    string
+	logsSkill      string
+	logsVersions   []string
+	logsStatus     string
+	logsActivation string
+	logsLimit      int
 )
 
 var auditLogsCmd = &cobra.Command{
@@ -35,8 +39,43 @@ func init() {
 	f.StringVar(&logsAgent, "agent", "", "filter by agent name")
 	f.StringVar(&logsKind, "kind", "", "filter by span kind (LLM, TOOL, SKILL)")
 	f.StringVar(&logsSession, "session", "", "filter by session id")
+	f.StringVar(&logsSkill, "skill", "", "filter by skill name")
+	f.StringArrayVar(&logsVersions, "version", nil, "filter by content-hash prefix (repeatable)")
+	f.StringVar(&logsStatus, "status", "", "filter by run status: success, failure, blocked (not a quality grade)")
+	f.StringVar(&logsActivation, "activation", "", "filter SKILL spans by activation: tool (genuine) or path (file-touch)")
 	f.IntVar(&logsLimit, "limit", 50, "maximum spans to show (0 = no limit)")
 	auditCmd.AddCommand(auditLogsCmd)
+}
+
+// spanFilterFromLogsFlags builds the span query from the logs command flags.
+func spanFilterFromLogsFlags() (*store.SpanFilter, error) {
+	f := &store.SpanFilter{Limit: logsLimit}
+	if logsAgent != "" {
+		f.Agents = []string{logsAgent}
+	}
+	if logsKind != "" {
+		f.Kinds = []string{strings.ToUpper(logsKind)}
+	}
+	if logsSkill != "" {
+		f.Skills = []string{logsSkill}
+	}
+	if len(logsVersions) > 0 {
+		f.Versions = logsVersions
+	}
+	if logsStatus != "" {
+		f.Statuses = []string{strings.ToLower(logsStatus)}
+	}
+	if logsActivation != "" {
+		f.Activations = []string{strings.ToLower(logsActivation)}
+	}
+	if logsSession != "" {
+		id, perr := uuid.Parse(logsSession)
+		if perr != nil {
+			return nil, fmt.Errorf("invalid --session id %q: %w", logsSession, perr)
+		}
+		f.SessionID = &id
+	}
+	return f, nil
 }
 
 func runAuditLogs(cmd *cobra.Command, args []string) error {
@@ -45,19 +84,9 @@ func runAuditLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	f := &store.SpanFilter{Limit: logsLimit}
-	if logsAgent != "" {
-		f.Agents = []string{logsAgent}
-	}
-	if logsKind != "" {
-		f.Kinds = []string{strings.ToUpper(logsKind)}
-	}
-	if logsSession != "" {
-		id, perr := uuid.Parse(logsSession)
-		if perr != nil {
-			return fmt.Errorf("invalid --session id %q: %w", logsSession, perr)
-		}
-		f.SessionID = &id
+	f, err := spanFilterFromLogsFlags()
+	if err != nil {
+		return err
 	}
 
 	if !auditDBExists(cfg) {
@@ -89,7 +118,7 @@ func runAuditLogs(cmd *cobra.Command, args []string) error {
 		printer.Info("No activity matches")
 		return nil
 	}
-	headers := []string{"TIME", "AGENT", "KIND", "NAME", "SKILL"}
+	headers := []string{"TIME", "AGENT", "KIND", "NAME", "SKILL", "VERSION", "STATUS"}
 	rows := make([][]string, 0, len(spans))
 	for _, sp := range spans {
 		rows = append(rows, []string{
@@ -98,6 +127,8 @@ func runAuditLogs(cmd *cobra.Command, args []string) error {
 			sp.Kind,
 			truncTarget(sp.Name),
 			spanAttr(sp.Attributes, "skill.name"),
+			shortContentHash(spanAttr(sp.Attributes, "skill.content_hash")),
+			spanAttr(sp.Attributes, "qvr.outcome"),
 		})
 	}
 	printer.Table(headers, rows)
@@ -128,6 +159,18 @@ func spanAttr(attrsJSON, key string) string {
 		return before
 	}
 	return ""
+}
+
+// shortContentHash renders a content hash ("sha256:<hex>") as a short,
+// git-style hex prefix for display; this is also the form the --version filter
+// accepts. Empty stays empty (an uncoordinated span).
+func shortContentHash(h string) string {
+	h = strings.TrimPrefix(h, "sha256:")
+	const short = 10
+	if len(h) > short {
+		return h[:short]
+	}
+	return h
 }
 
 // parseTimeFlag accepts either an RFC3339 timestamp or a relative duration like

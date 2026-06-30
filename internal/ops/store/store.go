@@ -76,6 +76,28 @@ type Store interface {
 	// string. Sessions with no skill span are absent from the map.
 	SkillsForSessions(ctx context.Context, ids []string) (map[string][]string, error)
 
+	// SkillVersionsForSessions returns each session's per-skill version
+	// coordinate (ref/commit/subtree) from its persisted SKILL spans, so a
+	// consumer learns which version ran without a time-window cross-reference.
+	SkillVersionsForSessions(ctx context.Context, ids []string) (map[string][]SkillVersionCoord, error)
+
+	// ScoresForSessions returns the BYO-grader verdicts attached to each given
+	// session, keyed by session id string. It joins session_score on the same
+	// (agent, LOWER(source_session_id)) key the cohort rollup uses, so a grade
+	// written against the agent-native id resolves for codex (differing id) and
+	// claude (uppercase id) alike. Pre-0010 DBs degrade to an empty map.
+	ScoresForSessions(ctx context.Context, ids []string) (map[string][]SessionScore, error)
+
+	// IdentityForCommit returns the full identity any session already proved for
+	// a (short) commit, or nil — the lock-independent source for escalating a
+	// commit-only span to its proper ref/subtree regardless of the current checkout.
+	IdentityForCommit(ctx context.Context, commit string) (*SkillCommitIdentity, error)
+
+	// IdentityForContentHash is the body-digest counterpart of IdentityForCommit,
+	// for a claude run whose symlink-recorded load carries no commit — it inherits
+	// the identity another session proved for the same run-time content.
+	IdentityForContentHash(ctx context.Context, contentHash string) (*SkillCommitIdentity, error)
+
 	// --- Activity analytics (read-side aggregations over session_meta and
 	// the scan ledger; see activity.go) ---
 
@@ -123,11 +145,36 @@ type Store interface {
 	// identity its spans carried — the lineage data. f.Skill is required.
 	SkillVersionRollup(ctx context.Context, f *MetricsFilter) ([]*SkillVersionUsage, error)
 
+	// SkillContentRollup groups one skill's invocations by observed content
+	// hash (the evolution loop's comparison coordinate), with a run-status
+	// breakdown per cohort. f.Skill is required; f.Activation scopes the cut.
+	SkillContentRollup(ctx context.Context, f *MetricsFilter) ([]*SkillContentCohort, error)
+
 	// PutLockSnapshots freezes a session's ingest-time proven identities
 	// (write-once per session+skill). GetLockSnapshots reads them back keyed
 	// by skill name. See migration 0005.
 	PutLockSnapshots(ctx context.Context, sessionID uuid.UUID, rows []*LockSnapshotRow) error
 	GetLockSnapshots(ctx context.Context, sessionID uuid.UUID) (map[string]*LockSnapshotRow, error)
+
+	// PutScore records a BYO grader's verdict for one run of one skill, keyed by
+	// the agent-native session id and the skill name (a blind write — no
+	// session-existence check, so grading can precede discovery). The skill key
+	// scopes the grade to the skill it judged, so a multi-skill session's grade
+	// no longer double-counts. See migrations 0010/0011; the score folds into
+	// SkillContentRollup's cohorts as MeanScore/Graded.
+	PutScore(ctx context.Context, agent, sessionRef, skill, metric string, value float64, grader string) error
+
+	// SessionSkillLoaded reports whether (agent, sessionRef) has been discovered
+	// (known) and whether it loaded skill as a genuine SKILL span (loaded). Backs
+	// annotate's guard against a grade naming a skill the run never loaded; an
+	// undiscovered run is known=false (no opinion, preserving grade-first).
+	SessionSkillLoaded(ctx context.Context, agent, sessionRef, skill string) (known, loaded bool, err error)
+
+	// SkillScoreMetrics returns the distinct metric names a skill carries grades
+	// under (sorted). Backs compare's metric-mismatch hint, which warns when the
+	// requested --metric has no grades but other metrics do — the silent cause of
+	// an all-'—' SCORE column.
+	SkillScoreMetrics(ctx context.Context, skill string) ([]string, error)
 
 	// DeleteRawBefore sweeps raw rows captured before cutoff. Returns the
 	// number of rows deleted.
@@ -166,10 +213,9 @@ type Store interface {
 
 // StoreStats summarises DB contents for diagnostics.
 type StoreStats struct {
-	RawTraceCount  int64
-	SessionCount   int64
-	SelfAuditCount int64
-	DBSizeBytes    int64
-	OldestTrace    *time.Time
-	NewestTrace    *time.Time
+	RawTraceCount int64
+	SessionCount  int64
+	DBSizeBytes   int64
+	OldestTrace   *time.Time
+	NewestTrace   *time.Time
 }

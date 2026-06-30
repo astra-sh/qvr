@@ -120,6 +120,9 @@ func TestListSessionMeta_Filters(t *testing.T) {
 		{"agent", &SessionMetaFilter{Agent: "codex"}, []uuid.UUID{b}},
 		{"dir", &SessionMetaFilter{Dirs: []string{"/tmp/other"}}, []uuid.UUID{c}},
 		{"skill", &SessionMetaFilter{Skill: "code-review"}, []uuid.UUID{b, a}},
+		{"skills multi single", &SessionMetaFilter{Skills: []string{"tdd"}}, []uuid.UUID{b}},
+		{"skills multi union", &SessionMetaFilter{Skills: []string{"tdd", "code-review"}}, []uuid.UUID{b, a}},
+		{"skills + scalar merge", &SessionMetaFilter{Skills: []string{"tdd"}, Skill: "code-review"}, []uuid.UUID{b, a}},
 		{"skills-only", &SessionMetaFilter{SkillsOnly: true}, []uuid.UUID{b, a}},
 		{"since", &SessionMetaFilter{Since: msPtr(1500)}, []uuid.UUID{c, b}},
 		{"until", &SessionMetaFilter{Until: msPtr(1500)}, []uuid.UUID{a}},
@@ -203,6 +206,84 @@ func i64Equal(a, b *int64) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// TestSessionMetaOutcome_RoundTrip pins the nullable outcome column: a set
+// verdict reads back, and "" (no span carried an outcome) reads back as "".
+func TestSessionMetaOutcome_RoundTrip(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	withOutcome, unknown := uuid.New(), uuid.New()
+	o := metaFor(withOutcome, "claude-code", 1000, "code-review")
+	o.Outcome = "failure"
+	if err := st.ReplaceSessionDerivation(ctx, o, nil); err != nil {
+		t.Fatalf("derive with outcome: %v", err)
+	}
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(unknown, "codex", 2000, "tdd"), nil); err != nil {
+		t.Fatalf("derive without outcome: %v", err)
+	}
+
+	got, err := st.GetSessionMeta(ctx, withOutcome)
+	if err != nil || got == nil {
+		t.Fatalf("get: %v %v", got, err)
+	}
+	if got.Outcome != "failure" {
+		t.Errorf("outcome = %q, want failure", got.Outcome)
+	}
+	got2, _ := st.GetSessionMeta(ctx, unknown)
+	if got2 == nil || got2.Outcome != "" {
+		t.Errorf("outcome = %q, want \"\" (unknown)", got2.Outcome)
+	}
+}
+
+// skillSpanRow builds a minimal SKILL span carrying skill.name + skill.version
+// attributes — the per-span tagging the version rollup/filter read from.
+func skillSpanRow(sid uuid.UUID, spanID, version string) *SpanRow {
+	return &SpanRow{
+		SpanID:     spanID,
+		TraceID:    "tr-" + spanID,
+		SessionID:  sid,
+		AgentName:  "claude-code",
+		Kind:       "SKILL",
+		Name:       "code-review",
+		StartMs:    1,
+		EndMs:      2,
+		Attributes: `{"skill.name":"code-review","skill.version":"` + version + `"}`,
+	}
+}
+
+// TestListSessionMeta_VersionFilter pins the server-side VERSION filter: it
+// scopes the list to sessions whose SKILL spans carry the exact skill.version —
+// the same per-span tag the read-side rollup (SkillVersionsForSessions) reads,
+// so there is no denormalized column to keep in sync. Driven by real SKILL
+// spans, end-to-end through ReplaceSessionDerivation → ListSessionMeta.
+func TestListSessionMeta_VersionFilter(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+
+	v1, v2 := uuid.New(), uuid.New()
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(v1, "claude-code", 1000, "code-review"),
+		[]*SpanRow{skillSpanRow(v1, "s1", "v0.1.0")}); err != nil {
+		t.Fatalf("derive v1: %v", err)
+	}
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(v2, "claude-code", 2000, "code-review"),
+		[]*SpanRow{skillSpanRow(v2, "s2", "v0.2.0")}); err != nil {
+		t.Fatalf("derive v2: %v", err)
+	}
+	// A session with no versioned SKILL span must be excluded by a version filter.
+	noVer := uuid.New()
+	if err := st.ReplaceSessionDerivation(ctx, metaFor(noVer, "codex", 3000, "tdd"), nil); err != nil {
+		t.Fatalf("derive noVer: %v", err)
+	}
+
+	rows, err := st.ListSessionMeta(ctx, &SessionMetaFilter{Version: "v0.2.0"})
+	if err != nil {
+		t.Fatalf("list by version: %v", err)
+	}
+	if len(rows) != 1 || rows[0].SessionID != v2 {
+		t.Errorf("version filter = %v, want only the v0.2.0 session", rows)
+	}
 }
 
 // TestGetSessionMeta_AbsentIsNil pins the no-row contract: nil, not an error.
