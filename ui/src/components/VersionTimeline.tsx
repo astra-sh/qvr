@@ -93,6 +93,18 @@ export default function VersionTimeline({ rows }: { rows: TimelineRow[] }) {
             {v.usage && (
               <div className="qvr-ver__top" style={{ marginTop: 6, gap: 6 }}>
                 <Tag>{fmtCount(v.usage.invocations)} runs</Tag>
+                {/* BYO-grader pass-rate for this version (the metric "score").
+                    Absent = ungraded — omit rather than imply a 0 verdict. */}
+                {v.usage.meanScore != null && (
+                  <Tag
+                    lead="★"
+                    title={`mean score over ${fmtCount(v.usage.graded ?? 0)} graded run${
+                      (v.usage.graded ?? 0) === 1 ? "" : "s"
+                    } (qvr audit annotate)`}
+                  >
+                    {v.usage.meanScore.toFixed(2)}
+                  </Tag>
+                )}
                 {/* Absent = these sessions' stores report no usage; omit the
                     chips rather than showing a fabricated 0. */}
                 {v.usage.tokensIn != null && <Tag lead="↑">{fmtCount(v.usage.tokensIn)} tok</Tag>}

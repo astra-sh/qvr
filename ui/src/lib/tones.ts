@@ -46,6 +46,8 @@ export function spanKindTone(kind?: string): BadgeTone {
       return "accent";
     case "LLM":
       return "info";
+    case "RESPONSE":
+      return "success";
     case "TOOL":
       return "neutral";
     default:

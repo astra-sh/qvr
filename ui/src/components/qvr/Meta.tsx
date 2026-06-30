@@ -1,9 +1,17 @@
 import type { ReactNode } from "react";
 
 // Meta — the detail header's key/value strip: uppercase micro-keys, mono values.
-export function Meta({ children, style }: { children: ReactNode; style?: React.CSSProperties }) {
+export function Meta({
+  children,
+  style,
+  className,
+}: {
+  children: ReactNode;
+  style?: React.CSSProperties;
+  className?: string;
+}) {
   return (
-    <div className="qvr-meta" style={style}>
+    <div className={className ? `qvr-meta ${className}` : "qvr-meta"} style={style}>
       {children}
     </div>
   );

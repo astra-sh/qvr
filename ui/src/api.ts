@@ -8,6 +8,29 @@ import { useCallback, useEffect, useState } from "react";
 // page lists sessions from. Constructed by each agent's deriver from the
 // verbatim raw rows — `title` is the first prompt the user typed, `agent_name`
 // is the canonical target name (claude, codex, …), times are epoch ms.
+
+// SkillVersionRef is one skill's version coordinate within a session, rolled up
+// from its SKILL spans. `version` is the display label (a ref like "v0.1.0", a
+// short commit, or "unknown"); commit/subtree_hash pin the exact content.
+export interface SkillVersionRef {
+  skill: string;
+  version: string;
+  commit?: string;
+  subtree_hash?: string;
+}
+
+// SessionScore mirrors store.SessionScore: one BYO-grader verdict attached to a
+// session, joined from session_score by (agent, native id). A session can carry
+// several — one per graded skill×metric. `value` is the grader's raw number; the
+// metric named "score" is the one compare's cohort rollup aggregates.
+export interface SessionScore {
+  skill: string;
+  metric: string;
+  value: number;
+  grader?: string;
+  scored_at: number;
+}
+
 export interface SessionMeta {
   session_id: string;
   agent_name: string;
@@ -23,10 +46,18 @@ export interface SessionMeta {
   tools: number;
   // Distinct skills this session used, first-use order.
   skills?: string[];
+  // Per-skill version coordinates this session ran, rolled up from its SKILL
+  // spans (the same shape `qvr audit sessions` returns). `version` is the
+  // shared label (ref → short commit → "unknown").
+  skill_versions?: SkillVersionRef[];
   // Session token totals. Absent = the agent's native store reported no
   // usage on that side — render n/a, never 0.
   tokens_in?: number;
   tokens_out?: number;
+  // BYO-grader verdicts attached to this session (one per graded skill×metric).
+  // Present on the sessions LIST rows (the sessionView); the detail page reads
+  // scores from SessionDetail.scores instead. Absent = unannotated.
+  scores?: SessionScore[];
   deriver_version: number;
   derived_at: string;
 }
@@ -37,7 +68,10 @@ export interface SessionMeta {
 // limit-truncated, so a client sort couldn't surface the most expensive ones).
 export interface SessionFilter {
   agent?: string;
-  skill?: string;
+  // Multi-select: a session matches ANY listed skill AND ANY listed version.
+  // Sent as repeated skill=/version= params; empty arrays mean no filter.
+  skills?: string[];
+  versions?: string[];
   since?: string;
   until?: string;
   sort?: "tokens";
@@ -79,6 +113,9 @@ export interface SessionDetail {
   session: SessionMeta;
   spans: SpanRow[];
   traces: RawTraceView[];
+  // BYO-grader verdicts for this session, joined from session_score (one per
+  // graded skill×metric). Absent/empty = unannotated.
+  scores?: SessionScore[];
 }
 
 export interface Overview {
@@ -468,6 +505,10 @@ export interface SkillVersionUsage {
   lastFired?: string;
   tokensIn?: number; // absent = no usage reported (n/a)
   tokensOut?: number;
+  // BYO-grader quality for this version (metric "score"): graded is the honest
+  // denominator, meanScore their mean. Absent = ungraded (n/a, never 0).
+  graded?: number;
+  meanScore?: number;
   current?: boolean;
 }
 
@@ -488,6 +529,9 @@ export interface VersionGraphUsage {
   lastFired?: string;
   tokensIn?: number; // absent = no usage reported (n/a)
   tokensOut?: number;
+  // BYO-grader quality for this version (metric "score"). Absent = ungraded.
+  graded?: number;
+  meanScore?: number;
 }
 
 export interface VersionGraphNode {
@@ -712,7 +756,8 @@ function scopeQuery(): string {
 function sessionsQuery(f: SessionFilter): string {
   const p = scopeParams();
   if (f.agent) p.set("agent", f.agent);
-  if (f.skill) p.set("skill", f.skill);
+  for (const s of f.skills ?? []) p.append("skill", s);
+  for (const v of f.versions ?? []) p.append("version", v);
   if (f.since) p.set("since", f.since);
   if (f.until) p.set("until", f.until);
   if (f.sort) p.set("sort", f.sort);

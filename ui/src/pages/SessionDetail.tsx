@@ -1,7 +1,14 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ChevronDown, ChevronRight, Dot } from "lucide-react";
-import { api, prettyAgent, useFetch, type RawTraceView, type SpanRow } from "../api";
+import {
+  api,
+  prettyAgent,
+  useFetch,
+  type RawTraceView,
+  type SessionScore,
+  type SpanRow,
+} from "../api";
 import {
   Badge,
   CodeBlock,
@@ -12,11 +19,20 @@ import {
   Back,
   Meta,
   MetaItem,
+  Select,
   Tabs,
   Tag,
   VersionTag,
 } from "../components/qvr";
-import { fmtCount, fmtEpochMs, fmtMs, fmtTime, prettyJSON, short } from "../lib/format";
+import {
+  fmtCount,
+  fmtEpochMs,
+  fmtMs,
+  fmtTime,
+  fmtTokenPair,
+  prettyJSON,
+  short,
+} from "../lib/format";
 import { spanKindTone } from "../lib/tones";
 
 type View = "spans" | "raw";
@@ -40,27 +56,43 @@ export default function SessionDetail() {
             name={title}
             badges={<Badge tone="info">{prettyAgent(session.agent_name)}</Badge>}
           />
-          <Meta>
+          {/* Row 1 — the session's metrics: timing, turn/tool counts, token
+              usage, and the BYO-grader score as the trailing column. */}
+          <Meta className="qvr-meta--dense">
             <MetaItem k="started">{fmtEpochMs(session.started_ms)}</MetaItem>
             {session.ended_ms > session.started_ms && (
               <MetaItem k="duration">{fmtMs(session.ended_ms - session.started_ms)}</MetaItem>
             )}
             <MetaItem k="turns">{session.turns}</MetaItem>
             <MetaItem k="tools">{session.tools}</MetaItem>
+            <span
+              className="qvr-meta__item"
+              title={session.tokens_in == null && session.tokens_out == null ? "no usage reported" : undefined}
+            >
+              <span className="qvr-meta__k">tokens</span>
+              <span
+                className={
+                  "qvr-meta__v" +
+                  (session.tokens_in == null && session.tokens_out == null ? " qvr-table__muted" : "")
+                }
+              >
+                {fmtTokenPair(session.tokens_in, session.tokens_out)}
+              </span>
+            </span>
+            {data.scores && data.scores.length > 0 && <ScoresStat scores={data.scores} />}
+          </Meta>
+          {/* Row 2 — identity & location: model, session id, working dir, branch. */}
+          <Meta className="qvr-meta--dense" style={{ marginTop: 4 }}>
             {session.model && <MetaItem k="model">{session.model}</MetaItem>}
             <span className="qvr-meta__item">
               <span className="qvr-meta__k">session</span>
               <Tag title={session.session_id}>{short(session.session_id, 8)}</Tag>
             </span>
+            {session.working_directory && (
+              <MetaItem k="cwd">{session.working_directory}</MetaItem>
+            )}
+            {session.git_branch && <MetaItem k="branch">{session.git_branch}</MetaItem>}
           </Meta>
-          {(session.working_directory || session.git_branch) && (
-            <Meta style={{ marginTop: 4 }}>
-              {session.working_directory && (
-                <MetaItem k="cwd">{session.working_directory}</MetaItem>
-              )}
-              {session.git_branch && <MetaItem k="branch">{session.git_branch}</MetaItem>}
-            </Meta>
-          )}
 
           {/* Toggle between the processed (derived span) view and the lossless
               raw rows — the two representations of the same session. */}
@@ -88,6 +120,71 @@ export default function SessionDetail() {
   );
 }
 
+// ScoresStat renders the session's BYO-grader verdicts as a sibling header stat,
+// next to the tokens chip. A session can carry several metrics (score, exact,
+// rubric, …) — and, rarely, several skills under one metric — so a <select> picks
+// the metric and the value is shown per skill. It defaults to "score", the metric
+// compare's version-cohort rollup aggregates; the dropdown lists every metric
+// present, so a grader who annotated under a custom metric still sees it here.
+function ScoresStat({ scores }: { scores: SessionScore[] }) {
+  // Distinct metrics, "score" pinned first so the default is the rollup metric.
+  const metrics = useMemo(() => {
+    const set = new Set(scores.map((s) => s.metric));
+    return [...set].sort((a, b) =>
+      a === "score" ? -1 : b === "score" ? 1 : a.localeCompare(b),
+    );
+  }, [scores]);
+  const [picked, setPicked] = useState("");
+  const metric = picked && metrics.includes(picked) ? picked : metrics[0];
+
+  const rows = useMemo(
+    () => scores.filter((s) => s.metric === metric).sort((a, b) => a.skill.localeCompare(b.skill)),
+    [scores, metric],
+  );
+  // Label each value by skill only when the metric spans more than one skill —
+  // the common single-skill session stays terse.
+  const multiSkill = rows.length > 1;
+
+  return (
+    <span className="qvr-meta__item">
+      <span className="qvr-meta__k">scores</span>
+      {metrics.length > 1 ? (
+        <Select
+          className="qvr-select qvr-select--sm"
+          value={metric}
+          onChange={(e) => setPicked(e.target.value)}
+          aria-label="score metric"
+        >
+          {metrics.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </Select>
+      ) : (
+        <Tag>{metric}</Tag>
+      )}
+      <span style={{ display: "inline-flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        {rows.map((r) => (
+          <span
+            key={`${r.skill}:${r.metric}`}
+            style={{ display: "inline-flex", gap: 5, alignItems: "baseline" }}
+            title={r.grader ? `grader: ${r.grader}` : undefined}
+          >
+            {multiSkill && <span className="qvr-table__muted">{r.skill}</span>}
+            <span className="qvr-meta__v" style={{ fontVariantNumeric: "tabular-nums" }}>
+              {r.value.toFixed(2)}
+            </span>
+            {r.grader && !multiSkill && (
+              <span className="qvr-scan__scanner">grader {r.grader}</span>
+            )}
+          </span>
+        ))}
+      </span>
+    </span>
+  );
+}
+
 // ---- processed spans -------------------------------------------------------
 
 interface ParsedAttrs {
@@ -104,11 +201,18 @@ interface ParsedAttrs {
   toolArgs?: string;
   toolResult?: string;
   toolDesc?: string;
+  reasoning?: string;
   skillName?: string;
   skillRegistry?: string;
   skillVersion?: string;
   skillCommit?: string;
+  skillActivation?: string;
   error?: string;
+  // root-turn trace metadata
+  threadId?: string;
+  integration?: string;
+  runDepth?: number;
+  agentType?: string;
 }
 
 function parseAttrs(raw: string): ParsedAttrs {
@@ -142,11 +246,17 @@ function parseAttrs(raw: string): ParsedAttrs {
     toolArgs: str("gen_ai.tool.call.arguments"),
     toolResult: str("gen_ai.tool.call.result"),
     toolDesc: str("gen_ai.tool.description"),
+    reasoning: str("qvr.reasoning"),
     skillName: str("skill.name"),
     skillRegistry: str("skill.registry"),
     skillVersion: str("skill.version"),
     skillCommit: str("skill.commit"),
+    skillActivation: str("skill.activation"),
     error: str("error.type"),
+    threadId: str("qvr.thread_id"),
+    integration: str("qvr.integration"),
+    runDepth: num("qvr.run_depth"),
+    agentType: str("qvr.agent_type"),
   };
 }
 
@@ -156,43 +266,68 @@ function parseAttrs(raw: string): ParsedAttrs {
 // tag is the loud part: tagging the session is the point, identity is
 // supporting metadata.
 
-interface Turn {
-  llm: SpanRow;
-  children: SpanRow[];
+// SpanNode is the derived-span tree: a span plus its children, linked by
+// parent_span_id. The clean tree nests root turn → model → tool/skill, and an
+// Agent tool → the subagent's whole subtree, exactly as derived.
+interface SpanNode {
+  span: SpanRow;
+  children: SpanNode[];
 }
 
-// groupTurns assembles the turn hierarchy: each LLM span is a turn root, and
-// every TOOL/SKILL span is parented to its turn's LLM span. Spans with no LLM
-// parent (rare: a resumed session) get a synthetic turn so nothing is dropped.
-function groupTurns(spans: SpanRow[]): Turn[] {
-  const llmById = new Map<string, Turn>();
-  const turns: Turn[] = [];
-  for (const sp of spans) {
-    if (sp.kind === "LLM") {
-      const t: Turn = { llm: sp, children: [] };
-      llmById.set(sp.span_id, t);
-      turns.push(t);
+// responseRow synthesizes the turn's final assistant message as its own row.
+// The deriver models output as a gen_ai.output.messages attribute on the model
+// span (the OTel-correct place); presenting it as a distinct node under that
+// span — ordered after the tool/skill calls — is a pure UI choice, so we lift
+// it here rather than emitting a backend span. Returns null when the turn had
+// no assistant text (the deriver's "(no text output)" placeholder).
+function responseRow(llm: SpanRow): SpanRow | null {
+  const out = parseAttrs(llm.attributes).output;
+  if (!out || out === "(no text output)") return null;
+  return {
+    ...llm,
+    span_id: `${llm.span_id}::response`,
+    parent_span_id: llm.span_id,
+    kind: "RESPONSE",
+    name: "final response",
+    // Stamp it at the model span's end so it sorts after every tool child.
+    start_ms: llm.end_ms,
+    end_ms: llm.end_ms,
+  };
+}
+
+// buildSpanTree links spans by parent_span_id into a forest. A span whose parent
+// isn't in the set (a resumed/partial session) becomes a root, so nothing is
+// dropped. Siblings are ordered by start time. A model span additionally gets a
+// synthetic RESPONSE child appended last (see responseRow).
+function buildSpanTree(spans: SpanRow[]): SpanNode[] {
+  const byId = new Map(spans.map((s) => [s.span_id, s]));
+  const childrenOf = new Map<string, SpanRow[]>();
+  const roots: SpanRow[] = [];
+  for (const s of spans) {
+    const pid = s.parent_span_id;
+    if (pid && byId.has(pid)) {
+      const list = childrenOf.get(pid);
+      if (list) list.push(s);
+      else childrenOf.set(pid, [s]);
+    } else {
+      roots.push(s);
     }
   }
-  const orphans: SpanRow[] = [];
-  for (const sp of spans) {
-    if (sp.kind === "LLM") continue;
-    const parent = sp.parent_span_id ? llmById.get(sp.parent_span_id) : undefined;
-    if (parent) parent.children.push(sp);
-    else orphans.push(sp);
-  }
-  if (orphans.length > 0) {
-    // First orphan heads the synthetic turn; the rest are its children. Passing
-    // the full orphans array as children too would render orphans[0] twice.
-    turns.push({ llm: orphans[0], children: orphans.slice(1) });
-  }
-  for (const t of turns) t.children.sort((a, b) => a.start_ms - b.start_ms);
-  turns.sort((a, b) => a.llm.start_ms - b.llm.start_ms);
-  return turns;
+  const build = (s: SpanRow): SpanNode => {
+    const children = (childrenOf.get(s.span_id) ?? [])
+      .sort((a, b) => a.start_ms - b.start_ms)
+      .map(build);
+    if (s.kind === "LLM") {
+      const resp = responseRow(s);
+      if (resp) children.push({ span: resp, children: [] });
+    }
+    return { span: s, children };
+  };
+  return roots.sort((a, b) => a.start_ms - b.start_ms).map(build);
 }
 
 function SpansView({ spans }: { spans: SpanRow[] }) {
-  const turns = useMemo(() => groupTurns(spans), [spans]);
+  const tree = useMemo(() => buildSpanTree(spans), [spans]);
   if (spans.length === 0) {
     return (
       <EmptyState title="no processed spans" art={false}>
@@ -202,41 +337,138 @@ function SpansView({ spans }: { spans: SpanRow[] }) {
     );
   }
   return (
-    <div style={{ display: "grid", gap: 14 }}>
-      {turns.map((t, i) => (
-        <TurnCard key={t.llm.span_id} turn={t} index={i + 1} />
+    <div style={{ display: "grid", gap: 4 }}>
+      {tree.map((n) => (
+        <SpanNodeRow key={n.span.span_id} node={n} />
       ))}
     </div>
   );
 }
 
-function TurnCard({ turn, index }: { turn: Turn; index: number }) {
-  const a = parseAttrs(turn.llm.attributes);
-  const dur = turn.llm.end_ms - turn.llm.start_ms;
+// SpanNodeRow renders one span row in the waterfall plus, indented beneath it,
+// its children — so the whole trace reads as one nested tree. The row expands to
+// show that span's detail (prompt/output/reasoning for a turn or model call;
+// arguments/result for a tool; identity for a skill).
+function SpanNodeRow({ node }: { node: SpanNode }) {
+  const { span, children } = node;
+  const a = parseAttrs(span.attributes);
+  const isResponse = span.kind === "RESPONSE";
+  const isMsg = span.kind === "LLM" || span.kind === "CHAIN";
+  // The final assistant message renders as its own RESPONSE row (output only);
+  // the model/turn rows therefore drop the output block to avoid showing it
+  // twice — they keep input + reasoning.
+  // agentType is intentionally NOT a detail trigger: it has no expansion panel
+  // of its own (it shows as the "subagent" badge in the row header), so a CHAIN
+  // span carrying only agentType must stay non-expandable rather than open a
+  // blank container.
+  const hasDetail = isResponse
+    ? !!a.output
+    : isMsg
+      ? !!(a.prompt || a.reasoning)
+      : !!(a.toolArgs || a.toolResult);
+  // Rows start collapsed so the whole nested tree is visible at a glance (the
+  // waterfall); clicking a row reveals that span's detail.
+  const [open, setOpen] = useState(false);
+  const dur = span.end_ms - span.start_ms;
   return (
-    <div className="qvr-card">
-      <div className="qvr-card__header" style={{ flexWrap: "wrap" }}>
-        <span
-          style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-xs)", color: "var(--text-faint)" }}
-        >
-          #{index}
-        </span>
-        <Badge tone={spanKindTone("LLM")}>LLM</Badge>
-        <span className="qvr-card__title">{a.model || "chat"}</span>
-        <TurnTokens a={a} />
-        {dur > 0 && <span className="qvr-scan__scanner">{fmtMs(dur)}</span>}
-      </div>
-      <div className="qvr-card__body" style={{ display: "grid", gap: 12 }}>
-        {a.prompt && <MessageBlock label="prompt" tone="user" text={a.prompt} />}
-        {a.output && <MessageBlock label="response" tone="assistant" text={a.output} />}
-        {turn.children.length > 0 && (
-          <div style={{ display: "grid", gap: 8 }}>
-            {turn.children.map((c) => (
-              <ToolSpan key={c.span_id} span={c} />
-            ))}
-          </div>
+    <div>
+      <button
+        type="button"
+        onClick={() => hasDetail && setOpen((v) => !v)}
+        style={{
+          display: "flex",
+          width: "100%",
+          alignItems: "center",
+          gap: 8,
+          padding: "6px 10px",
+          background: "none",
+          border: "none",
+          borderRadius: 6,
+          textAlign: "left",
+          cursor: hasDetail ? "pointer" : "default",
+          color: "var(--text-faint)",
+        }}
+      >
+        {hasDetail ? (
+          open ? <ChevronDown size={14} /> : <ChevronRight size={14} />
+        ) : (
+          <Dot size={14} />
         )}
-      </div>
+        <Badge tone={spanKindTone(span.kind)}>{span.kind}</Badge>
+        <span
+          style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-sm)", color: "var(--text)" }}
+        >
+          {span.name}
+        </span>
+        {span.kind === "SKILL" && a.skillName && (
+          <>
+            <Badge tone="accent" dot>
+              {a.skillName}
+            </Badge>
+            <VersionTag
+              refName={a.skillVersion}
+              sha={a.skillCommit}
+              title={
+                a.skillRegistry
+                  ? `${a.skillRegistry}@${a.skillVersion}${a.skillCommit ? ` · ${a.skillCommit}` : ""}`
+                  : undefined
+              }
+            />
+            {a.skillActivation && a.skillActivation !== "tool" && (
+              <Tag title="how the skill load was detected">{a.skillActivation}</Tag>
+            )}
+          </>
+        )}
+        {span.kind === "CHAIN" && a.agentType === "subagent" && (
+          <Badge tone="warning" dot>
+            subagent
+          </Badge>
+        )}
+        {isMsg && <TurnTokens a={a} />}
+        {((span.kind === "TOOL" && a.toolDesc) || (isResponse && a.output)) && (
+          <span
+            className="qvr-scan__scanner"
+            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
+          >
+            {isResponse ? a.output : a.toolDesc}
+          </span>
+        )}
+        {a.error && <Badge tone="danger">{a.error}</Badge>}
+        {dur > 0 && (
+          <span className="qvr-scan__scanner" style={{ marginLeft: "auto" }}>
+            {fmtMs(dur)}
+          </span>
+        )}
+      </button>
+      {open && hasDetail && (
+        <div style={{ padding: "2px 10px 10px 30px", display: "grid", gap: 10 }}>
+          {isResponse ? (
+            a.output && <MessageBlock label="final response" tone="assistant" text={a.output} />
+          ) : (
+            <>
+              {a.prompt && <MessageBlock label="input" tone="user" text={a.prompt} />}
+              {a.reasoning && <MessageBlock label="reasoning" tone="assistant" text={a.reasoning} />}
+            </>
+          )}
+          {a.toolArgs && <CodeBlock value={pretty(a.toolArgs)} label="arguments" />}
+          {a.toolResult && <CodeBlock value={a.toolResult} label="result" />}
+        </div>
+      )}
+      {children.length > 0 && (
+        <div
+          style={{
+            marginLeft: 16,
+            paddingLeft: 8,
+            borderLeft: "1px solid var(--border)",
+            display: "grid",
+            gap: 4,
+          }}
+        >
+          {children.map((c) => (
+            <SpanNodeRow key={c.span.span_id} node={c} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -289,72 +521,6 @@ function MessageBlock({
       >
         {text}
       </div>
-    </div>
-  );
-}
-
-function ToolSpan({ span }: { span: SpanRow }) {
-  const [open, setOpen] = useState(false);
-  const a = parseAttrs(span.attributes);
-  const isSkill = span.kind === "SKILL";
-  const hasDetail = !!(a.toolArgs || a.toolResult);
-  return (
-    <div className="qvr-card qvr-card--inset">
-      <button
-        type="button"
-        onClick={() => hasDetail && setOpen((v) => !v)}
-        style={{
-          display: "flex",
-          width: "100%",
-          alignItems: "center",
-          gap: 8,
-          padding: "8px 12px",
-          background: "none",
-          border: "none",
-          textAlign: "left",
-          cursor: hasDetail ? "pointer" : "default",
-          color: "var(--text-faint)",
-        }}
-      >
-        {hasDetail ? (open ? <ChevronDown size={14} /> : <ChevronRight size={14} />) : <Dot size={14} />}
-        <Badge tone={spanKindTone(span.kind)}>{span.kind}</Badge>
-        <span
-          style={{ fontFamily: "var(--font-mono)", fontSize: "var(--text-sm)", color: "var(--text)" }}
-        >
-          {a.toolName || span.name}
-        </span>
-        {isSkill && a.skillName && (
-          <Badge tone="accent" dot>
-            {a.skillName}
-          </Badge>
-        )}
-        {isSkill && a.skillName && (
-          <VersionTag
-            refName={a.skillVersion}
-            sha={a.skillCommit}
-            title={
-              a.skillRegistry
-                ? `${a.skillRegistry}@${a.skillVersion}${a.skillCommit ? ` · ${a.skillCommit}` : ""}`
-                : undefined
-            }
-          />
-        )}
-        {!isSkill && a.toolDesc && (
-          <span
-            className="qvr-scan__scanner"
-            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-          >
-            {a.toolDesc}
-          </span>
-        )}
-        {a.error && <Badge tone="danger">{a.error}</Badge>}
-      </button>
-      {open && hasDetail && (
-        <div style={{ padding: "0 12px 12px" }}>
-          {a.toolArgs && <CodeBlock value={pretty(a.toolArgs)} label="arguments" />}
-          {a.toolResult && <CodeBlock value={a.toolResult} label="result" />}
-        </div>
-      )}
     </div>
   );
 }

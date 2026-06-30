@@ -596,32 +596,32 @@ function ProjectScanPanel({
   return (
     <div style={{ display: "grid", gap: 14 }}>
       {/* Recorded install-time gate — instant, no scan needed. */}
-      <div className="qvr-scan">
-        <span className="qvr-scan__k">recorded gate</span>
-        {recorded ? (
-          <>
-            <StatusBadge value={recorded.decision} />
-            <SeverityChips
-              counts={[
-                ["critical", recorded.counts.critical],
-                ["high", recorded.counts.high],
-                ["medium", recorded.counts.medium],
-                ["low", recorded.counts.low],
-                ["info", recorded.counts.info],
-              ]}
-            />
-            {recorded.scannerVersion && (
-              <span className="qvr-scan__scanner">scanner {recorded.scannerVersion}</span>
-            )}
-          </>
-        ) : (
-          <span className="qvr-scan__scanner">not scanned at install</span>
-        )}
-        <span style={{ marginLeft: "auto" }}>
-          <Button variant="primary" size="sm" onClick={run} disabled={busy}>
-            {busy ? "scanning…" : scan ? "re-scan" : "run live scan"}
-          </Button>
-        </span>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+        <div className="qvr-scan" style={{ flex: 1 }}>
+          <span className="qvr-scan__k">recorded gate</span>
+          {recorded ? (
+            <>
+              <StatusBadge value={recorded.decision} />
+              <SeverityChips
+                counts={[
+                  ["critical", recorded.counts.critical],
+                  ["high", recorded.counts.high],
+                  ["medium", recorded.counts.medium],
+                  ["low", recorded.counts.low],
+                  ["info", recorded.counts.info],
+                ]}
+              />
+              {recorded.scannerVersion && (
+                <span className="qvr-scan__scanner">scanner {recorded.scannerVersion}</span>
+              )}
+            </>
+          ) : (
+            <span className="qvr-scan__scanner">not scanned at install</span>
+          )}
+        </div>
+        <Button variant="primary" size="sm" onClick={run} disabled={busy}>
+          {busy ? "scanning…" : scan ? "re-scan" : "run live scan"}
+        </Button>
       </div>
 
       {err && <ErrorBox message={err} />}
@@ -667,9 +667,6 @@ function ProjectScanPanel({
           <FindingsList findings={scan.findings} />
         </div>
       )}
-
-      {/* File-type inventory — always available, even before a scan runs. */}
-      <Inventory files={info.files ?? []} />
     </div>
   );
 }

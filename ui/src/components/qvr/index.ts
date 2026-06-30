@@ -5,6 +5,7 @@ export { Tag, VersionTag } from "./Tag";
 export { Card } from "./Card";
 export { Tabs, type TabItem } from "./Tabs";
 export { Input, Field, Select } from "./Input";
+export { MultiSelect } from "./MultiSelect";
 export { Table, Th, Td } from "./Table";
 export { ToastProvider, useToast } from "./Toast";
 export { Prompt, CopyChip } from "./Prompt";
