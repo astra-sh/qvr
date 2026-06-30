@@ -374,8 +374,16 @@ func publishInstalledUnderLock(cmd *cobra.Command, name, projectRoot, lockPath s
 	if e.IsLink() {
 		return fmt.Errorf("cannot publish %q: it is a link install — edit the source path and push with raw git", name)
 	}
+	// An installed skill must be ejected (writable) before it can be published.
+	// Rather than bounce the user to run `qvr edit` and retry, auto-eject in
+	// place and continue — `publish` already auto-un-ejects back to consume mode
+	// after a tagged push, so the eject is a transparent, symmetric step. The
+	// lock mutation is persisted immediately so a mid-publish failure still
+	// leaves a coherent, ejected entry.
 	if !e.IsEdit() {
-		return fmt.Errorf("publish %s: skill is not ejected — run `qvr edit %s` first to make it editable", name, name)
+		if err := autoEjectForPublish(name, projectRoot, lock, e); err != nil {
+			return err
+		}
 	}
 
 	editDir := skill.EffectiveTarget(e, projectRoot)
@@ -436,6 +444,32 @@ func publishInstalledUnderLock(cmd *cobra.Command, name, projectRoot, lockPath s
 	}
 	ps.result = r
 	ps.entry = e
+	return nil
+}
+
+// autoEjectForPublish promotes a not-yet-ejected installed skill to a writable
+// edit dir in place, so `publish` no longer demands a manual `qvr edit` first.
+// It mirrors `qvr edit`: EjectToTarget mutates the entry (Mode→edit, EditPath
+// set) and we persist the lock immediately so the ejected state survives even
+// if a later publish step fails. The entry stays ejected afterwards — the same
+// post-publish auto-un-eject that follows a tagged push restores consume mode.
+func autoEjectForPublish(name, projectRoot string, lock *model.LockFile, e *model.LockEntry) error {
+	if _, err := skill.EjectToTarget(skill.EjectRequest{
+		Entry:       e,
+		ProjectRoot: projectRoot,
+		Global:      publishGlobal,
+		Author:      publishAuthor,
+		AuthorEmail: publishEmail,
+	}); err != nil {
+		return fmt.Errorf("publish %s: auto-eject failed (run `qvr edit %s` manually): %w", name, name, err)
+	}
+	lock.Put(e)
+	if err := lock.Write(); err != nil {
+		return fmt.Errorf("publish %s: persist auto-eject: %w", name, err)
+	}
+	if printer.Format != output.FormatJSON {
+		printer.Step(fmt.Sprintf("Auto-ejected %s for editing (was installed read-only)", name))
+	}
 	return nil
 }
 

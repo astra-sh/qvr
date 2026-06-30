@@ -1499,6 +1499,19 @@ func (in *Installer) resolveInstall(req *InstallRequest) (*installPlan, error) {
 		return nil, err
 	}
 
+	// Honor an existing lock entry's pinned origin on a bare (no --registry)
+	// re-add. Without this, `qvr add <name>` for a name already in the lock
+	// re-resolves through resolveSkill's all-registries walk and silently
+	// repoints to the alphabetical-first registry that happens to share the
+	// name — rewriting the lock's registry field and swapping the installed
+	// worktree to different same-named content. --frozen already does this via
+	// prefillFromFrozenLock; this is the default-path mirror. Passing --registry
+	// (req.Registry already set) is the sanctioned way to repoint, so this is a
+	// no-op then.
+	if !req.Frozen {
+		in.prefillRegistryFromLock(req, localName)
+	}
+
 	loc, ambiguityWarning, err := in.resolveSkill(name, version, req.Registry, req.SkillPath, req.PinCommit)
 	if err != nil {
 		return nil, err
@@ -1675,6 +1688,44 @@ func (in *Installer) prefillFromFrozenLock(req *InstallRequest, name string) (st
 		}
 	}
 	return name, nil
+}
+
+// prefillRegistryFromLock scopes a bare (no --registry, non-frozen) re-add to
+// the origin its lock entry already records, so the resolver doesn't silently
+// repoint a same-named skill to the alphabetical-first registry (see the call
+// site). The scoping order matches Manager.FindSkillForSource: the entry's
+// Registry display name first, then its Source resolved to a configured
+// registry (so a migrated fork — Registry cleared, Source set — still resolves
+// to its own clone). Best-effort and side-effect-free beyond mutating
+// req.Registry: a missing lock, an absent entry (never installed), or a Source
+// matching no configured registry all leave req.Registry empty so resolution
+// proceeds exactly as before. Keyed on localName (the lock key) so an
+// `--as <alias>` re-add honors the alias entry's pin, not the canonical name's.
+func (in *Installer) prefillRegistryFromLock(req *InstallRequest, localName string) {
+	if req.Registry != "" {
+		return
+	}
+	lp := resolveLockPath(req)
+	if _, statErr := os.Stat(lp); statErr != nil {
+		return // no lock yet → first install, nothing to honor
+	}
+	existingLock, lerr := model.ReadLockFile(lp)
+	if lerr != nil {
+		return
+	}
+	existing, gerr := existingLock.Get(localName)
+	if gerr != nil {
+		return // not previously locked → resolve freshly (prior behavior)
+	}
+	if existing.Registry != "" {
+		req.Registry = existing.Registry
+		return
+	}
+	if existing.Source != "" {
+		if regName := in.Registry.RegistryNameForURL(existing.Source); regName != "" {
+			req.Registry = regName
+		}
+	}
 }
 
 // pinToFrozenLock pins the install to the lockfile: the entry must exist and its

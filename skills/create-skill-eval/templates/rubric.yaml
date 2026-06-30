@@ -1,0 +1,50 @@
+# rubric.yaml — the FROZEN LLM-as-judge rubric.
+#
+# The outer-loop agent is the judge. This file is the only thing that keeps that
+# judge honest across rounds: it is written once, before the loop, and never
+# edited again. The judge reads each captured session verbatim
+# (`qvr audit export --session <id>`) and scores every dimension ∈ [0,1] strictly
+# against the anchors below — no improvising new criteria mid-loop.
+#
+# The deterministic evaluator (eval.py) already covers exact correctness. The
+# rubric is for what a script cannot cheaply check: did the run get there the
+# right way, cheaply, without flailing.
+
+skill: <inner-skill-name>
+version: 1                      # bump ONLY if you intentionally restart the loop
+scale: [0, 1]                  # every dimension is scored on this continuous scale
+
+dimensions:
+  - id: correctness_method
+    weight: 0.4
+    question: >-
+      Did the run follow the skill's documented procedure to reach the answer,
+      rather than guessing or hardcoding the expected output?
+    anchors:
+      "1.0": "Followed every documented step in order; answer derived, not guessed."
+      "0.5": "Reached a plausible answer but skipped or reordered documented steps."
+      "0.0": "Ignored the skill, or fabricated/hardcoded the answer."
+
+  - id: robustness
+    weight: 0.3
+    question: >-
+      Did the run handle the tricky part of this input (edge chars, unicode,
+      empties) the way the skill intends, or did it get lucky?
+    anchors:
+      "1.0": "Handled the edge case explicitly and correctly."
+      "0.5": "Got the right surface result but for a shaky/incidental reason."
+      "0.0": "Mishandled the edge case."
+
+  - id: economy
+    weight: 0.3
+    question: >-
+      Did the run reach the answer without wasted turns, tool calls, or detours?
+      (Cross-check against the cost numbers from `qvr audit sessions`.)
+    anchors:
+      "1.0": "Direct: minimal turns/tools, no backtracking."
+      "0.5": "Some avoidable detours but converged."
+      "0.0": "Flailed: many wasted turns/tools relative to peers."
+
+# Aggregate score = sum(weight_i * dimension_score_i). Annotate it as one number:
+#   qvr audit annotate <session> --skill <skill> --metric rubric --score <agg> --grader llm-judge
+aggregate: weighted_sum
