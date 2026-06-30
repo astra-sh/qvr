@@ -49,6 +49,17 @@ type MetricsFilter struct {
 	Dirs  []string
 	Since *time.Time
 	Until *time.Time
+	// Activation scopes to genuine activations ("tool") vs path-signal
+	// file-touches ("path"); empty = both. See derive.SkillActivationKey.
+	Activation string
+	// Metric selects which BYO-grader score to fold into content cohorts
+	// (SkillContentRollup); empty defaults to "score". See migration 0010.
+	Metric string
+	// ByAgent splits each content cohort by the agent that ran it, yielding the
+	// {version x agent} matrix SkillContentRollup needs for per-agent skill
+	// optimization (codex vs claude want different skills). When false, agents
+	// collapse into one row per version (the "all agents" aggregate).
+	ByAgent bool
 }
 
 // SQL fragments shared by every aggregation. skillVersionExpr yields the
@@ -61,7 +72,41 @@ const (
 	versionsSep      = "\x1f"
 	skillNameExpr    = `json_extract(attributes, '$."skill.name"')`
 	skillVersionExpr = `COALESCE(json_extract(attributes, '$."skill.version"'), '')`
-	skillVersionsAgg = `GROUP_CONCAT(NULLIF(` + skillVersionExpr + `, ''), char(31))`
+	// The evolution loop's cuts. These mirror the writer-side keys in the derive
+	// package (content_hash = derive.SkillContentHashKey, commit = the proven
+	// skill.commit, activation = derive.SkillActivationKey).
+	skillCommitExpr = `COALESCE(json_extract(attributes, '$."skill.commit"'), '')`
+	// skillVersionCoordExpr is the evolution loop's DURABLE comparison
+	// coordinate, ordered so the SAME installed version cohorts together no
+	// matter which agent ran it (cross-agent 1:1 version parity is the point):
+	//
+	//  1. skill.subtree_hash — the PROVEN canonical digest of the skill's tree.
+	//     It is immutable (keyed by the worktree commit) and identical across
+	//     agents and load mechanisms (a claude Skill-tool load via symlink and a
+	//     codex SKILL.md read via the store path both enrich to the SAME
+	//     subtree_hash), so it is the right cohort key whenever identity proved.
+	//  2. skill.commit — the proven git sha, for the narrow path-only case where
+	//     a store-worktree path recovered a sha7 but the skill is no longer in
+	//     any lock, so no subtree_hash exists. It lives in the recorded bytes and
+	//     survives the skill being uninstalled.
+	//  3. skill.content_hash — the run-time body digest, the fallback for an
+	//     UNPROVEN (local/edited, no-worktree) load. It is necessarily
+	//     agent-specific (each agent captures the body differently: claude's
+	//     injection strips frontmatter, codex's read wraps it in exec output), so
+	//     it only cohorts within one agent — which is all an unproven local skill
+	//     can offer. Preferring the proven coordinates above it is what stops two
+	//     agents running the same PUBLISHED version from splitting into separate
+	//     cohorts.
+	//
+	// Coalescing here — at the read layer, where the consumer's intent ("which
+	// version ran") is explicit — keeps the writer-side skill.content_hash
+	// semantically pure (a content digest, never a git sha or tree hash).
+	skillVersionCoordExpr = `COALESCE(NULLIF(json_extract(attributes, '$."skill.subtree_hash"'), ''), ` +
+		`NULLIF(json_extract(attributes, '$."skill.commit"'), ''), ` +
+		`NULLIF(json_extract(attributes, '$."skill.content_hash"'), ''), '')`
+	skillOutcomeExpr    = `COALESCE(json_extract(attributes, '$."qvr.outcome"'), '')`
+	skillActivationExpr = `COALESCE(json_extract(attributes, '$."skill.activation"'), '')`
+	skillVersionsAgg    = `GROUP_CONCAT(NULLIF(` + skillVersionExpr + `, ''), char(31))`
 	// Every token rollup joins session_meta aliased m for the per-session
 	// totals. tokenSessionsAgg counts the sessions that actually reported
 	// usage (either side), the honest denominator for a token cut.
@@ -128,6 +173,10 @@ func skillSpanWhere(f *MetricsFilter) ([]string, []any) {
 	if f.Skill != "" {
 		clauses = append(clauses, skillNameExpr+" = ?")
 		args = append(args, f.Skill)
+	}
+	if f.Activation != "" {
+		clauses = append(clauses, skillActivationExpr+" = ?")
+		args = append(args, f.Activation)
 	}
 	if len(f.Dirs) > 0 {
 		// Spans have no working_directory; scope through the session's raw rows
@@ -512,10 +561,26 @@ type SkillVersionUsage struct {
 	// sessions reported no usage (n/a).
 	InputTokens  *int64
 	OutputTokens *int64
+	// BYO-grader quality folded from session_score (migration 0010), keyed by this
+	// (ref, commit) coordinate. Graded is how many of this version's runs carry a
+	// score for the queried metric (default "score"); MeanScore is their mean, nil
+	// when none are graded — never 0.0, since 0 is a real failing grade. The
+	// lineage sibling of SkillContentCohort's score; see store.versionScores.
+	Graded    int64
+	MeanScore *float64
 }
 
 // SkillVersionRollup groups one skill's SKILL spans by the version identity
 // they carried, newest-first by first-fired time. f.Skill is required.
+//
+// This is the GIT-LINEAGE projection: it keys on (ref, commit) and joins token
+// totals, feeding the UI version graph that walks commit ancestry. It is a
+// deliberate sibling of SkillContentRollup, not a duplicate — that one is the
+// CONTENT projection (keyed on the content hash that changes on a `qvr edit`
+// without a commit, with a run-status breakdown instead of tokens). Two
+// projections of one fact set; if a third caller wants both keys at once,
+// collapse them into a single rollup that returns both rather than adding a
+// third method.
 func (s *sqliteStore) SkillVersionRollup(ctx context.Context, f *MetricsFilter) ([]*SkillVersionUsage, error) {
 	if f == nil || f.Skill == "" {
 		return nil, fmt.Errorf("store: skill version rollup: Skill is required")
@@ -575,5 +640,144 @@ func (s *sqliteStore) SkillVersionRollup(ctx context.Context, f *MetricsFilter) 
 		v.OutputTokens = nullInt64Ptr(tout)
 		out = append(out, v)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Fold in BYO-grader scores keyed by the (ref, commit) coordinate — a separate
+	// query + Go merge, the same shape SkillContentRollup uses for its content
+	// cohorts. An ungraded version keeps MeanScore nil (never a fabricated 0.0).
+	scores, err := s.versionScores(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range out {
+		if a := scores[verCohortKey(v.Ref, v.Commit)]; a != nil && a.count > 0 {
+			mean := a.sum / float64(a.count)
+			v.Graded, v.MeanScore = a.count, &mean
+		}
+	}
+	return out, nil
+}
+
+// SkillContentCohort is one skill's SKILL spans grouped by the evolution loop's
+// durable comparison coordinate (skillVersionCoordExpr): the OBSERVED content
+// hash when one was captured, else the proven commit sha when content was
+// unobservable at ingest. Spans with neither coordinate collapse into the single
+// ContentHash == "" cohort, surfaced as a named unknown rather than silently
+// dropped, so the loop sees how much of its evidence is uncoordinated. The status
+// counts are a run-status breakdown (NOT a quality grade — see derive.OutcomeKey);
+// UnknownStatus is the spans whose run never reported a status.
+type SkillContentCohort struct {
+	ContentHash   string `json:"contentHash"`     // content hash, or proven commit; "" = unknown cohort
+	Agent         string `json:"agent,omitempty"` // set only under f.ByAgent — the agent that ran this cell
+	Ref           string `json:"ref"`             // representative skill.version for display, may be ""
+	Commit        string `json:"commit"`          // representative skill.commit for display, may be ""
+	Activations   int64  `json:"activations"`     // SKILL spans in scope (subject to f.Activation)
+	Sessions      int64  `json:"sessions"`
+	FirstFiredMs  int64  `json:"firstFiredMs"`
+	LastFiredMs   int64  `json:"lastFiredMs"`
+	Success       int64  `json:"success"`
+	Failure       int64  `json:"failure"`
+	Blocked       int64  `json:"blocked"`
+	UnknownStatus int64  `json:"unknownStatus"`
+	// BYO-grader quality (migration 0010). Graded is how many of this cohort's
+	// runs carry a score for the queried metric (the honest denominator);
+	// MeanScore is their mean, nil when none are graded — never 0.0, since 0 is a
+	// real failing grade. See SkillContentRollup and store.contentScores.
+	Graded    int64    `json:"graded"`
+	MeanScore *float64 `json:"meanScore"`
+	// Cost: tokens over the sessions this cohort's runs fired in (session-attributed
+	// exposure, NOT exclusive — a session that fired two skills counts its tokens
+	// under both; see the attribution note atop this file). nil sides = no usage
+	// reported (n/a), never a fabricated 0. See store.contentTokens.
+	InputTokens  *int64 `json:"inputTokens"`
+	OutputTokens *int64 `json:"outputTokens"`
+	// Pareto marks a cell not dominated on (quality up, tokens down) within its
+	// agent group — a non-authoritative frontier hint set by the render layer, not
+	// a winner verdict. Only cells carrying both a score and a token cost are
+	// eligible. See cmd.markPareto.
+	Pareto bool `json:"pareto,omitempty"`
+}
+
+// SkillContentRollup groups one skill's SKILL spans by their durable version
+// coordinate (observed content hash, else proven commit — skillVersionCoordExpr),
+// newest-first by first-fired time, with a run-status breakdown per cohort.
+// f.Skill is required; f.Activation scopes to genuine activations. This
+// is the substrate behind `qvr audit compare`: it hands back comparable,
+// content-pinned cohorts and their status deltas — it does NOT judge which is
+// better (that stays with the caller). It is the CONTENT projection sibling of
+// SkillVersionRollup (the git-lineage one) — see that method's note.
+func (s *sqliteStore) SkillContentRollup(ctx context.Context, f *MetricsFilter) ([]*SkillContentCohort, error) {
+	if f == nil || f.Skill == "" {
+		return nil, fmt.Errorf("store: skill content rollup: Skill is required")
+	}
+	where, args := skillSpanWhereSQL(f)
+	// agentCol is a constant '' when collapsing agents (valid without a GROUP BY
+	// term), and the real agent_name when f.ByAgent splits the {version x agent}
+	// matrix — keeping the scanned column count fixed either way.
+	agentCol, agentGroup := "'' AS agent", ""
+	if f.ByAgent {
+		agentCol, agentGroup = "agent_name AS agent", ", agent_name"
+	}
+	q := `SELECT ` + skillVersionCoordExpr + ` AS chash,
+	  ` + agentCol + `,
+	  MAX(` + skillVersionExpr + `) AS ref,
+	  MAX(` + skillCommitExpr + `) AS commit_sha,
+	  COUNT(*),
+	  COUNT(DISTINCT session_id),
+	  MIN(start_ms),
+	  MAX(start_ms),
+	  SUM(CASE WHEN ` + skillOutcomeExpr + ` = 'success' THEN 1 ELSE 0 END),
+	  SUM(CASE WHEN ` + skillOutcomeExpr + ` = 'failure' THEN 1 ELSE 0 END),
+	  SUM(CASE WHEN ` + skillOutcomeExpr + ` = 'blocked' THEN 1 ELSE 0 END),
+	  SUM(CASE WHEN ` + skillOutcomeExpr + ` NOT IN ('success','failure','blocked') THEN 1 ELSE 0 END)
+	FROM spans ` + where + `
+	GROUP BY chash` + agentGroup + `
+	ORDER BY MIN(start_ms) DESC, agent ASC`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("store: skill content rollup: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*SkillContentCohort
+	for rows.Next() {
+		c := &SkillContentCohort{}
+		if err := rows.Scan(&c.ContentHash, &c.Agent, &c.Ref, &c.Commit, &c.Activations,
+			&c.Sessions, &c.FirstFiredMs, &c.LastFiredMs,
+			&c.Success, &c.Failure, &c.Blocked, &c.UnknownStatus); err != nil {
+			return nil, fmt.Errorf("store: scan content cohort: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Fold in BYO-grader scores (migration 0010) and token cost — separate queries
+	// + Go merge keep the status rollup above untouched, the same pattern
+	// SkillVersionRollup uses for tokens. Both key by the cohort's (chash, agent)
+	// so a {version x agent} cell gets its own grade and cost; a cohort with no
+	// graded run keeps MeanScore nil, and token-less sessions keep nil sides.
+	scores, err := s.contentScores(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := s.contentTokens(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range out {
+		key := cohortKey(c.ContentHash, c.Agent)
+		if a := scores[key]; a != nil && a.count > 0 {
+			mean := a.sum / float64(a.count)
+			c.Graded, c.MeanScore = a.count, &mean
+		}
+		if tk := tokens[key]; tk != nil {
+			c.InputTokens, c.OutputTokens = tk.in, tk.out
+		}
+	}
+	return out, nil
 }

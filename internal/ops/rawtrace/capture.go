@@ -39,6 +39,8 @@ type Store interface {
 	ReplaceSourceRawTraces(ctx context.Context, agent, sourcePath string, rows []*ops.RawTrace) error
 	PutLockSnapshots(ctx context.Context, sessionID uuid.UUID, rows []*store.LockSnapshotRow) error
 	GetLockSnapshots(ctx context.Context, sessionID uuid.UUID) (map[string]*store.LockSnapshotRow, error)
+	IdentityForCommit(ctx context.Context, commit string) (*store.SkillCommitIdentity, error)
+	IdentityForContentHash(ctx context.Context, contentHash string) (*store.SkillCommitIdentity, error)
 }
 
 // Result reports what a single ingest stored, for diagnostics/tests.
@@ -56,10 +58,13 @@ type Result struct {
 // `qvr audit rederive`: ingest runs derivation inline on new lines, but
 // sessions captured before a deriver existed (or by an older deriver version)
 // keep stale/empty projections until this replays them. It returns the span
-// count and whether the session used any skill. It is a no-op that returns
-// (0, false, nil) when the agent has no registered deriver — it never wipes a
-// projection in that case.
-func Rederive(ctx context.Context, s Store, sessionID uuid.UUID) (int, bool, error) {
+// count, whether the session used any skill, and whether a deriver actually
+// handled it (derived). It is a no-op that returns (0, false, false, nil) when
+// no deriver matches the session's dominant agent — it never wipes a projection
+// in that case. Callers use `derived` to tell "skipped, no deriver" apart from
+// "derived, zero spans" without re-implementing the dominant-agent dispatch that
+// DeriveSession owns.
+func Rederive(ctx context.Context, s Store, sessionID uuid.UUID) (spans int, hasSkill, derived bool, err error) {
 	return persistDerivation(ctx, s, sessionID)
 }
 
@@ -69,21 +74,21 @@ func Rederive(ctx context.Context, s Store, sessionID uuid.UUID) (int, bool, err
 // new lines) is what lets turns that span multiple ingest passes resolve
 // correctly; span ids are deterministic, so the replace is idempotent. It also
 // reports whether any derived span is skill-attributed.
-func persistDerivation(ctx context.Context, s Store, sessionID uuid.UUID) (int, bool, error) {
+func persistDerivation(ctx context.Context, s Store, sessionID uuid.UUID) (int, bool, bool, error) {
 	rows, err := s.QueryRawTraces(ctx, &store.RawTraceFilter{
 		SessionID: &sessionID,
 		Sources:   []string{ops.RawSourceTranscript},
 	})
 	if err != nil {
-		return 0, false, err
+		return 0, false, false, err
 	}
 	d, err := derive.DeriveSession(rows)
 	if err != nil {
 		// No registered deriver for this agent is not an error worth failing on.
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	if d == nil {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
 	// Promote full skill identity (registry/commit/version/hash) from the
 	// project's qvr.lock onto skill-attributed spans before they're persisted,
@@ -94,6 +99,28 @@ func persistDerivation(ctx context.Context, s Store, sessionID uuid.UUID) (int, 
 	// derivation that proves identity freezes it.
 	snap := loadLockSnapshot(ctx, s, sessionID)
 	derive.EnrichSkillIdentity(d.Spans, rows, snap)
+	// Escalate any off-checkout span (commit-only from codex, or body-digest-only
+	// from claude) to the full identity another session already proved for that
+	// same run-immutable evidence — lock-independent, so the same version labels
+	// uniformly no matter what is checked out now.
+	idToEntry := func(id *store.SkillCommitIdentity) *model.LockEntry {
+		if id == nil {
+			return nil
+		}
+		return &model.LockEntry{
+			Registry: id.Registry, Ref: id.Ref, Commit: id.Commit,
+			SubtreeHash: id.SubtreeHash, Source: id.Source, Canonical: id.Canonical,
+		}
+	}
+	derive.EscalateUnresolvedIdentity(d.Spans,
+		func(commit string) *model.LockEntry {
+			id, _ := s.IdentityForCommit(ctx, commit)
+			return idToEntry(id)
+		},
+		func(contentHash string) *model.LockEntry {
+			id, _ := s.IdentityForContentHash(ctx, contentHash)
+			return idToEntry(id)
+		})
 	// Harvest on every pass: a skill first proven in a later continuation of
 	// an already-snapshotted session still needs freezing. Write-once per
 	// (session, skill) is enforced by the store's INSERT OR IGNORE.
@@ -134,9 +161,10 @@ func persistDerivation(ctx context.Context, s Store, sessionID uuid.UUID) (int, 
 		Skills:          d.Meta.Skills,
 		TokensIn:        d.Meta.TokensIn,
 		TokensOut:       d.Meta.TokensOut,
+		Outcome:         d.Meta.Outcome,
 		DeriverVersion:  derive.Version,
 	}
-	return len(out), hasSkill, s.ReplaceSessionDerivation(ctx, meta, out)
+	return len(out), hasSkill, true, s.ReplaceSessionDerivation(ctx, meta, out)
 }
 
 // loadLockSnapshot reads a session's frozen identities as the lock-entry map

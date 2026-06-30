@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/astra-sh/qvr/internal/ops/rawtrace"
@@ -28,6 +30,11 @@ type Options struct {
 	KeepAll bool
 	// DryRun walks and stat-diffs but persists nothing — no rows, no ledger.
 	DryRun bool
+	// Cwd scopes the scan to sessions whose recorded working directory is at or
+	// under this path — so capturing one project's cohort can't pull in stray
+	// sessions from elsewhere. A non-matching (or cwd-less) file is skipped
+	// WITHOUT a ledger entry, so a later unscoped scan still picks it up.
+	Cwd string
 }
 
 // AgentReport is one agent's scan outcome.
@@ -83,6 +90,28 @@ func Scan(ctx context.Context, s Store, opts Options) (*Report, error) {
 	return rep, nil
 }
 
+// statSettled reports whether the ledger has already settled this file under a
+// policy at least as broad as the current scan — i.e. the stat gate may skip
+// re-examining it. An 'error' outcome is never settled: a transient ingest
+// failure must retry next scan even when the file hasn't changed
+// (document-layout files are rewritten atomically, so a failed one may never
+// change again). A file the ledger only *skipped* (skill-less under the gate)
+// is NOT settled once --keep-all widens the criteria — re-examine it so a
+// session a prior plain discover skipped stays recoverable instead of being
+// silenced by the stat match.
+func statSettled(prev *store.ScannedFile, c candidate, opts Options) bool {
+	if prev == nil || prev.Status == store.ScanStatusError {
+		return false
+	}
+	if prev.Size != c.size || prev.MtimeMs != c.mtimeMs {
+		return false
+	}
+	if opts.KeepAll && prev.Status == store.ScanStatusSkipped {
+		return false
+	}
+	return true
+}
+
 // scanStore scans one agent's store.
 func scanStore(ctx context.Context, s Store, st SessionStore, opts Options) (*AgentReport, error) {
 	ar := &AgentReport{Agent: st.Agent}
@@ -106,12 +135,7 @@ func scanStore(ctx context.Context, s Store, st SessionStore, opts Options) (*Ag
 		if err := ctx.Err(); err != nil {
 			return ar, err
 		}
-		// The stat gate never caches an error outcome: a transient ingest
-		// failure must retry next scan even when the file hasn't changed
-		// (document-layout files are rewritten atomically, so a failed one
-		// may never change again).
-		if prev := ledger[c.path]; prev != nil && prev.Status != store.ScanStatusError &&
-			prev.Size == c.size && prev.MtimeMs == c.mtimeMs {
+		if statSettled(ledger[c.path], c, opts) {
 			ar.Unchanged++
 			continue
 		}
@@ -144,8 +168,7 @@ func scanSQLiteStore(ctx context.Context, s Store, st SessionStore, candidates [
 			return err
 		}
 		c = foldWALStat(c)
-		if prev := ledger[c.path]; prev != nil && prev.Status != store.ScanStatusError &&
-			prev.Size == c.size && prev.MtimeMs == c.mtimeMs {
+		if statSettled(ledger[c.path], c, opts) {
 			ar.Unchanged++
 			continue
 		}
@@ -221,9 +244,48 @@ func foldWALStat(c candidate) candidate {
 	return c
 }
 
+// cwdUnder reports whether the recorded working dir is at or under the scope
+// dir. Both are canonicalized (symlinks resolved) before comparison so a macOS
+// "/tmp/proj" scope matches a recorded "/private/tmp/proj" (and vice versa);
+// matching is then exact or a path-segment prefix, so "/p/proj" scopes
+// "/p/proj" and "/p/proj/sub" but not "/p/proj-other". An empty recorded cwd
+// never matches — a scoped scan excludes sessions it can't place.
+func cwdUnder(recorded, scope string) bool {
+	if recorded == "" {
+		return false
+	}
+	recorded = canonicalDir(recorded)
+	scope = canonicalDir(scope)
+	return recorded == scope || strings.HasPrefix(recorded, scope+string(filepath.Separator))
+}
+
+// canonicalDir resolves symlinks in a path so /tmp and /private/tmp compare
+// equal on macOS. When the full path doesn't exist (a since-removed project, or
+// a subdir below an existing root), it canonicalizes the deepest existing
+// ancestor and re-appends the rest — so /tmp/gone still maps to
+// /private/tmp/gone rather than staying uncanonicalized.
+func canonicalDir(p string) string {
+	p = filepath.Clean(p)
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	parent := filepath.Dir(p)
+	if parent == p { // reached the root; nothing left to resolve
+		return p
+	}
+	return filepath.Join(canonicalDir(parent), filepath.Base(p))
+}
+
 // scanOneFile ingests one new/changed file and records the outcome in the
 // ledger. Ingest errors are per-file (counted, never fatal to the scan).
 func scanOneFile(ctx context.Context, s Store, st SessionStore, c candidate, opts Options, ar *AgentReport) {
+	// --cwd scope: skip files outside the requested project WITHOUT touching the
+	// ledger, so an unscoped scan later still considers them. A file whose cwd
+	// can't be determined is excluded too — a scoped scan wants only the project
+	// it named, not unknowns.
+	if opts.Cwd != "" && !cwdUnder(rawtrace.SniffWorkingDir(c.path), opts.Cwd) {
+		return
+	}
 	res, err := rawtrace.Ingest(ctx, s, rawtrace.IngestParams{
 		Agent:     st.Agent,
 		Path:      c.path,

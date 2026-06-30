@@ -18,9 +18,8 @@ var (
 )
 
 var auditRederiveCmd = &cobra.Command{
-	Use:    "rederive",
-	Hidden: true, // low-level plumbing — see `qvr audit --help`
-	Short:  "Regenerate persisted spans from captured raw traces",
+	Use:   "rederive",
+	Short: "Regenerate persisted spans from captured raw traces",
 	Long: `Replay the span projection over already-captured raw traces and persist
 the result, so the derived views ('qvr audit logs', the UI timeline) reflect the
 current deriver. Capture derives spans inline as it tails a transcript; this
@@ -52,6 +51,7 @@ func runAuditRederive(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	derive.ConfigureOutcome(cfg)
 
 	if !auditDBExists(cfg) {
 		if outputFormat == "json" {
@@ -74,15 +74,20 @@ func runAuditRederive(cmd *cobra.Command, args []string) error {
 
 	var sum rederiveSummary
 	for _, sess := range sessions {
-		// A session whose agent has no deriver can't yield spans; skip it
-		// (rather than replacing its spans with an empty set) and report it.
-		if _, ok := derive.Get(sess.AgentName); !ok {
-			sum.SkippedNoDB++
-			continue
-		}
-		n, _, err := rawtrace.Rederive(cmd.Context(), s, sess.SessionID)
+		// Whether a deriver handles a session depends on the DOMINANT agent of its
+		// rows, which DeriveSession resolves — not the RawSession's recorded
+		// AgentName, which can be a second agent a stale writer injected. So let the
+		// rederive itself report `derived`: pre-filtering on sess.AgentName would
+		// skip (and never backfill) a session whose dominant agent IS registered.
+		// Rederive is a safe no-op when no deriver matches, so an unconditional call
+		// can't wipe a projection.
+		n, _, derived, err := rawtrace.Rederive(cmd.Context(), s, sess.SessionID)
 		if err != nil {
 			printer.Warning(fmt.Sprintf("skip session %s: %v", sess.SessionID, err))
+			continue
+		}
+		if !derived {
+			sum.SkippedNoDB++
 			continue
 		}
 		sum.Sessions++

@@ -28,8 +28,10 @@ type OpenOptions struct {
 	// locked". Defaults to 5000ms.
 	BusyTimeoutMs int
 
-	// ReadOnly flips the connection string to immutable=1 + query_only.
-	// Used by read-only consumers (e.g. `qvr audit logs`).
+	// ReadOnly opens a lock-light reader: query_only(1) (no user-table writes)
+	// and — crucially — it does NOT assert journal_mode(wal), so a reader never
+	// contends for the write lock a concurrent writer holds. Used by read-only
+	// consumers (e.g. `qvr audit logs`, `compare`, `sessions`).
 	ReadOnly bool
 }
 
@@ -75,17 +77,24 @@ func Open(ctx context.Context, opts OpenOptions) (Store, error) {
 }
 
 // buildDSN builds the modernc.org/sqlite connection string with the
-// production pragma set: foreign keys enforced, WAL journal mode for
-// concurrent readers, configurable busy timeout, and synchronous=normal
-// (safe with WAL, faster than full).
+// production pragma set: foreign keys enforced, a configurable busy timeout,
+// and synchronous=normal (safe with WAL, faster than full).
+//
+// journal_mode(wal) is asserted only on a writable open. WAL is a persistent
+// property of the file, so once a writer sets it every later connection — reader
+// included — inherits it without issuing the pragma. Re-asserting it needs a
+// write lock, so issuing it from a read-only consumer pointlessly contends with
+// a concurrent writer (e.g. `qvr audit discover`) and surfaces the spurious
+// "database is locked" that then pollutes a session's derived outcome.
 func buildDSN(opts OpenOptions) string {
 	q := url.Values{}
 	q.Add("_pragma", "foreign_keys(1)")
-	q.Add("_pragma", "journal_mode(wal)")
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", opts.BusyTimeoutMs))
 	q.Add("_pragma", "synchronous(normal)")
 	if opts.ReadOnly {
 		q.Add("_pragma", "query_only(1)")
+	} else {
+		q.Add("_pragma", "journal_mode(wal)")
 	}
 	return "file:" + opts.Path + "?" + q.Encode()
 }
@@ -158,7 +167,6 @@ func (s *sqliteStore) Stats(ctx context.Context) (*StoreStats, error) {
 	counts := map[string]*int64{
 		"SELECT COUNT(*) FROM raw_traces":                   &out.RawTraceCount,
 		"SELECT COUNT(DISTINCT session_id) FROM raw_traces": &out.SessionCount,
-		"SELECT COUNT(*) FROM self_audits":                  &out.SelfAuditCount,
 	}
 	for q, dst := range counts {
 		if err := s.db.QueryRowContext(ctx, q).Scan(dst); err != nil {

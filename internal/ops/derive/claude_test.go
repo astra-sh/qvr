@@ -90,6 +90,41 @@ func TestClaudeDerive_TurnToolSkill(t *testing.T) {
 	wantMeta(t, d.Meta, "claude", "add a feature", "claude-opus-4-8", 1, 1, "code-review")
 }
 
+// TestClaudeDerive_SkillPathIORemainsTool pins Bug A: on claude the first-class
+// Skill tool is the only load signal, so ordinary Bash/Read/Edit calls that
+// merely touch a skill's source files — catting its SKILL.md, git-adding its
+// dir — must stay plain TOOL spans and carry NO skill attribution. Otherwise
+// authoring I/O inflates a skill's per-version activity with calls that never
+// used it.
+func TestClaudeDerive_SkillPathIORemainsTool(t *testing.T) {
+	sid := uuid.MustParse("550e8400-e29b-41d4-a716-446655440009")
+	rows := []*ops.RawTrace{
+		row(sid, 0, `{"type":"user","timestamp":"2026-06-24T00:00:00.000Z","message":{"role":"user","content":"edit the skill"}}`),
+		row(sid, 1, `{"type":"assistant","timestamp":"2026-06-24T00:00:01.000Z","message":{"role":"assistant","model":"claude-opus-4-8","content":[`+
+			`{"type":"tool_use","id":"t_cat","name":"Bash","input":{"command":"cat skills/evolve-skill/SKILL.md"}},`+
+			`{"type":"tool_use","id":"t_edit","name":"Edit","input":{"file_path":"skills/evolve-skill/SKILL.md"}},`+
+			`{"type":"tool_use","id":"t_mk","name":"Bash","input":{"command":"mkdir -p $REG/skills/clean-skill"}}]}}`),
+	}
+
+	d, err := derive.DeriveSession(rows)
+	if err != nil {
+		t.Fatalf("derive: %v", err)
+	}
+	for i := range d.Spans {
+		sp := &d.Spans[i]
+		if sp.Kind == derive.KindSkill {
+			t.Errorf("skill-path I/O lifted to a SKILL span: %+v", sp.Attributes)
+		}
+		if name, ok := sp.Attributes["skill.name"]; ok {
+			t.Errorf("%s carries skill.name=%v — authoring I/O must not be attributed", sp.Name, name)
+		}
+	}
+	// And no phantom skill leaks into the session rollup.
+	if len(d.Meta.Skills) != 0 {
+		t.Errorf("meta skills = %v, want none (no Skill tool was invoked)", d.Meta.Skills)
+	}
+}
+
 // wantMeta asserts the unified session meta's core fields plus valid time
 // bounds and a single-skill list.
 func wantMeta(t *testing.T, m derive.SessionMeta, agent, title, model string, turns, tools int64, skill string) {

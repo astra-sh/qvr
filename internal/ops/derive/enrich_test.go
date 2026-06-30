@@ -105,7 +105,7 @@ func TestEnrichSkillIdentity_FromProjectLock(t *testing.T) {
 		"skill.name":         "code-review",
 		"skill.registry":     "raks",
 		"skill.version":      "v0.2.0",
-		"skill.commit":       "94e539be7d6a01774d723a7c25513af0f070de7b",
+		"skill.commit":       "94e539b", // canonical 7-char short SHA, not the full lock commit
 		"skill.subtree_hash": "sha256:6d478",
 		"skill.source":       "https://github.com/raks/skills.git",
 	}

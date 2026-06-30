@@ -99,6 +99,10 @@ func runRoot(t *testing.T, stdin []byte, args ...string) (string, string, error)
 		ingestAgent, ingestSession, ingestCwd = "", "", ""
 		discoverAgents, discoverSince = nil, ""
 		discoverKeepAll, discoverDryRun = false, false
+		logsSkill, logsStatus, logsActivation, logsAgent, logsKind, logsSession = "", "", "", "", "", ""
+		logsVersions = nil
+		compareVersions, compareSince = nil, ""
+		compareIncludePath = false
 	})
 	return stdout, stderr, err
 }
@@ -173,9 +177,31 @@ func TestAudit_SessionsAndExport(t *testing.T) {
 		t.Errorf("sessions output missing canonical agent: %s", stdout)
 	}
 
+	// The DEFAULT export is the derived span tree — one span JSON per line,
+	// carrying the qvr span shape (Kind), not the agent's native 'type'. Run it
+	// FIRST: cobra flag vars persist across in-process runRoot calls, so a later
+	// --raw run would leave exportRaw set for a subsequent default run.
+	spansOut := filepath.Join(t.TempDir(), "spans.jsonl")
+	if _, _, err := runRoot(t, nil, "audit", "export", "-o", spansOut); err != nil {
+		t.Fatalf("audit export (spans): %v", err)
+	}
+	sdata, err := os.ReadFile(spansOut)
+	if err != nil {
+		t.Fatalf("read spans export: %v", err)
+	}
+	var span map[string]any
+	first, _, _ := strings.Cut(strings.TrimSpace(string(sdata)), "\n")
+	if err := json.Unmarshal([]byte(first), &span); err != nil {
+		t.Fatalf("span export line not JSON: %v", err)
+	}
+	if span["Kind"] == nil {
+		t.Error("default export should emit derived spans (missing Kind)")
+	}
+
+	// --raw exports the verbatim transcript lines (the pre-spans behavior).
 	out := filepath.Join(t.TempDir(), "trail.jsonl")
-	if _, _, err := runRoot(t, nil, "audit", "export", "--source", "transcript", "-o", out); err != nil {
-		t.Fatalf("audit export: %v", err)
+	if _, _, err := runRoot(t, nil, "audit", "export", "--raw", "--source", "transcript", "-o", out); err != nil {
+		t.Fatalf("audit export --raw: %v", err)
 	}
 	data, err := os.ReadFile(out)
 	if err != nil {
@@ -206,6 +232,37 @@ func TestAudit_LogsCommand(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "claude") {
 		t.Errorf("logs missing agent: %s", stdout)
+	}
+}
+
+// TestAudit_CompareCommand wires `qvr audit compare`: the captured Skill
+// activation has no on-disk evidence, so it carries no content version and must
+// surface as the explicit unknown cohort (never silently dropped), with no
+// coordinated cohorts.
+func TestAudit_CompareCommand(t *testing.T) {
+	_, _ = isolatedHome(t, true)
+	captureSession(t)
+
+	stdout, stderr, err := runRoot(t, nil, "audit", "compare", "code-review", "--output", "json")
+	if err != nil {
+		t.Fatalf("audit compare: err=%v stderr=%q", err, stderr)
+	}
+	var resp struct {
+		Skill              string `json:"skill"`
+		Cohorts            []any  `json:"cohorts"`
+		UnknownActivations int64  `json:"unknownActivations"`
+	}
+	if e := json.Unmarshal([]byte(stdout), &resp); e != nil {
+		t.Fatalf("decode compare json: %v\n%s", e, stdout)
+	}
+	if resp.Skill != "code-review" {
+		t.Errorf("skill = %q, want code-review", resp.Skill)
+	}
+	if len(resp.Cohorts) != 0 {
+		t.Errorf("an uncoordinated run must yield no content cohorts, got %d", len(resp.Cohorts))
+	}
+	if resp.UnknownActivations < 1 {
+		t.Errorf("the uncoordinated activation must surface in the unknown cohort, got %d", resp.UnknownActivations)
 	}
 }
 

@@ -2,6 +2,8 @@ package derive
 
 import (
 	"encoding/json"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/astra-sh/qvr/internal/ops"
@@ -46,6 +48,7 @@ type claudeLine struct {
 	Timestamp string          `json:"timestamp"`
 	GitBranch string          `json:"gitBranch"`
 	IsMeta    bool            `json:"isMeta"`
+	AgentID   string          `json:"agentId"` // set on subagent (sidechain) lines; "" on the main agent's
 	Message   json.RawMessage `json:"message"`
 }
 
@@ -67,6 +70,7 @@ type claudeUsage struct {
 type claudeBlock struct {
 	Type      string          `json:"type"`
 	Text      string          `json:"text"`
+	Thinking  string          `json:"thinking"` // extended-thinking block body (empty when encrypted)
 	Name      string          `json:"name"`
 	ID        string          `json:"id"`
 	Input     map[string]any  `json:"input"`
@@ -79,7 +83,7 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
-	w := &turnWalk{sessionID: rows[0].SessionID.String()}
+	sessionID := rows[0].SessionID.String()
 	out := &Derivation{}
 	// Claude Code writes one JSONL line per content block of an API message,
 	// repeating the same message.id AND the same usage object on every line
@@ -87,6 +91,44 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 	// count once per message id or every token surface inflates ~2×.
 	usageSeen := map[string]bool{}
 
+	// Partition: the main agent's lines carry no agentId; each spawned subagent's
+	// lines are tagged with its agentId. Claude Code writes a subagent to a
+	// sibling subagents/agent-<id>.jsonl that ingests under the SAME session id
+	// (its lines carry the parent's sessionId), so deriving everything in one
+	// flat walk would splice a subagent's turns into the main timeline. Instead
+	// each subagent becomes its own nested subtree under the Agent tool that
+	// spawned it — which is also what finally surfaces a skill used only inside a
+	// subagent (it now lands in the session's spans + meta).
+	mainRows, subOrder, subRows := partitionClaudeAgents(rows)
+
+	cp := profileFor("claude")
+	w := &turnWalk{sessionID: sessionID, agentLabel: cp.model, rootName: cp.rootName, integration: cp.integration}
+	deriveClaudeRows(w, mainRows, usageSeen, &out.Meta)
+	out.Spans = w.spans
+
+	links := claudeAgentLinks(out.Spans, mainRows, subOrder)
+	for _, agentID := range subOrder {
+		link := links[agentID]
+		sw := &turnWalk{
+			sessionID:   sessionID,
+			idSalt:      agentID,
+			agentLabel:  cp.model,
+			rootName:    subagentRootName(link.subagentType),
+			integration: cp.integration,
+			runDepth:    1,
+			agentType:   "subagent",
+		}
+		deriveClaudeRows(sw, subRows[agentID], usageSeen, nil)
+		reparentRoots(sw.spans, link.toolSpanID)
+		out.Spans = append(out.Spans, sw.spans...)
+	}
+	return out, nil
+}
+
+// deriveClaudeRows drives one walk (main or a subagent) over its rows, emitting
+// its turn → tool/skill spans. meta is filled only for the main walk (GitBranch
+// is a session property); a subagent walk passes nil.
+func deriveClaudeRows(w *turnWalk, rows []*ops.RawTrace, usageSeen map[string]bool, meta *SessionMeta) {
 	for _, r := range rows {
 		if r.Source != ops.RawSourceTranscript {
 			continue
@@ -95,8 +137,8 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 		if err := json.Unmarshal(r.Raw, &ln); err != nil {
 			continue // a non-JSON / unexpected line is skipped, never fatal
 		}
-		if out.Meta.GitBranch == "" && ln.GitBranch != "" {
-			out.Meta.GitBranch = ln.GitBranch
+		if meta != nil && meta.GitBranch == "" && ln.GitBranch != "" {
+			meta.GitBranch = ln.GitBranch
 		}
 		ts := parseISOMs(ln.Timestamp)
 
@@ -111,8 +153,6 @@ func (claudeDeriver) Derive(rows []*ops.RawTrace) (*Derivation, error) {
 		}
 	}
 	w.flush()
-	out.Spans = w.spans
-	return out, nil
 }
 
 // claudeUserLine folds one type=user line into the walk. A line bearing
@@ -135,7 +175,7 @@ func claudeUserLine(w *turnWalk, ln *claudeLine, ts int64) {
 	}
 	if ln.IsMeta {
 		if w.cur != nil {
-			w.cur.applySkillBaseDir(text)
+			w.cur.applySkillBaseDir(text, w.sessionID)
 		}
 		return
 	}
@@ -179,6 +219,8 @@ func (t *turn) absorbAssistant(raw json.RawMessage, ts int64, sessionID string, 
 				}
 				t.output += b.Text
 			}
+		case "thinking":
+			t.appendReasoning(b.Thinking)
 		case "tool_use":
 			t.addToolSpan(b, ts, sessionID)
 		}
@@ -206,12 +248,16 @@ func (t *turn) addToolSpan(b claudeBlock, ts int64, sessionID string) {
 			"gen_ai.tool.call.id":        b.ID,
 			"gen_ai.tool.call.arguments": inputJSON,
 			"skill.name":                 skill, // Quiver extension
+			// Claude only ever lifts its first-class Skill tool to a SKILL span
+			// (it never path-signals authoring I/O), so the activation is always
+			// a genuine tool call.
+			SkillActivationKey: SkillActivationTool,
 		}
 		if t.model != "" {
 			attrs["gen_ai.request.model"] = t.model // model cut for skill aggregations
 		}
 		sp := Span{
-			Name:         "execute_tool " + b.Name,
+			Name:         spanDisplayName(KindSkill, b.Name, skill),
 			Kind:         KindSkill,
 			SpanID:       spanID(t.traceID, "skill", b.ID),
 			TraceID:      t.traceID,
@@ -221,6 +267,13 @@ func (t *turn) addToolSpan(b claudeBlock, ts int64, sessionID string) {
 			Attributes:   attrs,
 		}
 		t.tools = append(t.tools, sp)
+		// Match a tool_result like any other call, so a Skill load that returns an
+		// error/interrupt carries a real qvr.outcome. A clean load's success comes
+		// from the base-directory injection instead (see attachSkillLoadPath) —
+		// claude usually delivers the load that way, not as a tool_result.
+		if b.ID != "" {
+			t.pending[b.ID] = len(t.tools) - 1
+		}
 		return
 	}
 
@@ -237,29 +290,18 @@ func (t *turn) addToolSpan(b claudeBlock, ts int64, sessionID string) {
 	if d := toolDescription(b); d != "" {
 		attrs["gen_ai.tool.description"] = d
 	}
-	// Universal path signal: a Read/Bash/etc. that touches a file under a
-	// skill directory attributes the action to that skill — and when it opens
-	// the skill's SKILL.md, that's a load with path evidence (the same signal
-	// the codex/cursor/copilot derivers use). This is how supporting-file
-	// reads (references/, scripts/) of a skill become verifiable on claude.
-	kind, idKind := KindTool, "tool"
-	name, isLoad, loadPath := pathSkillRef(commandFromArgs(b.Input), nil)
-	if name == "" {
-		name, isLoad, loadPath = pathSkillRef(inputJSON, nil)
-	}
-	if name != "" {
-		attrs["skill.name"] = name
-		if loadPath != "" {
-			attrs["skill.load_path"] = loadPath
-		}
-		if isLoad {
-			kind, idKind = KindSkill, "skill"
-		}
-	}
+	// No path-signal skill attribution on claude. Unlike agents that have no
+	// first-class skill mechanism (codex/cursor/…, where reading SKILL.md IS
+	// the load), claude's authoritative load signals are the Skill tool
+	// (handled above) and its base-directory injection (see applySkillBaseDir).
+	// Scraping skills/<name> substrings out of ordinary Bash/Read/Edit/Write
+	// text reclassifies authoring I/O — `cat`/`git add`/editing a skill's own
+	// source files — as skill loads, inflating a skill's per-version activity
+	// with tool calls that never used it (observed in real stores, 2026-06-24).
 	sp := Span{
-		Name:         "execute_tool " + b.Name,
-		Kind:         kind,
-		SpanID:       spanID(t.traceID, idKind, b.ID),
+		Name:         displayToolName(b.Name),
+		Kind:         KindTool,
+		SpanID:       spanID(t.traceID, "tool", b.ID),
 		TraceID:      t.traceID,
 		ParentSpanID: t.llmSpanID,
 		StartMs:      ts,
@@ -276,26 +318,85 @@ func (t *turn) addToolSpan(b claudeBlock, ts int64, sessionID string) {
 // type doc): the remainder of its first line is the loaded skill's directory.
 const claudeSkillBaseDirPrefix = "Base directory for this skill: "
 
+// claudeSkillArgsTrailerRe matches the per-call arguments claude appends to a
+// skill-body injection. The harness renders a Skill load as the verbatim
+// SKILL.md body followed by a blank-line-separated "ARGUMENTS: <input>" trailer
+// carrying the run's input (verified across real session stores, 2026-06:
+// always "\n\n\nARGUMENTS: …", absent when the skill takes no args). That trailer
+// is run-specific, so it must be stripped before the body feeds the content
+// coordinate — otherwise two runs of the SAME skill version with different
+// inputs digest to different hashes and the evolution-loop cohorts fragment to
+// size one. The 3+ leading newlines (2+ blank lines) keep it from matching an
+// ordinary single-blank-line markdown heading in the body itself.
+var claudeSkillArgsTrailerRe = regexp.MustCompile(`(?s)\n{3,}ARGUMENTS:.*$`)
+
 // applySkillBaseDir mines a harness-injected (isMeta) user text for the
 // "Base directory for this skill: <path>" line and attaches the path as
 // skill.load_path on the turn's most recent SKILL span that lacks one — the
 // injection observed in real stores arrives immediately after the Skill
-// tool_result, inside the same turn.
-func (t *turn) applySkillBaseDir(text string) {
+// tool_result, inside the same turn. The text AFTER that first line is the
+// skill's verbatim SKILL.md body the harness loaded into context, so its digest
+// is captured as the run-time content coordinate (see stampRunContentHash) —
+// the bytes that actually ran, immune to a later switch/edit on disk.
+func (t *turn) applySkillBaseDir(text, sessionID string) {
 	if !strings.HasPrefix(text, claudeSkillBaseDirPrefix) {
 		return
 	}
-	path := text[len(claudeSkillBaseDirPrefix):]
-	if i := strings.IndexByte(path, '\n'); i >= 0 {
-		path = path[:i]
-	}
+	rest := text[len(claudeSkillBaseDirPrefix):]
+	path, body, _ := strings.Cut(rest, "\n")
 	path = strings.TrimSpace(path)
+	// Drop the run-specific "ARGUMENTS: …" trailer so only the skill body — the
+	// version-identifying bytes — enters the content coordinate.
+	body = claudeSkillArgsTrailerRe.ReplaceAllString(body, "")
 	// The base-dir path encodes the skill name (…/skills/<name>); pass it so
 	// two Skill calls in one assistant message (parallel tool use) each get
 	// their OWN injection — a nameless reverse search would swap them. A path
 	// with no skills/<name> segment yields "" and matches any pending span.
 	name, _, _ := pathSkillRef(path, nil)
-	t.attachSkillLoadPath(name, path)
+	if t.attachSkillLoadPath(name, path) {
+		t.attachSkillBody(name, body)
+		return
+	}
+	// No pending SKILL span — the harness injected this skill directly, with no
+	// preceding Skill tool call. Create the span from the injection so the load
+	// is attributed rather than lost (178 such loads across the real corpus).
+	t.addInjectedSkill(name, path, body, sessionID)
+}
+
+// addInjectedSkill creates a SKILL span for a harness-injected skill load that
+// had no preceding Skill tool call (skill.activation = injection). It mirrors
+// the tool-load span shape so downstream attribution treats it identically, and
+// stamps the run-time content coordinate from the injected body.
+func (t *turn) addInjectedSkill(name, path, body, sessionID string) {
+	if name == "" {
+		return // a base-dir line with no resolvable skills/<name> is not attributable
+	}
+	attrs := map[string]any{
+		"session.id":            sessionID,
+		"gen_ai.operation.name": "execute_tool",
+		"gen_ai.tool.name":      "Skill",
+		"skill.name":            name,
+		SkillActivationKey:      SkillActivationInjection,
+		"skill.load_path":       path,
+		// A harness injection is positive evidence the skill loaded.
+		OutcomeKey: OutcomeSuccess,
+	}
+	if t.model != "" {
+		attrs["gen_ai.request.model"] = t.model
+	}
+	sp := Span{
+		Name:         spanDisplayName(KindSkill, "Skill", name),
+		Kind:         KindSkill,
+		SpanID:       spanID(t.traceID, "skill", "inject#"+strconv.Itoa(len(t.tools))),
+		TraceID:      t.traceID,
+		ParentSpanID: t.llmSpanID,
+		StartMs:      t.endMs,
+		EndMs:        t.endMs,
+		Attributes:   attrs,
+	}
+	t.tools = append(t.tools, sp)
+	stampRunContentHash(&sp, body)
+	t.tools[len(t.tools)-1] = sp
 }
 
 // applyToolResult attaches a tool_result to the tool span awaiting it.
@@ -305,10 +406,12 @@ func (t *turn) applyToolResult(b claudeBlock, ts int64) {
 		return
 	}
 	sp := &t.tools[idx]
-	sp.Attributes["gen_ai.tool.call.result"] = decodeToolResultText(b.Content)
+	result := decodeToolResultText(b.Content)
+	sp.Attributes["gen_ai.tool.call.result"] = result
 	if b.IsError {
 		sp.Attributes["error.type"] = "tool_failure"
 	}
+	sp.Attributes[OutcomeKey] = classifyOutcome(result, b.IsError)
 	if ts > sp.StartMs {
 		sp.EndMs = ts
 	}

@@ -45,6 +45,7 @@ func runAuditGC(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	derive.ConfigureOutcome(cfg)
 
 	cutoff := time.Now().UTC().Add(-defaultRawRetention)
 	if gcOlderThan != "" {
@@ -112,7 +113,7 @@ func sweepSkilllessSessions(cmd *cobra.Command, s store.Store) (int, error) {
 		if sess.LastAt.After(cutoff) {
 			continue // too recent — may still be in progress
 		}
-		_, hasSkill, derr := rawtrace.Rederive(cmd.Context(), s, sess.SessionID)
+		_, hasSkill, _, derr := rawtrace.Rederive(cmd.Context(), s, sess.SessionID)
 		if derr != nil || hasSkill {
 			continue
 		}

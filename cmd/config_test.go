@@ -128,3 +128,40 @@ func TestConfigRead_OpsDisabledStillSurfaces(t *testing.T) {
 		t.Errorf("configRead(ops.enabled) on zero-cfg = %q, want \"false\" — must render in text view", got)
 	}
 }
+
+// TestConfigGetSetSymmetry guards the get/set registry against divergence:
+// every key `qvr config get` advertises (knownConfigKeys, all readable via
+// configRead) must also be writable via configWrite. The ops.* keys regressed
+// exactly this way — surfaced by get, advertised in `get` (all), but rejected
+// by set with "unknown config key" — leaving a readable, unwritable, dead-end
+// key. A new surfaced key without a matching write case now fails here.
+func TestConfigGetSetSymmetry(t *testing.T) {
+	cfg := &config.Config{}
+	for _, key := range knownConfigKeys {
+		// "false" is a valid value for the bool keys and harmless for the
+		// free-form string keys; configWrite only rejects UNKNOWN keys.
+		if err := configWrite(cfg, key, "false"); err != nil {
+			t.Errorf("config get advertises %q but config set rejects it: %v", key, err)
+		}
+	}
+}
+
+// TestConfigSet_OpsEnabled pins the reported divergence directly: ops.enabled
+// must be settable (it was readable but unwritable), the flag must flip, and a
+// non-boolean value must be rejected by the validator.
+func TestConfigSet_OpsEnabled(t *testing.T) {
+	cfg := &config.Config{Ops: config.OpsConfig{Enabled: true}}
+	if err := configWrite(cfg, "ops.enabled", "false"); err != nil {
+		t.Fatalf("configWrite(ops.enabled, false): %v", err)
+	}
+	if cfg.Ops.Enabled {
+		t.Error("ops.enabled should be false after configWrite")
+	}
+	v, ok := configValueValidators["ops.enabled"]
+	if !ok {
+		t.Fatal("ops.enabled has no validator — a bogus value would be persisted")
+	}
+	if _, err := v("yes-please"); err == nil {
+		t.Error("ops.enabled validator should reject a non-boolean value")
+	}
+}

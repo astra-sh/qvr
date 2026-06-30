@@ -40,9 +40,15 @@ var configValueValidators = map[string]func(string) (string, error){
 	"security.block_severity": validateEnum([]string{
 		"critical", "error", "warning", "info",
 	}),
-	"cache.index_ttl":       validateDuration,
-	"output.format":         validateEnum([]string{"text", "json"}),
-	"output.color":          validateEnum([]string{"auto", "always", "never"}),
+	"cache.index_ttl": validateDuration,
+	"output.format":   validateEnum([]string{"text", "json"}),
+	"output.color":    validateEnum([]string{"auto", "always", "never"}),
+	// ops.enabled is the audit telemetry switch. `qvr audit enable/disable` is
+	// the everyday entry point (it also provisions the database), but the flag
+	// is also a plain settable key here so `config get`/`set` stay symmetric —
+	// a key `config get` advertises must be writable too. db_path is a free-form
+	// path, so it needs no validator.
+	"ops.enabled":           validateBool,
 	"prefetch.enabled":      validateBool,
 	"prefetch.min_interval": validateDuration,
 }
@@ -221,6 +227,15 @@ func configWrite(cfg *config.Config, key, value string) error {
 		cfg.Output.Color = value
 	case "cache.index_ttl":
 		cfg.Cache.IndexTTL = value
+	case "ops.enabled":
+		// Flips the flag only; the SkillOps database is created lazily by the
+		// next capture (or eagerly by `qvr audit enable`), so a bare flip never
+		// leaves a half-enabled state. configRead/knownConfigKeys already expose
+		// this key — without this case `config set` rejected what `config get`
+		// read back, a get/set registry divergence.
+		cfg.Ops.Enabled = value == "true"
+	case "ops.db_path":
+		cfg.Ops.DBPath = value
 	case "prefetch.enabled":
 		cfg.Prefetch.Enabled = value == "true"
 	case "prefetch.min_interval":

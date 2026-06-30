@@ -49,6 +49,19 @@ func TestPathSkillRef_TokenBoundaries(t *testing.T) {
 			wantName: "",
 		},
 		{
+			// An unexpanded shell variable is not a materialized skill: the
+			// path token carries a "$", so it must not invent a skill (real
+			// claude stores, 2026-06-24: `mkdir -p $REG/skills/clean-skill`).
+			name:     "unexpanded shell variable is not a skill path",
+			text:     `mkdir -p $REG/skills/clean-skill`,
+			wantName: "",
+		},
+		{
+			name:     "glob in path is not a skill load",
+			text:     `cat /tmp/build-*/skills/foo/SKILL.md`,
+			wantName: "",
+		},
+		{
 			// Agents resolve the agent-dir symlink and read the store
 			// directly; a local install's subtree has no skills/<name>/
 			// segment, so the store layout is its own signal (observed in
@@ -65,6 +78,37 @@ func TestPathSkillRef_TokenBoundaries(t *testing.T) {
 			wantName: "qvr-probe",
 			wantLoad: false,
 			wantPath: "/Users/u/.quiver/worktrees/_local/qvr-probe/17dd2d4/scripts/stamp.sh",
+		},
+		{
+			// A registry install nests the store <org>/<repo>/<skill>/<sha7>/
+			// (registry.WorktreePath), so the <registry> component spans two path
+			// segments. A single-segment matcher reads <repo> as the skill and
+			// <skill> as the sha and finds nothing — silently dropping every
+			// non-local install read via its resolved worktree path (real codex
+			// rollout, 2026-06-27: a skillops-sql SKILL.md sed read).
+			name:     "resolved org/repo registry worktree path",
+			text:     `{"cmd": "sed -n '1,220p' /Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/SKILL.md"}`,
+			wantName: "skillops-sql",
+			wantLoad: true,
+			wantPath: "/Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/SKILL.md",
+		},
+		{
+			name:     "org/repo registry worktree supporting-file read is not a load",
+			text:     `sh /Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/scripts/run.sh`,
+			wantName: "skillops-sql",
+			wantLoad: false,
+			wantPath: "/Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/scripts/run.sh",
+		},
+		{
+			// A supporting file living at a coincidental <name>/<7hex> path INSIDE
+			// the skill's own subtree must not out-vote the real version pin: the
+			// LEFTMOST registry/skill/sha boundary wins (lazy registry match). A
+			// greedy matcher would mis-read the skill as "references" here.
+			name:     "nested <name>/<7hex> subtree dir does not shadow the real skill",
+			text:     `cat /Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/references/0f1e2d3/q.sql`,
+			wantName: "skillops-sql",
+			wantLoad: false,
+			wantPath: "/Users/u/.quiver/worktrees/qvr-skillops/skillops-sql/skillops-sql/5013dc8/references/0f1e2d3/q.sql",
 		},
 	}
 	for _, tt := range tests {

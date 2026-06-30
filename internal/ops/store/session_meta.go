@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,8 +33,12 @@ type SessionMetaRow struct {
 	Skills          []string  `json:"skills,omitempty"` // distinct skill names, first-use order
 	// Session token totals. nil = the native store reported no usage on that
 	// side (serialized as absent, rendered n/a — never 0).
-	TokensIn       *int64    `json:"tokens_in,omitempty"`
-	TokensOut      *int64    `json:"tokens_out,omitempty"`
+	TokensIn  *int64 `json:"tokens_in,omitempty"`
+	TokensOut *int64 `json:"tokens_out,omitempty"`
+	// Outcome is the session-level rollup of its TOOL/SKILL spans' qvr.outcome
+	// (worst-of: failure > blocked > success). "" = no span carried an outcome
+	// (serialized as absent, rendered "unknown" — never success).
+	Outcome        string    `json:"outcome,omitempty"`
 	DeriverVersion int       `json:"deriver_version"`
 	DerivedAt      time.Time `json:"derived_at"`
 }
@@ -50,14 +55,21 @@ func (m *SessionMetaRow) DurationMs() int64 {
 
 // SessionMetaFilter scopes ListSessionMeta. Nil/zero fields are ignored.
 type SessionMetaFilter struct {
-	Since *time.Time // sessions started at/after this time
-	Until *time.Time // sessions started at/before this time
-	Agent string
-	Skill string // only sessions that used this skill
+	Since   *time.Time // sessions started at/after this time
+	Until   *time.Time // sessions started at/before this time
+	Agent   string
+	Skill   string // only sessions that used this skill (back-compat scalar)
+	Version string // only sessions that used this skill version (back-compat scalar)
+	// Skills / Versions are the multi-select forms: a session matches when it used
+	// ANY of the listed skills (resp. ran ANY of the listed versions). They compose
+	// with the scalar Skill/Version (merged, de-duplicated), so a caller may pass
+	// either. Both narrow independently — skills AND versions, ORing within each.
+	Skills   []string
+	Versions []string
 	// SkillsOnly restricts the result to sessions that used at least one skill.
 	// The DB can still hold skill-less sessions (explicit ingests, in-flight
-	// captures); this is the read-side surfacing filter. Ignored when Skill is
-	// set (a specific skill already implies skill-bearing).
+	// captures); this is the read-side surfacing filter. Ignored when any skill
+	// filter is set (a specific skill already implies skill-bearing).
 	SkillsOnly bool
 	Dirs       []string // working_directory ∈ Dirs (empty = all)
 	Limit      int
@@ -68,27 +80,45 @@ type SessionMetaFilter struct {
 	SortByTokens bool
 }
 
+// The session VERSION rollup is NOT a column here: it is read from the SKILL
+// spans on demand via Store.SkillVersionsForSessions (the single source of
+// truth the CLI and UI share), so there is no denormalized field to keep in
+// sync with the per-span skill.version enrichment. The Version filter below
+// scopes by that same per-span tag.
+
 const sessionMetaColumns = `session_id, agent_name, source_session_id, source_path,
   working_directory, git_branch, model, title, started_ms, ended_ms,
-  turns, tools, skills, tokens_in, tokens_out, deriver_version, derived_at`
+  turns, tools, skills, tokens_in, tokens_out, outcome, deriver_version, derived_at`
 
-// sessionMetaColumnsLegacy reads a DB that predates migration 0006 (opened
-// read-only by `qvr ui --no-discover`, so the migration can't apply): the
-// token columns come back as NULL (n/a) instead of failing the whole list.
+// sessionMetaColumnsNoOutcome reads a DB at schema 0006 (tokens present, no
+// outcome yet — e.g. opened read-only before migration 0007 can apply): the
+// outcome column comes back NULL instead of failing the list.
+const sessionMetaColumnsNoOutcome = `session_id, agent_name, source_session_id, source_path,
+  working_directory, git_branch, model, title, started_ms, ended_ms,
+  turns, tools, skills, tokens_in, tokens_out, NULL, deriver_version, derived_at`
+
+// sessionMetaColumnsLegacy reads a DB that predates migration 0006: the token
+// and outcome columns come back NULL (n/a) instead of failing.
 const sessionMetaColumnsLegacy = `session_id, agent_name, source_session_id, source_path,
   working_directory, git_branch, model, title, started_ms, ended_ms,
-  turns, tools, skills, NULL, NULL, deriver_version, derived_at`
+  turns, tools, skills, NULL, NULL, NULL, deriver_version, derived_at`
 
 // staleTokensSchema reports the pre-0006 "tokens columns missing" condition.
 func staleTokensSchema(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such column: tokens_in")
 }
 
+// staleOutcomeSchema reports the pre-0007 "outcome column missing" condition (a
+// DB already at 0006, so tokens resolve but outcome doesn't).
+func staleOutcomeSchema(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such column: outcome")
+}
+
 const upsertSessionMetaSQL = `INSERT OR REPLACE INTO session_meta(
   session_id, agent_name, source_session_id, source_path, working_directory,
   git_branch, model, title, started_ms, ended_ms, turns, tools, skills,
-  tokens_in, tokens_out, deriver_version, derived_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+  tokens_in, tokens_out, outcome, deriver_version, derived_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
 
 // ReplaceSessionDerivation atomically replaces a session's whole derived
 // projection — its session_meta row and all its spans — in one tx. This is the
@@ -118,6 +148,9 @@ func (s *sqliteStore) ReplaceSessionDerivation(ctx context.Context, meta *Sessio
 		}
 		skills = sql.NullString{String: string(b), Valid: true}
 	}
+	// The session's skill versions are NOT stored: they are read on demand from
+	// the SKILL spans via SkillVersionsForSessions, so the per-span enrichment is
+	// the single source of truth and there's nothing to keep in sync here.
 	if _, err := tx.ExecContext(ctx, upsertSessionMetaSQL,
 		meta.SessionID.String(), meta.AgentName,
 		nullableString(meta.SourceSessionID), nullableString(meta.SourcePath),
@@ -125,7 +158,7 @@ func (s *sqliteStore) ReplaceSessionDerivation(ctx context.Context, meta *Sessio
 		nullableString(meta.Model), nullableString(meta.Title),
 		meta.StartedMs, meta.EndedMs, meta.Turns, meta.Tools, skills,
 		nullableInt64(meta.TokensIn), nullableInt64(meta.TokensOut),
-		meta.DeriverVersion, meta.DerivedAt.UTC(),
+		nullableString(meta.Outcome), meta.DeriverVersion, meta.DerivedAt.UTC(),
 	); err != nil {
 		return fmt.Errorf("store: upsert session meta: %w", err)
 	}
@@ -135,26 +168,28 @@ func (s *sqliteStore) ReplaceSessionDerivation(ctx context.Context, meta *Sessio
 // ListSessionMeta returns unified session rows newest-first (by start time),
 // or by total tokens when the filter asks for it.
 func (s *sqliteStore) ListSessionMeta(ctx context.Context, f *SessionMetaFilter) ([]*SessionMetaRow, error) {
-	out, err := s.listSessionMeta(ctx, f, false)
+	// Cascade down the schema as columns go missing on read-only opens that
+	// predate a migration: full → no-outcome (0006) → legacy (pre-0006). The
+	// version rollup reads spans, so it needs no schema fallback of its own.
+	out, err := s.listSessionMeta(ctx, f, sessionMetaColumns, true)
+	if staleOutcomeSchema(err) {
+		out, err = s.listSessionMeta(ctx, f, sessionMetaColumnsNoOutcome, true)
+	}
 	if staleTokensSchema(err) {
-		return s.listSessionMeta(ctx, f, true)
+		out, err = s.listSessionMeta(ctx, f, sessionMetaColumnsLegacy, false)
 	}
 	return out, err
 }
 
-func (s *sqliteStore) listSessionMeta(ctx context.Context, f *SessionMetaFilter, legacy bool) ([]*SessionMetaRow, error) {
+func (s *sqliteStore) listSessionMeta(ctx context.Context, f *SessionMetaFilter, cols string, tokenSort bool) ([]*SessionMetaRow, error) {
 	where, args := sessionMetaWhere(f)
-	cols := sessionMetaColumns
-	if legacy {
-		cols = sessionMetaColumnsLegacy
-	}
 	q := `SELECT ` + cols + ` FROM session_meta`
 	if len(where) > 0 {
 		q += " WHERE " + strings.Join(where, " AND ")
 	}
 	// On a legacy schema a token sort degrades to the default order — every
 	// row's tokens read n/a, so there is no token order to honor.
-	if f != nil && f.SortByTokens && !legacy {
+	if f != nil && f.SortByTokens && tokenSort {
 		q += ` ORDER BY (tokens_in IS NULL AND tokens_out IS NULL),
 		  (COALESCE(tokens_in,0)+COALESCE(tokens_out,0)) DESC, started_ms DESC`
 	} else {
@@ -185,6 +220,9 @@ func (s *sqliteStore) listSessionMeta(ctx context.Context, f *SessionMetaFilter,
 // GetSessionMeta returns one session's unified row, or nil when absent.
 func (s *sqliteStore) GetSessionMeta(ctx context.Context, sessionID uuid.UUID) (*SessionMetaRow, error) {
 	m, err := s.getSessionMeta(ctx, sessionID, sessionMetaColumns)
+	if staleOutcomeSchema(err) {
+		m, err = s.getSessionMeta(ctx, sessionID, sessionMetaColumnsNoOutcome)
+	}
 	if staleTokensSchema(err) {
 		return s.getSessionMeta(ctx, sessionID, sessionMetaColumnsLegacy)
 	}
@@ -230,15 +268,44 @@ func sessionMetaWhere(f *SessionMetaFilter) ([]string, []any) {
 		where = append(where, "started_ms <= ?")
 		args = append(args, f.Until.UTC().UnixMilli())
 	}
-	if f.Skill != "" {
-		// skills is a JSON array of names; match exact membership.
+	skills := effectiveFilterList(f.Skills, f.Skill)
+	if len(skills) > 0 {
+		// skills is a JSON array of names; match membership against ANY listed name.
 		where = append(where,
-			`EXISTS (SELECT 1 FROM json_each(session_meta.skills) WHERE json_each.value = ?)`)
-		args = append(args, f.Skill)
+			`EXISTS (SELECT 1 FROM json_each(session_meta.skills)
+			   WHERE json_each.value IN (`+placeholders(len(skills))+`))`)
+		for _, s := range skills {
+			args = append(args, s)
+		}
 	} else if f.SkillsOnly {
 		where = append(where, `json_array_length(COALESCE(skills, '[]')) > 0`)
 	}
+	versions := effectiveFilterList(f.Versions, f.Version)
+	if len(versions) > 0 {
+		// Match sessions with a SKILL span carrying ANY of these skill.version
+		// labels — the same per-span tagging the read rollup reads, no stored column.
+		where = append(where,
+			`EXISTS (SELECT 1 FROM spans s WHERE s.session_id = session_meta.session_id
+			   AND s.kind = 'SKILL'
+			   AND json_extract(s.attributes, '$."skill.version"') IN (`+placeholders(len(versions))+`))`)
+		for _, v := range versions {
+			args = append(args, v)
+		}
+	}
 	return where, args
+}
+
+// effectiveFilterList merges a multi-select slice with an optional scalar value
+// (the back-compat single field), de-duplicating, so a caller may pass either or
+// both. Order is preserved with the scalar appended last when not already present.
+func effectiveFilterList(many []string, one string) []string {
+	if one == "" {
+		return many
+	}
+	if slices.Contains(many, one) {
+		return many
+	}
+	return append(append([]string{}, many...), one)
 }
 
 func scanSessionMeta(row interface{ Scan(...any) error }) (*SessionMetaRow, error) {
@@ -248,16 +315,18 @@ func scanSessionMeta(row interface{ Scan(...any) error }) (*SessionMetaRow, erro
 		srcSession, srcPath, wd        sql.NullString
 		branch, model, title, skillsJS sql.NullString
 		tokensIn, tokensOut            sql.NullInt64
+		outcome                        sql.NullString
 		derivedAt                      time.Time
 	)
 	if err := row.Scan(&sid, &m.AgentName, &srcSession, &srcPath, &wd,
 		&branch, &model, &title, &m.StartedMs, &m.EndedMs,
-		&m.Turns, &m.Tools, &skillsJS, &tokensIn, &tokensOut,
+		&m.Turns, &m.Tools, &skillsJS, &tokensIn, &tokensOut, &outcome,
 		&m.DeriverVersion, &derivedAt); err != nil {
 		return nil, fmt.Errorf("store: scan session meta: %w", err)
 	}
 	m.TokensIn = nullInt64Ptr(tokensIn)
 	m.TokensOut = nullInt64Ptr(tokensOut)
+	m.Outcome = outcome.String
 	id, err := uuid.Parse(sid)
 	if err != nil {
 		return nil, fmt.Errorf("store: bad session_meta session_id %q: %w", sid, err)

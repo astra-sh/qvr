@@ -83,11 +83,14 @@ jobs:
           revive -config revive.toml -set_exit_status ./...
 
       # -i hardlinked: real word (hard-linked files); misspell's dictionary
-      # wrongly corrects it to "hardline".
+      # wrongly corrects it to "hardline". testdata/ is excluded via pathspec:
+      # those files are byte-faithful captured transcripts (verbatim session
+      # content we must not edit — e.g. a recorded skill name trips the
+      # dictionary), not prose we authored.
       - name: misspell
         run: |
           go install github.com/client9/misspell/cmd/misspell@v0.3.4
-          misspell -error -i hardlinked cmd internal pkg main.go README.md CONTRIBUTING.md
+          misspell -error -i hardlinked $(git ls-files -- cmd internal pkg main.go README.md CONTRIBUTING.md ':!:**/testdata/**')
 
       - name: license
         run: test -s LICENSE

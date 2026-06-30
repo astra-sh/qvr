@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/astra-sh/qvr/internal/config"
 	"github.com/astra-sh/qvr/internal/model"
+	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
@@ -79,8 +81,106 @@ func runAuditSessions(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
 	}
+	backfillSessionSkills(cmd.Context(), s, sessions)
 
+	if outputFormat == "json" {
+		return renderSessionsJSON(cmd.Context(), s, sessions)
+	}
 	return renderSessions(sessions)
+}
+
+// sessionView is the JSON shape: the session header plus the per-skill version
+// coordinates (#2), so a consumer reads which version each skill ran without a
+// time-window cross-reference into the spans table.
+type sessionView struct {
+	*store.SessionMetaRow
+	SkillVersions []skillVersionView   `json:"skill_versions,omitempty"`
+	Scores        []store.SessionScore `json:"scores,omitempty"`
+}
+
+type skillVersionView struct {
+	Skill       string `json:"skill"`
+	Version     string `json:"version"` // ref → short commit → "unknown"
+	Commit      string `json:"commit,omitempty"`
+	SubtreeHash string `json:"subtree_hash,omitempty"`
+}
+
+// buildSessionViews enriches sessions with their per-skill version coordinates,
+// read from the SKILL spans via Store.SkillVersionsForSessions (the single
+// source of truth) and labeled through the shared derive.SkillVersionLabel so
+// the JSON agrees across the CLI, the UI, and compare (degrading to "unknown"
+// the same way). Shared by `qvr audit sessions` and the UI's /api/sessions so
+// both return the identical skill_versions shape from one path.
+func buildSessionViews(ctx context.Context, s store.Store, sessions []*store.SessionMetaRow) ([]sessionView, error) {
+	ids := make([]string, len(sessions))
+	for i, sess := range sessions {
+		ids[i] = sess.SessionID.String()
+	}
+	coords, err := s.SkillVersionsForSessions(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("session skill versions: %w", err)
+	}
+	// BYO-grader verdicts joined back from session_score on the same path the
+	// version coordinates take — one read, so every consumer (CLI JSON + UI list)
+	// gets the identical scores shape next to skill_versions.
+	scores, err := s.ScoresForSessions(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("session scores: %w", err)
+	}
+	views := make([]sessionView, len(sessions))
+	for i, sess := range sessions {
+		v := sessionView{SessionMetaRow: sess}
+		for _, c := range coords[sess.SessionID.String()] {
+			v.SkillVersions = append(v.SkillVersions, skillVersionView{
+				Skill:       c.Skill,
+				Version:     derive.SkillVersionLabel(c.Version, c.Commit),
+				Commit:      c.Commit,
+				SubtreeHash: c.SubtreeHash,
+			})
+		}
+		v.Scores = scores[sess.SessionID.String()]
+		views[i] = v
+	}
+	return views, nil
+}
+
+// renderSessionsJSON emits sessions enriched with per-skill version coordinates.
+func renderSessionsJSON(ctx context.Context, s store.Store, sessions []*store.SessionMetaRow) error {
+	if len(sessions) == 0 {
+		return printer.JSON([]any{})
+	}
+	views, err := buildSessionViews(ctx, s, sessions)
+	if err != nil {
+		return err
+	}
+	return printer.JSON(views)
+}
+
+// backfillSessionSkills repopulates the SKILLS rollup for sessions whose stored
+// session_meta.skills came back empty (a derive-time miss), recomputing it from
+// the spans table on read. Best-effort: a query error leaves the column blank
+// rather than failing the listing.
+func backfillSessionSkills(ctx context.Context, s store.Store, sessions []*store.SessionMetaRow) {
+	var need []string
+	for _, sess := range sessions {
+		if len(sess.Skills) == 0 {
+			need = append(need, sess.SessionID.String())
+		}
+	}
+	if len(need) == 0 {
+		return
+	}
+	byID, err := s.SkillsForSessions(ctx, need)
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		if len(sess.Skills) == 0 {
+			if sk := byID[sess.SessionID.String()]; len(sk) > 0 {
+				sess.Skills = sk
+			}
+		}
+	}
 }
 
 // renderSessions emits the session list as JSON or a newest-first table.

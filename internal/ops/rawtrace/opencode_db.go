@@ -182,7 +182,7 @@ func ingestOpencodeSession(ctx context.Context, s Store, db *sql.DB, dbPath stri
 		return nil, err
 	}
 	res.LinesStored = len(rows)
-	n, _, derr := persistDerivation(ctx, s, sessionID)
+	n, _, _, derr := persistDerivation(ctx, s, sessionID)
 	res.SpansStored = n
 	res.SpanError = derr
 	return res, nil

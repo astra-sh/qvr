@@ -49,7 +49,8 @@ Scans are incremental and idempotent: a stat ledger remembers every file seen,
 so re-running over an unchanged store costs almost nothing. Sessions that
 provably used **no** skill are counted but not stored (qvr keeps
 skill-attributed evidence, not generic transcripts); pass `--keep-all` to import
-everything.
+everything — including sessions a prior plain `discover` already skipped, which
+`--keep-all` re-evaluates even when the file is otherwise unchanged.
 
 Re-run `discover` whenever you want fresh sessions picked up — or just open
 the dashboard: `qvr ui` scans on launch and keeps rescanning in the background
@@ -77,18 +78,67 @@ qvr audit logs --kind SKILL                         # only skill spans (or LLM /
 qvr audit logs --session <session-id> --limit 0     # everything for one session
 ```
 
-### 4. Export for external analysis
+### 4. Compare versions, and grade quality
 
-`export` streams matching raw trace rows as JSONL (one object per line) —
-suitable for archival, analysis, or replay, and OTLP-ready for any OpenTelemetry
-consumer (Jaeger, Tempo, Honeycomb, an OTel Collector):
+`compare` buckets a skill's runs by the **content version** that produced them —
+the run-immutable content hash captured from each trace, so a run stays with the
+version it actually ran even after a `qvr edit` or switch — and prints the cohorts
+side by side with their run-status breakdown. That is the before/after evidence
+for evolving a skill.
 
 ```bash
-qvr audit export > traces.jsonl
-qvr audit export --session <session-id> -o session.jsonl
+qvr audit compare <skill>                         # the two newest content versions
+qvr audit compare <skill> --version <a> --version <b>   # pin an explicit pair
+qvr audit compare <skill> --by-agent              # one row per agent: the {version × agent} matrix
 ```
 
-### 5. Turn it off
+Each cohort carries both halves of the frontier: **SCORE** (your graded
+pass-rate) and **TOKENS** (in/out over the cohort's sessions — session-attributed
+exposure, not exclusive cost; n/a when the agent reported no usage). `--by-agent`
+splits each version into one row per agent, because the best version can differ by
+agent; the **PARETO** column marks the cells on each agent's (quality↑, cost↓)
+frontier with `*` — a reading aid, never a winner verdict.
+
+Run status (success / failure / blocked) is an observed fact, **not** a quality
+grade. To add a quality dimension, bring your own grader (exact / regex / an
+LLM-judge — anything) and record its verdict against the run with `annotate`,
+keyed by the agent-native session id the runner held and the `--skill` the grade
+judges. The grade asserts "this skill's run scored X", not "this session scored
+X": a session can load several skills, so `--skill` scopes the grade to the one
+it judged and keeps a multi-skill session's grade from double-counting across the
+others. qvr stores the number; it never computes it. The score then folds into
+`compare` as a per-cohort `SCORE` (a pass-rate), attributed to whichever version
+the run loaded:
+
+```bash
+qvr audit annotate <session-id> --skill triage --metric accuracy --score 1.0 --grader exact
+qvr audit annotate --from scores.jsonl            # batch; each line carries its own "skill"
+qvr audit compare triage --metric accuracy        # SCORE column shows the pass-rate
+```
+
+The write is blind — you can grade immediately after a run, before the session is
+even discovered, and the score is picked up on the next scan. Add `--strict` to
+refuse a grade whose already-discovered run never loaded the named skill (without
+it, that case is warned and recorded).
+
+### 5. Export for external analysis
+
+`export` streams the **derived span tree** as JSONL (one span per line) — the
+same clean Turn / model / tool / skill spans the UI shows. Spans are the
+shareable, normalized view, so downstream tools consume them rather than each
+agent's private transcript format:
+
+```bash
+qvr audit export > spans.jsonl
+qvr audit export --session <session-id> -o session.jsonl
+qvr audit export --session <session-id> --otlp > otlp.json   # OTLP-ready (Jaeger, Tempo, Honeycomb, an OTel Collector)
+qvr audit export --session <session-id> --raw > transcript.jsonl   # the verbatim native transcript + hook payloads
+```
+
+Use `--raw` only when you need the agent's byte-for-byte transcript (archival or
+replay); the default span export is what other tools should ingest.
+
+### 6. Turn it off
 
 ```bash
 qvr audit disable                        # stop recording; the database stays

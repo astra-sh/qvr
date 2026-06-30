@@ -57,6 +57,7 @@ func buildUIServer(ctx context.Context, projectRoot string, global, all bool, ve
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	derive.ConfigureOutcome(cfg)
 	s := &uiServer{
 		projectRoot: projectRoot,
 		global:      global,
@@ -821,7 +822,11 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	filter := &store.SessionMetaFilter{
 		Dirs:  sc.auditDirs(),
 		Agent: canonicalAgentFlag(q.Get("agent")),
-		Skill: q.Get("skill"),
+		// Multi-select: the dashboard sends repeated (and/or comma-joined) skill=
+		// and version= params; a session matches ANY listed skill AND ANY listed
+		// version. q.Get reads only the first value, so read the full slices.
+		Skills:   multiValues(q["skill"]),
+		Versions: multiValues(q["version"]),
 		// The dashboard only surfaces skill-attributed sessions; skill-less ones
 		// that escaped the retention gate (in-flight, explicitly ingested) stay
 		// in the DB but never show in the UI.
@@ -844,16 +849,25 @@ func (s *uiServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.store.ListSessionMeta(r.Context(), filter)
 	if err != nil {
 		if schemaNotReady(err) {
-			writeJSON(w, http.StatusOK, []*store.SessionMetaRow{})
+			writeJSON(w, http.StatusOK, []sessionView{})
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if sessions == nil {
-		sessions = []*store.SessionMetaRow{}
+	if len(sessions) == 0 {
+		writeJSON(w, http.StatusOK, []sessionView{})
+		return
 	}
-	writeJSON(w, http.StatusOK, sessions)
+	// Enrich with per-skill version coordinates from the SKILL spans — the same
+	// shared builder the CLI uses, so the UI's VERSION column/filter reads the
+	// identical skill_versions shape with no denormalized session_meta column.
+	views, err := buildSessionViews(r.Context(), s.store, sessions)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, views)
 }
 
 // parseDateParam parses a session date filter: a calendar day (YYYY-MM-DD) or a
@@ -901,6 +915,10 @@ type sessionDetail struct {
 	Session *store.SessionMetaRow `json:"session"`
 	Spans   []*store.SpanRow      `json:"spans"`
 	Traces  []rawTraceView        `json:"traces"`
+	// Scores are the BYO-grader verdicts attached to this session (one per
+	// graded skill×metric), joined from session_score. Empty for an unannotated
+	// session — the header then shows no SCORES stat rather than a fabricated 0.
+	Scores []store.SessionScore `json:"scores,omitempty"`
 }
 
 // rawTraceView is one raw row rendered for the dashboard. Raw holds the verbatim
@@ -972,6 +990,11 @@ func (s *uiServer) handleSession(w http.ResponseWriter, r *http.Request) {
 		Session: meta,
 		Spans:   spans,
 		Traces:  toRawTraceViews(rawRows),
+	}
+	// Best-effort score enrichment: a join failure (or a pre-0010 DB) leaves the
+	// header without a SCORES stat rather than failing the whole session view.
+	if scores, scErr := s.store.ScoresForSessions(ctx, []string{id.String()}); scErr == nil {
+		detail.Scores = scores[id.String()]
 	}
 	writeJSON(w, http.StatusOK, detail)
 }
@@ -1307,6 +1330,28 @@ code{background:#f3f4f6;padding:.15rem .4rem;border-radius:.25rem}</style></head
 }
 
 // ---- small utils -----------------------------------------------------------
+
+// multiValues flattens repeated and/or comma-joined query params into a trimmed,
+// non-empty, de-duplicated slice — so ?skill=a,b&skill=c yields [a b c] and the
+// multi-select filters read cleanly however the client encoded them.
+func multiValues(vals []string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, v := range vals {
+		for part := range strings.SplitSeq(v, ",") {
+			p := strings.TrimSpace(part)
+			if p == "" {
+				continue
+			}
+			if _, dup := seen[p]; dup {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func parsePositiveInt(s string) (int, error) {
 	const maxN = 100000

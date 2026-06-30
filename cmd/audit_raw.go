@@ -1,12 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 
 	"github.com/astra-sh/qvr/internal/config"
-	"github.com/astra-sh/qvr/internal/ops"
 	"github.com/astra-sh/qvr/internal/ops/derive"
 	"github.com/astra-sh/qvr/internal/ops/store"
 	"github.com/google/uuid"
@@ -140,15 +140,13 @@ func runAuditSpans(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	filter, err := rawFilter()
+	f, err := spanFilter()
 	if err != nil {
 		return err
 	}
-	if filter.SessionID == nil && rawAgent == "" {
+	if f.SessionID == nil && rawAgent == "" {
 		return fmt.Errorf("specify --session <id> or --agent <name>")
 	}
-	// Spans are derived per session from transcript rows only.
-	filter.Sources = []string{"transcript"}
 
 	if !auditDBExists(cfg) {
 		if outputFormat == "json" {
@@ -163,12 +161,7 @@ func runAuditSpans(cmd *cobra.Command, args []string) error {
 	}
 	defer s.Close()
 
-	rows, err := s.QueryRawTraces(cmd.Context(), filter)
-	if err != nil {
-		return fmt.Errorf("query raw traces: %w", err)
-	}
-
-	spans, err := deriveGrouped(rows)
+	spans, err := storedDerivedSpans(cmd.Context(), s, f)
 	if err != nil {
 		return err
 	}
@@ -180,15 +173,7 @@ func runAuditSpans(cmd *cobra.Command, args []string) error {
 		return printer.JSON(spans)
 	}
 	if len(spans) == 0 {
-		// Distinguish "nothing was captured" from "rows exist but didn't
-		// derive". The latter is usually an agent with no registered deriver
-		// (deriveGrouped already warned per session with the real cause) — say
-		// so, rather than the false "no transcript captured" when rows exist.
-		if len(rows) > 0 {
-			printer.Info("No spans derived for this scope — captured transcript rows did not yield spans")
-		} else {
-			printer.Info("No spans derived — no transcript captured for this scope")
-		}
+		printer.Info("No spans for this scope — run `qvr audit discover` to populate (or `qvr audit rederive` to refresh), and `--raw` for the captured transcript")
 		return nil
 	}
 	headers := []string{"KIND", "NAME", "MODEL", "TOKENS", "SKILL"}
@@ -206,47 +191,60 @@ func runAuditSpans(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// deriveGrouped derives spans per session. Rows arrive ordered by
-// (session_id, seq), so a session is a contiguous run; we derive each run
-// independently and concatenate. A session whose agent has no registered
-// deriver is skipped (not fatal — other sessions still derive).
-func deriveGrouped(rows []*ops.RawTrace) ([]derive.Span, error) {
-	var spans []derive.Span
-	var batch []*ops.RawTrace
-	var cur uuid.UUID
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		d, err := derive.DeriveSession(batch)
+// spanFilter builds the stored-span query from the shared session/agent flags.
+func spanFilter() (*store.SpanFilter, error) {
+	f := &store.SpanFilter{Limit: rawLimit}
+	if rawAgent != "" {
+		f.Agents = []string{rawAgent}
+	}
+	if rawSession != "" {
+		id, err := uuid.Parse(rawSession)
 		if err != nil {
-			// Non-fatal by design: a session whose agent has no registered
-			// deriver (or otherwise fails) is skipped so the remaining
-			// sessions still derive. Surface it as a warning rather than
-			// dropping it silently, so a failed derivation is visible.
-			printer.Warning(fmt.Sprintf("skip session %s: %v", cur, err))
-		} else if d != nil {
-			// Promote skill identity from qvr.lock so name collisions across
-			// registries/versions stay distinguishable in the output (#146).
-			derive.EnrichSkillIdentity(d.Spans, batch, nil)
-			spans = append(spans, d.Spans...)
+			return nil, fmt.Errorf("invalid --session id %q: %w", rawSession, err)
 		}
-		batch = nil
-		return nil
+		f.SessionID = &id
 	}
+	return f, nil
+}
+
+// storedDerivedSpans reads the PERSISTED span projection (it never re-derives),
+// so export/spans show the identity FROZEN at ingest — the version that actually
+// ran — rather than a label re-resolved against whatever happens to be checked
+// out now (persist-and-trust). Stale spans (an older deriver) refresh with
+// `qvr audit rederive`.
+func storedDerivedSpans(ctx context.Context, s store.Store, f *store.SpanFilter) ([]derive.Span, error) {
+	rows, err := s.QuerySpans(ctx, f)
+	if err != nil {
+		return nil, fmt.Errorf("query spans: %w", err)
+	}
+	out := make([]derive.Span, 0, len(rows))
 	for _, r := range rows {
-		if r.SessionID != cur && len(batch) > 0 {
-			if err := flush(); err != nil {
-				return nil, err
-			}
-		}
-		cur = r.SessionID
-		batch = append(batch, r)
+		out = append(out, spanRowToDerive(r))
 	}
-	if err := flush(); err != nil {
-		return nil, err
+	return out, nil
+}
+
+// spanRowToDerive rehydrates a stored SpanRow into a derive.Span (attributes
+// parsed from their JSON column) so the same emission/OTLP path serves both
+// freshly-derived and persisted spans.
+func spanRowToDerive(r *store.SpanRow) derive.Span {
+	var attrs map[string]any
+	if r.Attributes != "" {
+		_ = json.Unmarshal([]byte(r.Attributes), &attrs)
 	}
-	return spans, nil
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	return derive.Span{
+		Name:         r.Name,
+		Kind:         r.Kind,
+		SpanID:       r.SpanID,
+		TraceID:      r.TraceID,
+		ParentSpanID: r.ParentSpanID,
+		StartMs:      r.StartMs,
+		EndMs:        r.EndMs,
+		Attributes:   attrs,
+	}
 }
 
 func attrString(m map[string]any, k string) string {
@@ -257,10 +255,22 @@ func attrString(m map[string]any, k string) string {
 }
 
 func attrTokens(m map[string]any) string {
-	in, _ := m["gen_ai.usage.input_tokens"].(int)
-	out, _ := m["gen_ai.usage.output_tokens"].(int)
-	if in+out > 0 {
-		return strconv.Itoa(in + out)
+	if n := attrInt(m, "gen_ai.usage.input_tokens") + attrInt(m, "gen_ai.usage.output_tokens"); n > 0 {
+		return strconv.Itoa(n)
 	}
 	return ""
+}
+
+// attrInt reads a numeric attribute as an int, tolerating the float64 that
+// arrives when attributes are rehydrated from stored JSON.
+func attrInt(m map[string]any, k string) int {
+	switch v := m[k].(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	}
+	return 0
 }

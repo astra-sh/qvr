@@ -234,6 +234,45 @@ func TestScan_KeepAllIngestsEverything(t *testing.T) {
 	}
 }
 
+// TestScan_KeepAllReingestsPreviouslySkipped pins #267: a session a prior plain
+// discover only *skipped* (skill-less under the gate) must still be recoverable
+// by a later --keep-all run, even though the file is stat-unchanged. The
+// stat-ledger short-circuit must not silence the broader policy.
+func TestScan_KeepAllReingestsPreviouslySkipped(t *testing.T) {
+	s := openStore(t)
+	root, _, plainFile := claudeStoreFixture(t)
+
+	// First pass without --keep-all: the plain session is skipped and the file
+	// is recorded as skipped_no_skill in the ledger.
+	rep := scanClaude(t, s, root, discover.Options{})
+	if ar := agentReport(t, rep, "claude"); ar.Ingested != 1 || ar.Skipped != 1 {
+		t.Fatalf("first pass = %+v, want ingested 1 / skipped 1", ar)
+	}
+
+	// Second pass WITH --keep-all on the unchanged tree: the previously-skipped
+	// file must be re-examined and ingested; the already-ingested skill file
+	// stays unchanged.
+	rep = scanClaude(t, s, root, discover.Options{KeepAll: true})
+	ar := agentReport(t, rep, "claude")
+	if ar.Ingested != 1 || ar.Unchanged != 1 || ar.Skipped != 0 {
+		t.Fatalf("keep-all rescan = %+v, want ingested 1 / unchanged 1 / skipped 0", ar)
+	}
+
+	// The previously-skipped session is now in the unified model, and its ledger
+	// row flipped from skipped to ingested.
+	sid := uuid.MustParse(plainSessionID)
+	if meta, err := s.GetSessionMeta(context.Background(), sid); err != nil || meta == nil {
+		t.Fatalf("recovered session missing from unified model: %v %v", meta, err)
+	}
+	ledger, err := s.GetScannedFiles(context.Background(), "claude")
+	if err != nil {
+		t.Fatalf("ledger: %v", err)
+	}
+	if got := ledger[plainFile]; got == nil || got.Status != store.ScanStatusIngested {
+		t.Errorf("plain file ledger = %+v, want ingested after keep-all rescan", got)
+	}
+}
+
 // TestScan_ErrorOutcomeRetriesUnchangedFile pins the no-error-caching rule: a
 // ledger row recorded as 'error' must NOT satisfy the stat gate — the file is
 // re-examined next scan even though its size/mtime are unchanged (document
@@ -278,5 +317,42 @@ func TestScan_DryRunPersistsNothing(t *testing.T) {
 	ledger, _ := s.GetScannedFiles(context.Background(), "claude")
 	if len(metas) != 0 || len(ledger) != 0 {
 		t.Errorf("dry-run persisted: %d metas, %d ledger rows; want 0/0", len(metas), len(ledger))
+	}
+}
+
+// TestScan_CwdScopeExcludesOtherProjects pins --cwd: a scoped scan records only
+// sessions whose working directory is at/under the scope, and a stray session
+// from another project is excluded WITHOUT a ledger entry (so a later unscoped
+// scan still considers it).
+func TestScan_CwdScopeExcludesOtherProjects(t *testing.T) {
+	s := openStore(t)
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	slug := filepath.Join(root, "-Users-x-proj")
+	const aID = "550e8400-e29b-41d4-a716-446655440000"
+	const bID = "660e8400-e29b-41d4-a716-446655440000"
+	userLine := func(sid, cwd string) string {
+		return `{"type":"user","sessionId":"` + sid + `","cwd":"` + cwd +
+			`","timestamp":"2026-06-02T00:00:00.000Z","message":{"role":"user","content":"x"}}`
+	}
+	writeLines(t, filepath.Join(slug, aID+".jsonl"), userLine(aID, "/work/projA"), scanWithSkill)
+	writeLines(t, filepath.Join(slug, bID+".jsonl"), userLine(bID, "/work/projB"), scanWithSkill)
+
+	rep := scanClaude(t, s, root, discover.Options{Cwd: "/work/projA"})
+	ar := agentReport(t, rep, "claude")
+	if ar.Ingested != 1 {
+		t.Fatalf("cwd scope must ingest only the in-scope session, ingested=%d", ar.Ingested)
+	}
+	if ar.Skipped != 0 {
+		t.Errorf("out-of-scope file must be excluded without a ledger entry, skipped=%d", ar.Skipped)
+	}
+
+	// Unscoped rescan still picks up the previously-excluded project (it was
+	// never ledgered).
+	rep2 := scanClaude(t, s, root, discover.Options{})
+	if ar2 := agentReport(t, rep2, "claude"); ar2.Ingested != 1 {
+		t.Errorf("unscoped rescan must now ingest the previously out-of-scope session, ingested=%d", ar2.Ingested)
 	}
 }
